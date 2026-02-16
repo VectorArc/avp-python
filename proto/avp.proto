@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package avp;
+
+// Metadata embedded in every AVP message, serialized via Protocol Buffers.
+message Metadata {
+  string model_id = 1;          // Model that produced the embedding, e.g. "all-MiniLM-L6-v2"
+  uint32 embedding_dim = 2;     // Dimensionality, e.g. 384
+  string data_type = 3;         // Numpy dtype string: "float32", "float16"
+  optional string compression = 4;  // Compression algorithm if compressed, e.g. "zstd"
+  optional string agent_id = 5;     // Sender agent identifier
+  optional string task_id = 6;      // Optional task/request correlation ID
+  map<string, string> extra = 7;    // Extensible key-value pairs
+}
+
+// Response returned by the /avp/v1/transmit endpoint.
+message TransmitResponse {
+  bool success = 1;
+  optional string message = 2;      // Human-readable status
+  optional string request_id = 3;   // Echo back task_id or generated ID
+  map<string, string> extra = 4;
+}

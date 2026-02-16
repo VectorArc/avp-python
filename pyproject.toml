@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "avp"
+dynamic = ["version"]
+description = "Python SDK for the Agent Vector Protocol (AVP)"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+authors = [{ name = "VectorArc" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+    "protobuf>=4.21",
+    "zstandard>=0.21",
+    "httpx[http2]>=0.25",
+]
+
+[project.optional-dependencies]
+server = ["fastapi>=0.104", "uvicorn[standard]>=0.24"]
+demo = ["sentence-transformers>=2.2", "torch>=2.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "ruff>=0.1",
+    "grpcio-tools>=1.59",
+    "fastapi>=0.104",
+    "uvicorn[standard]>=0.24",
+    "httpx[http2]>=0.25",
+]
+all = ["avp[server,demo,dev]"]
+
+[tool.hatch.version]
+path = "src/avp/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/avp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py39"
