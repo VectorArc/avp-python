@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 server = ["fastapi>=0.104", "uvicorn[standard]>=0.24"]
+latent = ["torch>=2.0", "transformers>=4.36"]
 demo = ["sentence-transformers>=2.2", "torch>=2.0"]
 dev = [
     "pytest>=7.0",
@@ -36,7 +37,7 @@ dev = [
     "uvicorn[standard]>=0.24",
     "httpx[http2]>=0.25",
 ]
-all = ["avp[server,demo,dev]"]
+all = ["avp[server,latent,demo,dev]"]
 
 [tool.hatch.version]
 path = "src/avp/version.py"
@@ -47,6 +48,10 @@ packages = ["src/avp"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "requires_torch: marks tests that require torch",
+    "requires_transformers: marks tests that require transformers",
+]
 
 [tool.ruff]
 line-length = 99

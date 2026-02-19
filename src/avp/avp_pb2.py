@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tavp.proto\x12\x03\x61vp\"\x8d\x02\n\x08Metadata\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x15\n\rembedding_dim\x18\x02 \x01(\r\x12\x11\n\tdata_type\x18\x03 \x01(\t\x12\x18\n\x0b\x63ompression\x18\x04 \x01(\tH\x00\x88\x01\x01\x12\x15\n\x08\x61gent_id\x18\x05 \x01(\tH\x01\x88\x01\x01\x12\x14\n\x07task_id\x18\x06 \x01(\tH\x02\x88\x01\x01\x12\'\n\x05\x65xtra\x18\x07 \x03(\x0b\x32\x18.avp.Metadata.ExtraEntry\x1a,\n\nExtraEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x42\x0e\n\x0c_compressionB\x0b\n\t_agent_idB\n\n\x08_task_id\"\xcc\x01\n\x10TransmitResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x14\n\x07message\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x17\n\nrequest_id\x18\x03 \x01(\tH\x01\x88\x01\x01\x12/\n\x05\x65xtra\x18\x04 \x03(\x0b\x32 .avp.TransmitResponse.ExtraEntry\x1a,\n\nExtraEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x42\n\n\x08_messageB\r\n\x0b_request_idb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tavp.proto\x12\x03\x61vp\"\xab\x04\n\x08Metadata\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x17\n\x0fsource_agent_id\x18\x02 \x01(\t\x12\x17\n\x0ftarget_agent_id\x18\x03 \x01(\t\x12\x10\n\x08model_id\x18\x04 \x01(\t\x12\x12\n\nhidden_dim\x18\x05 \x01(\r\x12\x12\n\nnum_layers\x18\x06 \x01(\r\x12&\n\x0cpayload_type\x18\x07 \x01(\x0e\x32\x10.avp.PayloadType\x12\x1c\n\x05\x64type\x18\x08 \x01(\x0e\x32\r.avp.DataType\x12\x14\n\x0ctensor_shape\x18\t \x03(\r\x12$\n\x04mode\x18\n \x01(\x0e\x32\x16.avp.CommunicationMode\x12\x18\n\x0b\x63ompression\x18\x0b \x01(\tH\x00\x88\x01\x01\x12\x18\n\x10\x63onfidence_score\x18\x0c \x01(\x02\x12\x12\n\navp_map_id\x18\r \x01(\t\x12\'\n\x05\x65xtra\x18\x0e \x03(\x0b\x32\x18.avp.Metadata.ExtraEntry\x12\x15\n\rembedding_dim\x18\x64 \x01(\r\x12\x11\n\tdata_type\x18\x65 \x01(\t\x12\x15\n\x08\x61gent_id\x18\x66 \x01(\tH\x01\x88\x01\x01\x12\x14\n\x07task_id\x18g \x01(\tH\x02\x88\x01\x01\x1a,\n\nExtraEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x42\x0e\n\x0c_compressionB\x0b\n\t_agent_idB\n\n\x08_task_id\"S\n\x0bHybridChunk\x12\"\n\nchunk_type\x18\x01 \x01(\x0e\x32\x0e.avp.ChunkType\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x12\n\nconfidence\x18\x03 \x01(\x02\"1\n\rHybridPayload\x12 \n\x06\x63hunks\x18\x01 \x03(\x0b\x32\x10.avp.HybridChunk\"O\n\x0f\x46\x61llbackRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x18\n\x10perplexity_score\x18\x03 \x01(\x02\"\xcc\x01\n\x10TransmitResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x14\n\x07message\x18\x02 \x01(\tH\x00\x88\x01\x01\x12\x17\n\nrequest_id\x18\x03 \x01(\tH\x01\x88\x01\x01\x12/\n\x05\x65xtra\x18\x04 \x03(\x0b\x32 .avp.TransmitResponse.ExtraEntry\x1a,\n\nExtraEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x42\n\n\x08_messageB\r\n\x0b_request_id*<\n\x0bPayloadType\x12\x10\n\x0cHIDDEN_STATE\x10\x00\x12\x0c\n\x08KV_CACHE\x10\x01\x12\r\n\tEMBEDDING\x10\x02*:\n\x11\x43ommunicationMode\x12\n\n\x06LATENT\x10\x00\x12\n\n\x06HYBRID\x10\x01\x12\r\n\tJSON_MODE\x10\x02*<\n\x08\x44\x61taType\x12\x0b\n\x07\x46LOAT32\x10\x00\x12\x0b\n\x07\x46LOAT16\x10\x01\x12\x0c\n\x08\x42\x46LOAT16\x10\x02\x12\x08\n\x04INT8\x10\x03*-\n\tChunkType\x12\x0e\n\nTEXT_CHUNK\x10\x00\x12\x10\n\x0cLATENT_CHUNK\x10\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,12 +35,26 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_METADATA_EXTRAENTRY']._serialized_options = b'8\001'
   _globals['_TRANSMITRESPONSE_EXTRAENTRY']._loaded_options = None
   _globals['_TRANSMITRESPONSE_EXTRAENTRY']._serialized_options = b'8\001'
+  _globals['_PAYLOADTYPE']._serialized_start=1000
+  _globals['_PAYLOADTYPE']._serialized_end=1060
+  _globals['_COMMUNICATIONMODE']._serialized_start=1062
+  _globals['_COMMUNICATIONMODE']._serialized_end=1120
+  _globals['_DATATYPE']._serialized_start=1122
+  _globals['_DATATYPE']._serialized_end=1182
+  _globals['_CHUNKTYPE']._serialized_start=1184
+  _globals['_CHUNKTYPE']._serialized_end=1229
   _globals['_METADATA']._serialized_start=19
-  _globals['_METADATA']._serialized_end=288
-  _globals['_METADATA_EXTRAENTRY']._serialized_start=203
-  _globals['_METADATA_EXTRAENTRY']._serialized_end=247
-  _globals['_TRANSMITRESPONSE']._serialized_start=291
-  _globals['_TRANSMITRESPONSE']._serialized_end=495
-  _globals['_TRANSMITRESPONSE_EXTRAENTRY']._serialized_start=203
-  _globals['_TRANSMITRESPONSE_EXTRAENTRY']._serialized_end=247
+  _globals['_METADATA']._serialized_end=574
+  _globals['_METADATA_EXTRAENTRY']._serialized_start=489
+  _globals['_METADATA_EXTRAENTRY']._serialized_end=533
+  _globals['_HYBRIDCHUNK']._serialized_start=576
+  _globals['_HYBRIDCHUNK']._serialized_end=659
+  _globals['_HYBRIDPAYLOAD']._serialized_start=661
+  _globals['_HYBRIDPAYLOAD']._serialized_end=710
+  _globals['_FALLBACKREQUEST']._serialized_start=712
+  _globals['_FALLBACKREQUEST']._serialized_end=791
+  _globals['_TRANSMITRESPONSE']._serialized_start=794
+  _globals['_TRANSMITRESPONSE']._serialized_end=998
+  _globals['_TRANSMITRESPONSE_EXTRAENTRY']._serialized_start=489
+  _globals['_TRANSMITRESPONSE_EXTRAENTRY']._serialized_end=533
 # @@protoc_insertion_point(module_scope)

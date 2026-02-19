@@ -2,21 +2,93 @@ syntax = "proto3";
 
 package avp;
 
-// Metadata embedded in every AVP message, serialized via Protocol Buffers.
-message Metadata {
-  string model_id = 1;          // Model that produced the embedding, e.g. "all-MiniLM-L6-v2"
-  uint32 embedding_dim = 2;     // Dimensionality, e.g. 384
-  string data_type = 3;         // Numpy dtype string: "float32", "float16"
-  optional string compression = 4;  // Compression algorithm if compressed, e.g. "zstd"
-  optional string agent_id = 5;     // Sender agent identifier
-  optional string task_id = 6;      // Optional task/request correlation ID
-  map<string, string> extra = 7;    // Extensible key-value pairs
+// --- Enums ---
+
+enum PayloadType {
+  HIDDEN_STATE = 0;
+  KV_CACHE = 1;
+  EMBEDDING = 2;
 }
 
-// Response returned by the /avp/v1/transmit endpoint.
+enum CommunicationMode {
+  LATENT = 0;
+  HYBRID = 1;
+  JSON_MODE = 2;  // "JSON" is reserved in some protobuf implementations
+}
+
+enum DataType {
+  FLOAT32 = 0;
+  FLOAT16 = 1;
+  BFLOAT16 = 2;
+  INT8 = 3;
+}
+
+enum ChunkType {
+  TEXT_CHUNK = 0;
+  LATENT_CHUNK = 1;
+}
+
+// --- v0.2.0 Metadata ---
+
+// Metadata embedded in every AVP v0.2.0 message, serialized via Protocol Buffers.
+message Metadata {
+  // Identity
+  string session_id = 1;
+  string source_agent_id = 2;
+  string target_agent_id = 3;
+  string model_id = 4;
+
+  // Model structure
+  uint32 hidden_dim = 5;
+  uint32 num_layers = 6;
+
+  // Payload info
+  PayloadType payload_type = 7;
+  DataType dtype = 8;
+  repeated uint32 tensor_shape = 9;
+
+  // Communication
+  CommunicationMode mode = 10;
+  optional string compression = 11;
+  float confidence_score = 12;
+  string avp_map_id = 13;
+
+  // Extensible
+  map<string, string> extra = 14;
+
+  // v0.1.0 backward-compat fields (deprecated, kept for wire compat)
+  uint32 embedding_dim = 100;  // Use hidden_dim instead
+  string data_type = 101;      // Use dtype enum instead
+  optional string agent_id = 102;  // Use source_agent_id instead
+  optional string task_id = 103;   // Use extra["task_id"] instead
+}
+
+// --- Hybrid payload ---
+
+message HybridChunk {
+  ChunkType chunk_type = 1;
+  bytes data = 2;             // Text (UTF-8) or latent (raw tensor bytes)
+  float confidence = 3;       // Per-chunk confidence
+}
+
+message HybridPayload {
+  repeated HybridChunk chunks = 1;
+}
+
+// --- Fallback ---
+
+message FallbackRequest {
+  string session_id = 1;
+  string reason = 2;
+  float perplexity_score = 3;
+}
+
+// --- Responses ---
+
+// Response returned by the /avp/v2/transmit endpoint.
 message TransmitResponse {
   bool success = 1;
-  optional string message = 2;      // Human-readable status
-  optional string request_id = 3;   // Echo back task_id or generated ID
+  optional string message = 2;
+  optional string request_id = 3;
   map<string, string> extra = 4;
 }

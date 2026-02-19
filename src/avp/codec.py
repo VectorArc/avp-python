@@ -1,19 +1,17 @@
-"""AVP binary codec — encode and decode embeddings.
+"""AVP binary codec — encode and decode latent payloads.
 
 Wire format:
     Bytes 0-1:    Magic (0x4156)
     Byte 2:       Version (0x01)
-    Byte 3:       Flags (bit 0 = compressed)
-    Bytes 4-7:    Payload length (uint32 LE) — metadata + embedding bytes
+    Byte 3:       Flags (bit 0=compressed, bit 1=hybrid, bit 2=has_map, bit 3=kv_cache)
+    Bytes 4-7:    Payload length (uint32 LE) — metadata + tensor bytes
     Bytes 8-11:   Metadata length (uint32 LE)
     Bytes 12..N:  Protobuf-encoded Metadata
-    Bytes N..:    Raw embedding bytes (optionally zstd-compressed)
+    Bytes N..:    Raw tensor bytes (optionally zstd-compressed)
 """
 
-from __future__ import annotations
-
 import struct
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 
@@ -21,76 +19,83 @@ from . import avp_pb2
 from .compression import compress, decompress
 from .errors import DecodeError, InvalidMagicError, UnsupportedVersionError
 from .types import (
+    FLAG_COMPRESSED,
+    FLAG_HAS_MAP,
+    FLAG_HYBRID,
+    FLAG_KV_CACHE,
     HEADER_SIZE,
     MAGIC,
     PROTOCOL_VERSION,
     AVPHeader,
     AVPMessage,
     AVPMetadata,
+    CommunicationMode,
     CompressionLevel,
+    DataType,
+    PayloadType,
 )
-from .utils import bytes_to_embedding, embedding_to_bytes
+from .utils import embedding_to_bytes
 
 # struct format: 2s magic, B version, B flags, I payload_len, I metadata_len
 _HEADER_FMT = "<2sBBII"
 
 
 def encode(
-    embedding: np.ndarray,
-    model_id: str = "",
-    data_type: Optional[str] = None,
+    payload: bytes,
+    metadata: AVPMetadata,
     compression: CompressionLevel = CompressionLevel.NONE,
-    agent_id: Optional[str] = None,
-    task_id: Optional[str] = None,
-    extra: Optional[Dict[str, str]] = None,
 ) -> bytes:
-    """Encode a numpy embedding into an AVP binary message.
+    """Encode a binary payload + metadata into an AVP message.
 
     Args:
-        embedding: 1-D numpy array (float32 or float16).
-        model_id: Identifier of the model that produced the embedding.
-        data_type: Override dtype string; defaults to embedding.dtype.
-        compression: Compression level (NONE, FAST, BALANCED, MAX).
-        agent_id: Optional sender agent ID.
-        task_id: Optional correlation ID.
-        extra: Optional extra key-value metadata.
+        payload: Raw tensor bytes (hidden state, KV-cache, or embedding).
+        metadata: AVPMetadata with all fields set.
+        compression: Compression level for the payload.
 
     Returns:
         Raw bytes of the AVP message.
     """
-    if embedding.ndim != 1:
-        raise ValueError(f"Embedding must be 1-D, got {embedding.ndim}-D")
-
-    dtype_str = data_type or str(embedding.dtype)
-
     # Build protobuf metadata
     meta_pb = avp_pb2.Metadata(
-        model_id=model_id,
-        embedding_dim=embedding.shape[0],
-        data_type=dtype_str,
+        session_id=metadata.session_id,
+        source_agent_id=metadata.source_agent_id,
+        target_agent_id=metadata.target_agent_id,
+        model_id=metadata.model_id,
+        hidden_dim=metadata.hidden_dim,
+        num_layers=metadata.num_layers,
+        payload_type=int(metadata.payload_type),
+        dtype=int(metadata.dtype),
+        tensor_shape=list(metadata.tensor_shape),
+        mode=int(metadata.mode),
+        confidence_score=metadata.confidence_score,
+        avp_map_id=metadata.avp_map_id,
     )
     if compression != CompressionLevel.NONE:
         meta_pb.compression = "zstd"
-    if agent_id:
-        meta_pb.agent_id = agent_id
-    if task_id:
-        meta_pb.task_id = task_id
-    if extra:
-        for k, v in extra.items():
+    if metadata.extra:
+        for k, v in metadata.extra.items():
             meta_pb.extra[k] = v
 
     meta_bytes = meta_pb.SerializeToString()
 
-    # Embedding → raw bytes, optionally compressed
-    emb_bytes = embedding_to_bytes(embedding)
+    # Payload, optionally compressed
+    payload_bytes = payload
     if compression != CompressionLevel.NONE:
-        emb_bytes = compress(emb_bytes, level=compression)
+        payload_bytes = compress(payload_bytes, level=compression)
 
-    # Payload = metadata + embedding
-    payload_length = len(meta_bytes) + len(emb_bytes)
+    # Total payload = metadata + tensor bytes
+    total_payload_length = len(meta_bytes) + len(payload_bytes)
 
     # Flags
-    flags = 0x01 if compression != CompressionLevel.NONE else 0x00
+    flags = 0
+    if compression != CompressionLevel.NONE:
+        flags |= FLAG_COMPRESSED
+    if metadata.mode == CommunicationMode.HYBRID:
+        flags |= FLAG_HYBRID
+    if metadata.avp_map_id:
+        flags |= FLAG_HAS_MAP
+    if metadata.payload_type == PayloadType.KV_CACHE:
+        flags |= FLAG_KV_CACHE
 
     # Pack header
     header = struct.pack(
@@ -98,11 +103,11 @@ def encode(
         MAGIC,
         PROTOCOL_VERSION,
         flags,
-        payload_length,
+        total_payload_length,
         len(meta_bytes),
     )
 
-    return header + meta_bytes + emb_bytes
+    return header + meta_bytes + payload_bytes
 
 
 def decode(data: bytes) -> AVPMessage:
@@ -112,7 +117,7 @@ def decode(data: bytes) -> AVPMessage:
         data: Raw bytes of an AVP message.
 
     Returns:
-        Decoded AVPMessage with header, metadata, and embedding.
+        Decoded AVPMessage with header, metadata, and payload.
 
     Raises:
         InvalidMagicError: If magic bytes don't match.
@@ -137,31 +142,38 @@ def decode(data: bytes) -> AVPMessage:
             f"Message truncated: expected {expected} bytes, got {len(data)}"
         )
 
-    # Parse metadata
+    # Parse protobuf metadata
     meta_start = HEADER_SIZE
     meta_end = meta_start + metadata_length
     meta_pb = avp_pb2.Metadata()
     meta_pb.ParseFromString(data[meta_start:meta_end])
 
-    metadata = AVPMetadata(
-        model_id=meta_pb.model_id,
-        embedding_dim=meta_pb.embedding_dim,
-        data_type=meta_pb.data_type,
-        compression=meta_pb.compression if meta_pb.HasField("compression") else None,
-        agent_id=meta_pb.agent_id if meta_pb.HasField("agent_id") else None,
-        task_id=meta_pb.task_id if meta_pb.HasField("task_id") else None,
-        extra=dict(meta_pb.extra),
-    )
-
-    # Extract embedding bytes
-    emb_bytes = data[meta_end:meta_start + payload_length]
+    # Extract raw payload bytes
+    raw_payload = data[meta_end:meta_start + payload_length]
 
     # Decompress if needed
-    is_compressed = bool(flags & 0x01)
+    is_compressed = bool(flags & FLAG_COMPRESSED)
     if is_compressed:
-        emb_bytes = decompress(emb_bytes)
+        raw_payload = decompress(raw_payload)
 
-    embedding = bytes_to_embedding(emb_bytes, metadata.data_type, metadata.embedding_dim)
+    dtype_enum = DataType(meta_pb.dtype) if meta_pb.dtype in DataType.__members__.values() else DataType.FLOAT32
+
+    metadata = AVPMetadata(
+        session_id=meta_pb.session_id,
+        source_agent_id=meta_pb.source_agent_id,
+        target_agent_id=meta_pb.target_agent_id,
+        model_id=meta_pb.model_id,
+        hidden_dim=meta_pb.hidden_dim,
+        num_layers=meta_pb.num_layers,
+        payload_type=PayloadType(meta_pb.payload_type),
+        dtype=dtype_enum,
+        tensor_shape=tuple(meta_pb.tensor_shape),
+        mode=CommunicationMode(meta_pb.mode),
+        compression="zstd" if is_compressed else None,
+        confidence_score=meta_pb.confidence_score,
+        avp_map_id=meta_pb.avp_map_id,
+        extra=dict(meta_pb.extra),
+    )
 
     header = AVPHeader(
         magic=magic,
@@ -174,38 +186,31 @@ def decode(data: bytes) -> AVPMessage:
     return AVPMessage(
         header=header,
         metadata=metadata,
-        embedding=embedding,
+        payload=raw_payload,
         raw_size=len(data),
     )
 
 
-# --- Convenience wrappers ---
+# --- Convenience encoders ---
 
 
-def encode_simple(
-    embedding: np.ndarray,
-    model_id: str = "",
-    compress: bool = False,
+def encode_hidden_state(
+    hidden_state: np.ndarray,
+    metadata: AVPMetadata,
+    compression: CompressionLevel = CompressionLevel.NONE,
 ) -> bytes:
-    """Simplified encode: just embedding + model_id + optional compression."""
-    level = CompressionLevel.BALANCED if compress else CompressionLevel.NONE
-    return encode(embedding, model_id=model_id, compression=level)
+    """Encode a hidden state tensor into an AVP message."""
+    metadata.payload_type = PayloadType.HIDDEN_STATE
+    metadata.tensor_shape = hidden_state.shape
+    payload = embedding_to_bytes(hidden_state)
+    return encode(payload, metadata, compression)
 
 
-def decode_simple(data: bytes) -> Tuple[np.ndarray, dict]:
-    """Simplified decode: returns (embedding, metadata_dict)."""
-    msg = decode(data)
-    meta_dict = {
-        "model_id": msg.metadata.model_id,
-        "embedding_dim": msg.metadata.embedding_dim,
-        "data_type": msg.metadata.data_type,
-    }
-    if msg.metadata.compression:
-        meta_dict["compression"] = msg.metadata.compression
-    if msg.metadata.agent_id:
-        meta_dict["agent_id"] = msg.metadata.agent_id
-    if msg.metadata.task_id:
-        meta_dict["task_id"] = msg.metadata.task_id
-    if msg.metadata.extra:
-        meta_dict["extra"] = msg.metadata.extra
-    return msg.embedding, meta_dict
+def encode_kv_cache(
+    kv_bytes: bytes,
+    metadata: AVPMetadata,
+    compression: CompressionLevel = CompressionLevel.NONE,
+) -> bytes:
+    """Encode serialized KV-cache bytes into an AVP message."""
+    metadata.payload_type = PayloadType.KV_CACHE
+    return encode(kv_bytes, metadata, compression)

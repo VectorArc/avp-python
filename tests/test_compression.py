@@ -5,7 +5,23 @@ import pytest
 
 import avp
 from avp.compression import compress, decompress
-from avp.types import CompressionLevel
+from avp.types import AVPMetadata, CompressionLevel, DataType, PayloadType, _STR_TO_DTYPE
+from avp.utils import embedding_to_bytes
+
+
+def _encode_embedding(emb, model_id="", compression=CompressionLevel.NONE):
+    """Helper: encode a 1-D numpy embedding with v0.2.0 API."""
+    dtype_str = str(emb.dtype)
+    dtype_enum = _STR_TO_DTYPE.get(dtype_str, DataType.FLOAT32)
+    metadata = AVPMetadata(
+        model_id=model_id,
+        hidden_dim=emb.shape[0],
+        payload_type=PayloadType.EMBEDDING,
+        dtype=dtype_enum,
+        tensor_shape=emb.shape,
+    )
+    payload = embedding_to_bytes(emb)
+    return avp.encode(payload, metadata, compression)
 
 
 def test_compress_decompress_roundtrip():
@@ -39,7 +55,7 @@ def test_codec_compression_levels(dim):
     emb = np.random.randn(dim).astype(np.float32)
 
     for level in CompressionLevel:
-        data = avp.encode(emb, model_id="test", compression=level)
+        data = _encode_embedding(emb, model_id="test", compression=level)
         msg = avp.decode(data)
         np.testing.assert_array_equal(emb, msg.embedding)
 
@@ -52,6 +68,6 @@ def test_codec_compression_levels(dim):
 def test_compressed_smaller_than_uncompressed():
     """Compressed output should be smaller for sparse/structured data."""
     emb = np.zeros(4096, dtype=np.float32)  # All-zeros compresses extremely well
-    raw = avp.encode(emb, compression=CompressionLevel.NONE)
-    compressed = avp.encode(emb, compression=CompressionLevel.FAST)
+    raw = _encode_embedding(emb, compression=CompressionLevel.NONE)
+    compressed = _encode_embedding(emb, compression=CompressionLevel.FAST)
     assert len(compressed) < len(raw)

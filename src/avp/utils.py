@@ -1,9 +1,7 @@
 """Utility helpers for AVP encoding."""
 
-from __future__ import annotations
-
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -23,7 +21,7 @@ def bytes_to_embedding(data: bytes, dtype: str, dim: int) -> np.ndarray:
     return arr.copy()  # Return a writable copy
 
 
-def embedding_to_json(embedding: np.ndarray, metadata: Dict[str, Any] | None = None) -> bytes:
+def embedding_to_json(embedding: np.ndarray, metadata: Optional[Dict[str, Any]] = None) -> bytes:
     """Serialize an embedding as JSON (for benchmark comparison)."""
     payload: Dict[str, Any] = {"embedding": embedding.tolist()}
     if metadata:

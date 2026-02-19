@@ -1,7 +1,5 @@
 """Zstandard compression wrappers for AVP."""
 
-from __future__ import annotations
-
 import zstandard as zstd
 
 from .types import CompressionLevel
