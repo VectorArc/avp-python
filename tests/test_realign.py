@@ -133,6 +133,52 @@ def test_apply_realignment(tiny_model):
         assert abs(n.item() - target_norm.item()) < 0.01
 
 
+def test_compute_target_norm(tiny_model):
+    import torch
+    from avp.realign import compute_target_norm
+
+    target_norm = compute_target_norm(tiny_model)
+    assert target_norm.ndim == 0
+    assert target_norm.item() > 0
+
+    # Should match the mean norm of input embedding vectors
+    input_weight = tiny_model.get_input_embeddings().weight.float()
+    expected = input_weight.norm(dim=1).mean()
+    assert abs(target_norm.item() - expected.item()) < 1e-5
+
+
+def test_normalize_to_target(tiny_model):
+    import torch
+    from avp.realign import compute_target_norm, normalize_to_target
+
+    target_norm = compute_target_norm(tiny_model)
+
+    # Hidden states with large norms (simulating last layer output)
+    hidden = torch.randn(2, 8) * 50.0  # norms ~50+
+    normalized = normalize_to_target(hidden, target_norm)
+
+    assert normalized.shape == hidden.shape
+    assert normalized.dtype == hidden.dtype
+
+    # Normalized vectors should have norm close to target_norm
+    norms = normalized.norm(dim=-1)
+    for n in norms:
+        assert abs(n.item() - target_norm.item()) < 0.01
+
+
+def test_normalize_preserves_direction():
+    import torch
+    from avp.realign import normalize_to_target
+
+    hidden = torch.tensor([[3.0, 4.0]])  # norm = 5
+    target_norm = torch.tensor(1.0)
+    normalized = normalize_to_target(hidden, target_norm)
+
+    # Direction should be preserved
+    cos_sim = torch.nn.functional.cosine_similarity(hidden, normalized)
+    assert cos_sim.item() > 0.999
+
+
 def test_save_load_realignment_matrix(tiny_model):
     import torch
     from avp.realign import (
@@ -161,6 +207,36 @@ def test_load_nonexistent_returns_none():
     with tempfile.TemporaryDirectory() as tmpdir:
         result = load_realignment_matrix("nonexistent", cache_dir=Path(tmpdir))
         assert result is None
+
+
+def test_vocab_size_mismatch():
+    """compute_realignment_matrix should raise a clear error on vocab mismatch."""
+    import torch
+    import torch.nn as nn
+    from avp.realign import compute_realignment_matrix
+    from avp.errors import RealignmentError
+
+    class MismatchModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = nn.Embedding(16, 8)  # vocab=16
+            self.lm_head = nn.Linear(8, 20, bias=False)  # vocab=20 (mismatch!)
+            self.config = type("Config", (), {
+                "tie_word_embeddings": False,
+                "to_dict": lambda self_: {"model_type": "mismatch"},
+            })()
+
+        def get_input_embeddings(self):
+            return self.embed_tokens
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+        def parameters(self):
+            yield from super().parameters()
+
+    with pytest.raises(RealignmentError, match="Vocab size mismatch"):
+        compute_realignment_matrix(MismatchModel())
 
 
 def test_get_or_compute(tiny_model):

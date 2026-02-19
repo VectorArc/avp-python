@@ -54,6 +54,39 @@ def needs_realignment(model_or_config: Any) -> bool:
     return not config_dict.get("tie_word_embeddings", False)
 
 
+def compute_target_norm(model: Any, device: Optional[str] = None) -> Any:
+    """Compute target norm from input embeddings.
+
+    This is needed even for tied-weight models: hidden states from the last
+    transformer layer have different norms than input embeddings, so we
+    always normalize to target_norm before injecting via inputs_embeds.
+
+    Args:
+        model: HuggingFace PreTrainedModel.
+        device: Target device. Defaults to model's device.
+
+    Returns:
+        Scalar tensor: mean L2 norm of input embedding vectors.
+    """
+    torch = _require_torch()
+
+    input_embeds = (
+        model.get_input_embeddings()
+        if hasattr(model, "get_input_embeddings")
+        else None
+    )
+    if input_embeds is None or not hasattr(input_embeds, "weight"):
+        raise RealignmentError(
+            "Cannot compute target norm: input embedding weights not accessible."
+        )
+
+    if device is None:
+        device = str(next(model.parameters()).device)
+
+    input_weight = input_embeds.weight.detach().to(device=device, dtype=torch.float32)
+    return input_weight.norm(dim=1).mean().detach()
+
+
 def compute_realignment_matrix(
     model: Any,
     lambda_reg: float = 1e-5,
@@ -104,6 +137,13 @@ def compute_realignment_matrix(
     input_weight = input_embeds.weight.detach().to(device=device, dtype=torch.float32)
     output_weight = output_embeds.weight.detach().to(device=device, dtype=torch.float32)
 
+    if input_weight.shape[0] != output_weight.shape[0]:
+        raise RealignmentError(
+            f"Vocab size mismatch: input embeddings have {input_weight.shape[0]} rows, "
+            f"output embeddings have {output_weight.shape[0]} rows. "
+            f"Call model.resize_token_embeddings() to align them."
+        )
+
     # Gram matrix: E_out^T E_out + λI
     gram = torch.matmul(output_weight.T, output_weight)
     reg = lambda_reg * torch.eye(gram.shape[0], device=gram.device, dtype=gram.dtype)
@@ -119,6 +159,31 @@ def compute_realignment_matrix(
     target_norm = input_weight.norm(dim=1).mean().detach()
 
     return realign_matrix, target_norm
+
+
+def normalize_to_target(hidden_state: Any, target_norm: Any) -> Any:
+    """Normalize hidden states to target norm.
+
+    This is needed for ALL models (tied and untied). Hidden states from the
+    last transformer layer have different norms than input embeddings.
+    Following LatentMAS, we always normalize before injecting via inputs_embeds.
+
+    Args:
+        hidden_state: Tensor of shape [..., hidden_dim].
+        target_norm: Target norm scalar.
+
+    Returns:
+        Normalized tensor of same shape and dtype as input.
+    """
+    torch = _require_torch()
+
+    original_dtype = hidden_state.dtype
+    hidden_fp32 = hidden_state.to(torch.float32)
+
+    current_norm = hidden_fp32.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    normalized = hidden_fp32 * (target_norm / current_norm)
+
+    return normalized.to(original_dtype)
 
 
 def apply_realignment(

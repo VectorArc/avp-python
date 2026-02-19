@@ -10,7 +10,13 @@ from typing import Any, List, Optional, Tuple
 
 from ..errors import EngineNotAvailableError, RealignmentError
 from ..handshake import compute_model_hash, extract_model_identity
-from ..realign import apply_realignment, get_or_compute_realignment, needs_realignment
+from ..realign import (
+    apply_realignment,
+    compute_target_norm,
+    get_or_compute_realignment,
+    needs_realignment,
+    normalize_to_target,
+)
 from ..types import ModelIdentity
 from .base import EngineConnector
 
@@ -45,7 +51,7 @@ def _past_length(past_kv: Any) -> int:
     if isinstance(past_kv, (tuple, list)) and len(past_kv) > 0:
         first = past_kv[0]
         if isinstance(first, (tuple, list)) and len(first) > 0:
-            return first[0].shape[2]
+            return first[0].shape[-2]
     return 0
 
 
@@ -85,9 +91,13 @@ class HuggingFaceConnector(EngineConnector):
         else:
             self.device = str(next(self.model.parameters()).device)
 
-        # Ensure pad token
+        # Ensure pad token (following LatentMAS: try eos first, then add <pad>)
         if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+            if self.tokenizer.eos_token_id is not None:
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+            else:
+                self.tokenizer.add_special_tokens({"pad_token": "<pad>"})
+                self.model.resize_token_embeddings(len(self.tokenizer))
 
         self._model_hash = compute_model_hash(self.model.config.to_dict())
         self._identity = extract_model_identity(self.model)
@@ -216,6 +226,17 @@ class HuggingFaceConnector(EngineConnector):
             )
         return self._w_realign, self._target_norm
 
+    def _ensure_target_norm(self) -> Any:
+        """Get target norm, computing if needed.
+
+        Target norm is needed for ALL models (tied and untied) because hidden
+        states from the last transformer layer have different norms than input
+        embeddings. LatentMAS always normalizes, even without the projection.
+        """
+        if self._target_norm is None:
+            self._target_norm = compute_target_norm(self.model, device=self.device)
+        return self._target_norm
+
     def generate_latent_steps(
         self,
         input_ids: Any,
@@ -227,9 +248,14 @@ class HuggingFaceConnector(EngineConnector):
 
         Performs `latent_steps` forward passes, each time:
         1. Extract hidden state from last token
-        2. Apply realignment (if needed)
-        3. Feed realigned hidden state as inputs_embeds for next step
+        2. Apply realignment projection (untied models) or just normalize (tied models)
+        3. Feed aligned hidden state as inputs_embeds for next step
         4. Accumulate KV-cache
+
+        Normalization to target_norm is ALWAYS applied, even for tied-weight
+        models. This matches LatentMAS behavior: hidden states from the last
+        transformer layer have different norms than input embeddings, and
+        injecting un-normalized vectors gives the model out-of-distribution inputs.
 
         Ported from LatentMAS models.py:276-350.
 
@@ -277,17 +303,21 @@ class HuggingFaceConnector(EngineConnector):
         past = outputs.past_key_values
         last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
 
-        # Ensure realignment matrix
+        # Determine realignment strategy
         do_realign = self.needs_realignment()
         if do_realign:
             w_realign, target_norm = self._ensure_realignment()
+        else:
+            # Tied models: skip projection but still normalize to target_norm
+            target_norm = self._ensure_target_norm()
 
         # Latent loop
         for step in range(latent_steps):
             if do_realign:
                 latent_vec = apply_realignment(last_hidden, w_realign, target_norm)
             else:
-                latent_vec = last_hidden
+                # Tied models: normalize only (no projection needed)
+                latent_vec = normalize_to_target(last_hidden, target_norm)
 
             latent_embed = latent_vec.unsqueeze(1)  # [B, 1, D]
 
