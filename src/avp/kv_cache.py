@@ -122,9 +122,14 @@ def serialize_kv_cache(past_key_values: Any) -> Tuple[bytes, KVCacheHeader]:
     # Serialize all K/V tensors
     parts = [header.to_bytes()]
     for k, v in layers:
-        # Squeeze batch dim, ensure contiguous
+        # Squeeze batch dim, ensure contiguous, move to CPU
         k_flat = k.squeeze(0).contiguous().cpu()
         v_flat = v.squeeze(0).contiguous().cpu()
+        # bfloat16 not supported by numpy — view as int16 (same 2-byte layout)
+        # to get raw bytes without any value conversion
+        if k_flat.dtype == torch.bfloat16:
+            k_flat = k_flat.view(torch.int16)
+            v_flat = v_flat.view(torch.int16)
         parts.append(k_flat.numpy().tobytes())
         parts.append(v_flat.numpy().tobytes())
 
@@ -145,15 +150,11 @@ def deserialize_kv_cache(
         Tuple of (past_key_values as legacy tuple, KVCacheHeader).
     """
     torch = _require_torch()
-    import numpy as np
 
     header = KVCacheHeader.from_bytes(data)
     offset = _KV_HEADER_SIZE
 
-    # Compute size per K or V tensor: num_kv_heads * seq_len * head_dim * dtype_size
-    np_dtype = np.dtype(header.dtype)
-    tensor_elements = header.num_kv_heads * header.seq_len * header.head_dim
-    tensor_bytes = tensor_elements * np_dtype.itemsize
+    import numpy as np
 
     torch_dtype_map = {
         "float32": torch.float32,
@@ -161,6 +162,15 @@ def deserialize_kv_cache(
         "bfloat16": torch.bfloat16,
     }
     torch_dtype = torch_dtype_map.get(header.dtype, torch.float16)
+
+    # Compute size per K or V tensor in bytes
+    tensor_elements = header.num_kv_heads * header.seq_len * header.head_dim
+    bytes_per_element = _DTYPE_SIZES.get(header.dtype, 2)
+    tensor_bytes = tensor_elements * bytes_per_element
+
+    # For bfloat16: read as int16 via numpy, then view as bfloat16 in torch
+    is_bfloat16 = header.dtype == "bfloat16"
+    np_dtype = np.int16 if is_bfloat16 else np.dtype(header.dtype)
 
     layers: List[Tuple[Any, Any]] = []
     for _ in range(header.num_layers):
@@ -182,8 +192,15 @@ def deserialize_kv_cache(
             header.num_kv_heads, header.seq_len, header.head_dim
         )
 
-        k_tensor = torch.from_numpy(k_np.copy()).unsqueeze(0).to(device=device, dtype=torch_dtype)
-        v_tensor = torch.from_numpy(v_np.copy()).unsqueeze(0).to(device=device, dtype=torch_dtype)
+        k_tensor = torch.from_numpy(k_np.copy()).unsqueeze(0)
+        v_tensor = torch.from_numpy(v_np.copy()).unsqueeze(0)
+
+        if is_bfloat16:
+            k_tensor = k_tensor.view(torch.bfloat16)
+            v_tensor = v_tensor.view(torch.bfloat16)
+
+        k_tensor = k_tensor.to(device=device)
+        v_tensor = v_tensor.to(device=device)
 
         layers.append((k_tensor, v_tensor))
 
@@ -203,7 +220,12 @@ def dynamic_cache_to_legacy(past_key_values: Any) -> List[Tuple[Any, Any]]:
     try:
         from transformers.cache_utils import Cache
         if isinstance(past_key_values, Cache):
-            return list(past_key_values.to_legacy_cache())
+            # transformers >= 5.x: iterate yields (key, value, ...) tuples
+            # transformers 4.x: had to_legacy_cache() method
+            if hasattr(past_key_values, 'to_legacy_cache'):
+                return list(past_key_values.to_legacy_cache())
+            # Use iteration: each layer yields (key, value, ...) tuple
+            return [(layer[0], layer[1]) for layer in past_key_values]
     except ImportError:
         pass
 
@@ -236,7 +258,15 @@ def legacy_to_dynamic_cache(
             "Install with: pip install avp[latent]"
         )
 
-    return DynamicCache.from_legacy_cache(past_key_values)
+    # transformers 4.x: from_legacy_cache class method
+    if hasattr(DynamicCache, 'from_legacy_cache'):
+        return DynamicCache.from_legacy_cache(past_key_values)
+
+    # transformers >= 5.x: constructor accepts iterable of (key, value) tuples
+    return DynamicCache(past_key_values)
+
+
+_DTYPE_SIZES = {"float32": 4, "float16": 2, "bfloat16": 2}
 
 
 def estimate_kv_cache_size(
@@ -258,8 +288,6 @@ def estimate_kv_cache_size(
     Returns:
         Estimated size in bytes.
     """
-    import numpy as np
-
-    bytes_per_element = np.dtype(dtype).itemsize
+    bytes_per_element = _DTYPE_SIZES.get(dtype, 2)
     # 2 tensors (K+V) per layer, each [num_kv_heads, seq_len, head_dim]
     return 2 * num_layers * num_kv_heads * seq_len * head_dim * bytes_per_element
