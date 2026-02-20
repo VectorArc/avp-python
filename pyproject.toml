@@ -21,29 +21,26 @@ dependencies = [
     "numpy>=1.24",
     "protobuf>=4.21",
     "zstandard>=0.21",
-    "httpx[http2]>=0.25",
 ]
 
 [project.optional-dependencies]
-server = ["fastapi>=0.104", "uvicorn[standard]>=0.24"]
+transport = ["httpx[http2]>=0.25"]
+server = ["avp[transport]", "fastapi>=0.104", "uvicorn[standard]>=0.24"]
 latent = ["torch>=2.0", "transformers>=4.36"]
 demo = ["sentence-transformers>=2.2", "torch>=2.0"]
 benchmark = [
     "torch>=2.0",
     "transformers>=4.36",
     "datasets>=2.14",
-    "tqdm>=4.60",
 ]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "ruff>=0.1",
     "grpcio-tools>=1.59",
-    "fastapi>=0.104",
-    "uvicorn[standard]>=0.24",
-    "httpx[http2]>=0.25",
+    "avp[transport,server]",
 ]
-all = ["avp[server,latent,demo,benchmark,dev]"]
+all = ["avp[transport,server,latent,demo,benchmark,dev]"]
 
 [tool.hatch.version]
 path = "src/avp/version.py"

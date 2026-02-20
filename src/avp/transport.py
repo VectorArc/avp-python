@@ -3,8 +3,12 @@
 import json
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-import httpx
-import numpy as np
+try:
+    import httpx
+except ImportError:
+    raise ImportError(
+        "httpx is required for AVP transport. Install with: pip install avp[transport]"
+    )
 
 from .codec import decode, encode
 from .errors import HandshakeError, TransportError
@@ -15,7 +19,6 @@ from .types import (
     AVP_VERSION_HEADER,
     AVPMessage,
     AVPMetadata,
-    CommunicationMode,
     CompressionLevel,
     ModelIdentity,
     SessionInfo,

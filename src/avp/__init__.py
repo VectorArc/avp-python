@@ -20,7 +20,6 @@ from .errors import (
 from .fallback import FallbackRequest, JSONMessage
 from .handshake import CompatibilityResolver, HelloMessage, compute_model_hash, extract_model_identity
 from .session import Session, SessionManager
-from .transport import AVPAsyncClient, AVPClient, create_app
 from .types import (
     AVP_VERSION_HEADER,
     AVP_VERSION_STRING,
@@ -44,6 +43,19 @@ from .types import (
 )
 from .version import __version__
 
+# Transport classes are lazy-loaded because httpx is an optional dependency.
+# Access avp.AVPClient / avp.AVPAsyncClient / avp.create_app and they'll be
+# imported on first use; raises ImportError with install hint if httpx is missing.
+_TRANSPORT_NAMES = {"AVPClient", "AVPAsyncClient", "create_app"}
+
+
+def __getattr__(name: str):
+    if name in _TRANSPORT_NAMES:
+        from . import transport as _transport
+        return getattr(_transport, name)
+    raise AttributeError(f"module 'avp' has no attribute {name}")
+
+
 __all__ = [
     # Codec
     "encode",
@@ -53,7 +65,7 @@ __all__ = [
     # Compression
     "compress",
     "decompress",
-    # Transport
+    # Transport (lazy — requires httpx)
     "AVPClient",
     "AVPAsyncClient",
     "create_app",
