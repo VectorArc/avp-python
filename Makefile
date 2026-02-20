@@ -1,7 +1,7 @@
 .PHONY: proto test lint clean install
 
 proto:
-	python3 -m grpc_tools.protoc \
+	python -m grpc_tools.protoc \
 		-I proto \
 		--python_out=src/avp \
 		proto/avp.proto
@@ -16,6 +16,4 @@ lint:
 	ruff check src/ tests/
 
 clean:
-	rm -rf build/ dist/ *.egg-info .pytest_cache __pycache__
-	find . -name '__pycache__' -exec rm -rf {} +
-	find . -name '*.pyc' -delete
+	python -c "import shutil, glob, os; [shutil.rmtree(p, ignore_errors=True) for p in ['build', 'dist', '.pytest_cache', '__pycache__'] + glob.glob('*.egg-info')]; [os.remove(p) for p in glob.glob('**/*.pyc', recursive=True)]"

@@ -14,7 +14,7 @@ from typing import Any, Optional, Tuple
 from .errors import RealignmentError
 
 # Cache directory for realignment matrices
-_CACHE_DIR = Path.home() / ".avp" / "realign"
+_CACHE_DIR = Path(os.environ.get("AVP_CACHE_DIR", str(Path.home() / ".avp"))) / "realign"
 
 
 def _require_torch():

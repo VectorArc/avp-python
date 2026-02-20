@@ -121,7 +121,7 @@ def main():
 
     # --- Save results ---
     results_path = RESULTS_DIR / "benchmark_results.json"
-    with open(results_path, "w") as f:
+    with open(results_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {results_path}")
 

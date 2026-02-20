@@ -20,6 +20,10 @@ import sys
 import time
 from typing import Optional
 
+# Fix Windows console encoding for model output containing Unicode
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # Ensure avp-python root is on sys.path when run as a script
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
@@ -149,7 +153,12 @@ def load_model(model_name: str, device: str):
     print(f"Loading model: {model_name} on {device}...")
     t0 = time.perf_counter()
 
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    if device == "cuda" and torch.cuda.is_bf16_supported():
+        dtype = torch.bfloat16
+    elif device == "cuda":
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
     model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model.to(device)
@@ -319,13 +328,13 @@ def main() -> None:
             "samples": text_results,
         }
 
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2, default=str)
     print(f"\nResults saved to: {output_path}")
 
     # Also write a latest symlink/copy for easy access
     latest_path = os.path.join(output_dir, "gsm8k_latest.json")
-    with open(latest_path, "w") as f:
+    with open(latest_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2, default=str)
     print(f"Latest copy: {latest_path}")
 
