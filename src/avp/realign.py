@@ -186,6 +186,49 @@ def normalize_to_target(hidden_state: Any, target_norm: Any) -> Any:
     return normalized.to(original_dtype)
 
 
+def project_to_embedding_space(
+    hidden_state: Any,
+    embed_weight: Any,
+    temperature: float = 1.0,
+) -> Any:
+    """Project hidden states to embedding space via softmax soft embedding.
+
+    For tied-weight models, simple normalization doesn't work because hidden
+    states from the last transformer layer have very different directional
+    structure (cosine similarity ~0.24 to nearest embedding). Instead, we:
+    1. Compute logits: hidden @ W^T
+    2. Apply softmax to get probability distribution over vocabulary
+    3. Compute weighted average of embeddings: probs @ W
+
+    This produces a valid embedding vector (cosine similarity ~1.0 to nearest
+    embedding) that the model can understand when injected via inputs_embeds.
+
+    Args:
+        hidden_state: Tensor of shape [..., hidden_dim].
+        embed_weight: Embedding weight matrix [vocab_size, hidden_dim].
+        temperature: Softmax temperature. Lower = sharper (closer to argmax).
+
+    Returns:
+        Soft embedding tensor of same shape and dtype as hidden_state.
+    """
+    torch = _require_torch()
+
+    original_dtype = hidden_state.dtype
+    h_fp32 = hidden_state.to(torch.float32)
+    w_fp32 = embed_weight.detach().to(torch.float32)
+
+    # hidden @ W^T → logits [..., vocab_size]
+    logits = torch.matmul(h_fp32, w_fp32.T)
+
+    # softmax → probability distribution
+    probs = torch.softmax(logits / temperature, dim=-1)
+
+    # probs @ W → soft embedding [..., hidden_dim]
+    soft_embed = torch.matmul(probs, w_fp32)
+
+    return soft_embed.to(original_dtype)
+
+
 def apply_realignment(
     hidden_state: Any,
     w_realign: Any,

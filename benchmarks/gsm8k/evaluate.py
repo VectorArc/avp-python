@@ -7,18 +7,41 @@ from typing import Dict, List, Optional
 def extract_gsm8k_answer(text: str) -> Optional[str]:
     r"""Extract numeric answer from model output.
 
-    Tries \boxed{...} first, then falls back to last number in text.
+    Priority order:
+    1. \boxed{...} — the explicitly requested format
+    2. "#### <number>" — GSM8K convention some models learn
+    3. "the answer is <number>" — common natural language pattern
+    4. "= <number>" at end of line — calculation conclusion
+    5. Last number in text — fallback
+
     Adapted from LatentMAS utils.py.
     """
+    _NUM = r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?"
+
+    # 1. \boxed{...}
     boxes = re.findall(r"\\boxed\{([^}]*)\}", text)
     if boxes:
         content = boxes[-1]
-        number = re.search(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", content)
+        number = re.search(_NUM, content)
         if number:
             return number.group(0).replace(",", "")
         return content.strip()
 
-    numbers = re.findall(r"[-+]?\d+(?:,\d{3})*(?:\.\d+)?", text)
+    # 2. #### <number> (GSM8K convention)
+    hashes = re.findall(r"####\s*(" + _NUM + r")", text)
+    if hashes:
+        return hashes[-1].replace(",", "")
+
+    # 3. "the answer is <number>" / "the final answer is <number>"
+    answer_match = re.findall(
+        r"(?:the\s+)?(?:final\s+)?answer\s+is\s*:?\s*\$?\s*(" + _NUM + r")",
+        text, re.IGNORECASE,
+    )
+    if answer_match:
+        return answer_match[-1].replace(",", "")
+
+    # 4. Last number in text
+    numbers = re.findall(_NUM, text)
     if numbers:
         return numbers[-1].replace(",", "")
     return None

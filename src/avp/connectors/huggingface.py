@@ -16,6 +16,7 @@ from ..realign import (
     get_or_compute_realignment,
     needs_realignment,
     normalize_to_target,
+    project_to_embedding_space,
 )
 from ..types import ModelIdentity
 from .base import EngineConnector
@@ -307,17 +308,23 @@ class HuggingFaceConnector(EngineConnector):
         do_realign = self.needs_realignment()
         if do_realign:
             w_realign, target_norm = self._ensure_realignment()
+            embed_weight = None
         else:
-            # Tied models: skip projection but still normalize to target_norm
-            target_norm = self._ensure_target_norm()
+            # Tied models: project hidden → logits → softmax → soft embedding.
+            # Simple normalization doesn't work because hidden state directions
+            # have very low cosine similarity (~0.24) to embedding vectors.
+            target_norm = None
+            embed_weight = self.model.get_input_embeddings().weight
 
         # Latent loop
         for step in range(latent_steps):
             if do_realign:
                 latent_vec = apply_realignment(last_hidden, w_realign, target_norm)
             else:
-                # Tied models: normalize only (no projection needed)
-                latent_vec = normalize_to_target(last_hidden, target_norm)
+                # Tied models: project through vocabulary to get valid embedding
+                latent_vec = project_to_embedding_space(
+                    last_hidden, embed_weight, temperature=1.0
+                )
 
             latent_embed = latent_vec.unsqueeze(1)  # [B, 1, D]
 

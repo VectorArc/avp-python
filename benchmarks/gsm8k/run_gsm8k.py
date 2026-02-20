@@ -2,7 +2,14 @@
 """GSM8K benchmark: 4-agent chain comparing latent (AVP) vs text mode.
 
 Usage:
-    python benchmarks/gsm8k/run_gsm8k.py --mode both --max_samples 10 --verbose
+    # Run all modes (direct baseline + text chain + latent chain)
+    python benchmarks/gsm8k/run_gsm8k.py --mode all --max_samples 10 --verbose
+
+    # Direct single-agent baseline only (to check model capability)
+    python benchmarks/gsm8k/run_gsm8k.py --mode direct --verbose
+
+    # Latent vs text comparison
+    python benchmarks/gsm8k/run_gsm8k.py --mode both --verbose
 """
 
 import argparse
@@ -29,15 +36,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "both"],
-        default="both",
-        help="Pipeline(s) to run (default: both)",
+        choices=["latent", "text", "direct", "both", "all"],
+        default="all",
+        help="Pipeline(s) to run. 'direct' = single-agent baseline, "
+             "'both' = latent+text chains, 'all' = direct+text+latent (default: all)",
     )
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Qwen/Qwen2-0.5B",
-        help="HuggingFace model ID (default: Qwen/Qwen2-0.5B)",
+        default="Qwen/Qwen2.5-1.5B-Instruct",
+        help="HuggingFace model ID (default: Qwen/Qwen2.5-1.5B-Instruct)",
     )
     parser.add_argument(
         "--device",
@@ -60,8 +68,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=256,
-        help="Max tokens for text generation (default: 256)",
+        default=512,
+        help="Max tokens for text generation (default: 512)",
     )
     parser.add_argument(
         "--temperature",
@@ -163,6 +171,10 @@ def main() -> None:
     set_seed(args.seed)
 
     device = auto_device(args.device)
+    run_direct = args.mode in ("direct", "all")
+    run_latent = args.mode in ("latent", "both", "all")
+    run_text = args.mode in ("text", "both", "all")
+
     print(f"Device: {device}")
     print(f"Mode: {args.mode}")
     print(f"Model: {args.model_name}")
@@ -171,6 +183,7 @@ def main() -> None:
     print(f"Max new tokens: {args.max_new_tokens}")
     print(f"Temperature: {args.temperature}")
     print(f"Seed: {args.seed}")
+    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}")
     print()
 
     # Load dataset
@@ -179,15 +192,56 @@ def main() -> None:
     # Load model
     model, tokenizer, connector, identity = load_model(args.model_name, device)
 
+    direct_results = None
     latent_results = None
     text_results = None
 
+    # Run direct baseline
+    if run_direct:
+        from benchmarks.gsm8k.pipeline_direct import run_direct_benchmark
+
+        print("\n" + "=" * 50)
+        print("Running DIRECT (single-agent) baseline...")
+        print("=" * 50)
+        set_seed(args.seed)
+
+        direct_results = run_direct_benchmark(
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            dataset=dataset,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            verbose=args.verbose,
+        )
+
+    # Run text pipeline
+    if run_text:
+        from benchmarks.gsm8k.pipeline_text import run_text_benchmark
+
+        print("\n" + "=" * 50)
+        print("Running TEXT (4-agent chain) pipeline...")
+        print("=" * 50)
+        set_seed(args.seed)
+
+        text_results = run_text_benchmark(
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            dataset=dataset,
+            max_new_tokens=args.max_new_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            verbose=args.verbose,
+        )
+
     # Run latent pipeline
-    if args.mode in ("latent", "both"):
+    if run_latent:
         from benchmarks.gsm8k.pipeline_latent import run_latent_benchmark
 
         print("\n" + "=" * 50)
-        print("Running LATENT (AVP) pipeline...")
+        print("Running LATENT (AVP 4-agent chain) pipeline...")
         print("=" * 50)
         set_seed(args.seed)
 
@@ -206,62 +260,60 @@ def main() -> None:
             verbose=args.verbose,
         )
 
-    # Run text pipeline
-    if args.mode in ("text", "both"):
-        from benchmarks.gsm8k.pipeline_text import run_text_benchmark
-
-        print("\n" + "=" * 50)
-        print("Running TEXT (baseline) pipeline...")
-        print("=" * 50)
-        set_seed(args.seed)
-
-        text_results = run_text_benchmark(
-            model=model,
-            tokenizer=tokenizer,
-            device=device,
-            dataset=dataset,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            verbose=args.verbose,
-        )
-
     # Print summary
-    from benchmarks.gsm8k.evaluate import print_summary
+    from benchmarks.gsm8k.evaluate import compute_accuracy, print_summary
 
     print_summary(latent_results, text_results)
+
+    # Print direct baseline if available
+    if direct_results is not None:
+        acc = compute_accuracy(direct_results)
+        times = [r["wall_time"] for r in direct_results if "wall_time" in r]
+        mean_t = sum(times) / len(times) if times else 0
+        print(f"\nDirect (single-agent) baseline: "
+              f"{acc['accuracy']:.1%} ({acc['correct']}/{acc['total']}), "
+              f"mean {mean_t:.1f}s/sample")
 
     # Save results
     output_dir = args.output_dir
     if output_dir is None:
-        # Default: benchmarks/results/ relative to the avp-python dir
         script_dir = os.path.dirname(os.path.abspath(__file__))
         output_dir = os.path.join(os.path.dirname(script_dir), "results")
 
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "gsm8k_results.json")
 
-    # Build JSON-serializable results
+    # Timestamped filename so runs don't overwrite each other
+    from datetime import datetime
+    model_short = args.model_name.split("/")[-1].lower()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"gsm8k_{model_short}_{args.mode}_n{args.max_samples}_{timestamp}.json"
+    output_path = os.path.join(output_dir, filename)
+
     output_data = {
         "config": {
             "model_name": args.model_name,
             "device": device,
+            "mode": args.mode,
             "max_samples": args.max_samples,
             "latent_steps": args.latent_steps,
             "max_new_tokens": args.max_new_tokens,
             "temperature": args.temperature,
             "top_p": args.top_p,
             "seed": args.seed,
+            "timestamp": timestamp,
         },
     }
+    if direct_results is not None:
+        output_data["direct"] = {
+            "summary": compute_accuracy(direct_results),
+            "samples": direct_results,
+        }
     if latent_results is not None:
-        from benchmarks.gsm8k.evaluate import compute_accuracy
         output_data["latent"] = {
             "summary": compute_accuracy(latent_results),
             "samples": latent_results,
         }
     if text_results is not None:
-        from benchmarks.gsm8k.evaluate import compute_accuracy
         output_data["text"] = {
             "summary": compute_accuracy(text_results),
             "samples": text_results,
@@ -270,6 +322,12 @@ def main() -> None:
     with open(output_path, "w") as f:
         json.dump(output_data, f, indent=2, default=str)
     print(f"\nResults saved to: {output_path}")
+
+    # Also write a latest symlink/copy for easy access
+    latest_path = os.path.join(output_dir, "gsm8k_latest.json")
+    with open(latest_path, "w") as f:
+        json.dump(output_data, f, indent=2, default=str)
+    print(f"Latest copy: {latest_path}")
 
 
 if __name__ == "__main__":
