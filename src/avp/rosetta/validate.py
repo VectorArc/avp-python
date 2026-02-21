@@ -97,27 +97,43 @@ def _compute_cosine_similarity(
     projected: Any,
     target_embeds: Any,
     token_ids: Any,
+    is_next_token: bool = False,
 ) -> float:
     """Compute mean cosine similarity between projected vectors and target embeddings.
 
     Args:
         projected: Projected hidden states [seq_len, D_tgt].
         target_embeds: Target input embedding weight matrix [vocab_size, D_tgt].
-        token_ids: Token IDs [seq_len] — used to look up corresponding target embeddings.
+        token_ids: Token IDs [seq_len].
+        is_next_token: If True, projected[i] predicts token_ids[i+1] (vocab-mediated).
+            If False, projected[i] corresponds to token_ids[i] (learned maps).
 
     Returns:
-        Mean cosine similarity across all tokens.
+        Mean cosine similarity across compared positions.
     """
     torch = _require_torch()
 
-    # Look up target embeddings for the same tokens
-    target_vecs = target_embeds[token_ids].to(dtype=torch.float32, device=projected.device)
+    if is_next_token:
+        # Vocab-mediated: hidden[i] → lm_head → softmax → next-token embedding.
+        # Compare projected[i] to target_embed[token_ids[i+1]].
+        if projected.shape[0] < 2:
+            return 0.0
+        proj = projected[:-1]           # [seq_len-1, D_tgt]
+        target_vecs = target_embeds[token_ids[1:]].to(
+            dtype=torch.float32, device=proj.device
+        )
+    else:
+        # Learned maps: projected[i] maps to same-position embedding.
+        proj = projected
+        target_vecs = target_embeds[token_ids].to(
+            dtype=torch.float32, device=proj.device
+        )
 
-    # Normalize
-    proj_norm = projected / projected.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    # Normalize and compute cosine similarity
+    proj_norm = proj / proj.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     tgt_norm = target_vecs / target_vecs.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 
-    cos_sims = (proj_norm * tgt_norm).sum(dim=-1)  # [seq_len]
+    cos_sims = (proj_norm * tgt_norm).sum(dim=-1)
     return cos_sims.mean().item()
 
 
@@ -146,7 +162,9 @@ def _compute_pseudo_perplexity(
     if projected.shape[0] < 2:
         return float("inf")
 
-    inputs_embeds = projected.unsqueeze(0).to(device)  # [1, seq_len, D_tgt]
+    # Match the model's parameter dtype (e.g. bfloat16) to avoid mat-mul errors
+    model_dtype = next(model.parameters()).dtype
+    inputs_embeds = projected.unsqueeze(0).to(device=device, dtype=model_dtype)
 
     with torch.no_grad():
         outputs = model(
@@ -239,6 +257,11 @@ def validate_projection(
         source_model, source_tokenizer, texts, device,
     )
 
+    # Vocab-mediated projection goes through lm_head → softmax, which predicts
+    # the next token. Cosine similarity must compare projected[i] to the
+    # embedding of token_ids[i+1], not token_ids[i].
+    is_next_token = (avp_map.method == ProjectionMethod.VOCAB_MEDIATED)
+
     # Project and compute cosine similarity
     all_cos_sims = []
     projected_list = []
@@ -249,7 +272,9 @@ def validate_projection(
         projected_list.append(projected)
         token_ids_list.append(token_ids)
 
-        cos_sim = _compute_cosine_similarity(projected, tgt_embed_weight, token_ids)
+        cos_sim = _compute_cosine_similarity(
+            projected, tgt_embed_weight, token_ids, is_next_token=is_next_token,
+        )
         all_cos_sims.append(cos_sim)
 
     mean_cos_sim = sum(all_cos_sims) / len(all_cos_sims)
