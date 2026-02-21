@@ -757,3 +757,214 @@ class TestCalibrateVocabMediated:
                 src_model, tgt_model, src_tok, tgt_tok,
                 method="vocab_mediated", device="cpu",
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: projection validation
+# ---------------------------------------------------------------------------
+
+@requires_torch
+@requires_transformers
+class TestValidation:
+    """Tests for rosetta.validate — projection quality validation."""
+
+    def test_validate_same_model_high_confidence(self, tiny_gpt2_64):
+        """Same-model vocab-mediated projection runs and returns a valid result.
+
+        Note: random-weight tiny models produce near-uniform softmax → low cos_sim.
+        With real trained models, same-model projection gives cos_sim > 0.9.
+        Here we bypass the fast gate to test the full validation pipeline.
+        """
+        from avp.rosetta.calibrate import AVPMap, calibrate
+        from avp.rosetta.validate import validate_projection, ValidationConfig
+        from avp.types import CommunicationMode
+
+        model, _ = tiny_gpt2_64
+        tok = VocabMockTokenizer(vocab_size=256)
+
+        # Calibrate same model → vocab_mediated (shared vocab)
+        avp_map = calibrate(model, model, tok, tok, device="cpu")
+
+        # Bypass fast gate (random weights → low cos sim is expected)
+        config = ValidationConfig(cosine_sim_threshold=0.0)
+        result = validate_projection(
+            model, model, avp_map, tok, tok, config=config, device="cpu",
+        )
+
+        assert result.cosine_similarity > 0.0
+        assert result.perplexity is not None
+        assert result.perplexity > 0
+        assert result.detail  # non-empty
+
+    def test_validate_random_map_low_confidence(self, tiny_gpt2_64, tiny_gpt2_128):
+        """Random projection matrix should recommend JSON."""
+        from avp.rosetta.calibrate import AVPMap
+        from avp.rosetta.validate import validate_projection
+        from avp.types import CommunicationMode
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = VocabMockTokenizer(vocab_size=256)
+
+        # Random w_map — should produce garbage projection
+        avp_map = AVPMap(
+            source_model_id="src", source_hash="s" * 64, source_dim=64,
+            target_model_id="tgt", target_hash="t" * 64, target_dim=128,
+            w_map=torch.randn(64, 128) * 0.001,  # tiny random weights
+            bias=None,
+            target_norm=torch.tensor(1.0),
+            method="ridge",
+            anchor_count=10,
+            validation_score=0.0,
+        )
+
+        result = validate_projection(
+            src_model, tgt_model, avp_map, src_tok, tgt_tok, device="cpu",
+        )
+
+        # Random projection should have low cosine similarity → JSON
+        assert result.recommended_mode == CommunicationMode.JSON
+
+    def test_validate_cosine_sim_fast_gate(self, tiny_gpt2_64, tiny_gpt2_128):
+        """When cos_sim < threshold, should return JSON without computing perplexity."""
+        from avp.rosetta.calibrate import AVPMap
+        from avp.rosetta.validate import validate_projection, ValidationConfig
+        from avp.types import CommunicationMode
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = VocabMockTokenizer(vocab_size=256)
+
+        # Random projection → low cosine sim
+        avp_map = AVPMap(
+            source_model_id="src", source_hash="s" * 64, source_dim=64,
+            target_model_id="tgt", target_hash="t" * 64, target_dim=128,
+            w_map=torch.randn(64, 128) * 0.001,
+            bias=None,
+            target_norm=torch.tensor(1.0),
+            method="ridge",
+            anchor_count=10,
+            validation_score=0.0,
+        )
+
+        # Set a high cosine sim threshold so the fast gate always triggers
+        config = ValidationConfig(cosine_sim_threshold=0.99)
+        result = validate_projection(
+            src_model, tgt_model, avp_map, src_tok, tgt_tok,
+            config=config, device="cpu",
+        )
+
+        assert result.recommended_mode == CommunicationMode.JSON
+        # Perplexity should be None — skipped by fast gate
+        assert result.perplexity is None
+        assert "threshold" in result.detail
+
+    def test_validate_custom_thresholds(self, tiny_gpt2_64):
+        """ValidationConfig overrides are respected."""
+        from avp.rosetta.calibrate import calibrate
+        from avp.rosetta.validate import validate_projection, ValidationConfig
+        from avp.types import CommunicationMode
+
+        model, _ = tiny_gpt2_64
+        tok = VocabMockTokenizer(vocab_size=256)
+        avp_map = calibrate(model, model, tok, tok, device="cpu")
+
+        # Set extremely strict thresholds — perplexity_latent=0 should
+        # push result toward HYBRID or JSON even for a decent projection
+        config = ValidationConfig(
+            cosine_sim_threshold=0.0,   # never trigger fast gate
+            perplexity_latent=0.001,    # impossibly low
+            perplexity_json=0.002,      # also impossibly low
+        )
+        result = validate_projection(
+            model, model, avp_map, tok, tok,
+            config=config, device="cpu",
+        )
+
+        # With impossible thresholds, perplexity > perplexity_json → JSON
+        assert result.recommended_mode == CommunicationMode.JSON
+        assert result.perplexity is not None
+
+    def test_validate_result_fields(self, tiny_gpt2_64):
+        """All ValidationResult fields are populated correctly."""
+        from avp.rosetta.calibrate import calibrate
+        from avp.rosetta.validate import validate_projection, ValidationResult, ValidationConfig
+        from avp.types import CommunicationMode
+
+        model, _ = tiny_gpt2_64
+        tok = VocabMockTokenizer(vocab_size=256)
+        avp_map = calibrate(model, model, tok, tok, device="cpu")
+
+        # Bypass fast gate so perplexity gets computed
+        config = ValidationConfig(cosine_sim_threshold=0.0)
+        result = validate_projection(
+            model, model, avp_map, tok, tok, config=config, device="cpu",
+        )
+
+        assert isinstance(result, ValidationResult)
+        assert isinstance(result.cosine_similarity, float)
+        assert result.cosine_similarity > 0.0
+        assert isinstance(result.recommended_mode, CommunicationMode)
+        assert isinstance(result.detail, str)
+        assert len(result.detail) > 0
+        # Perplexity should be computed (shared vocab, fast gate bypassed)
+        assert result.perplexity is not None
+        assert result.perplexity > 0
+
+    def test_validate_vocab_mediated(self, tiny_gpt2_64, tiny_gpt2_128):
+        """Vocab-mediated map between same-vocab models — full pipeline runs."""
+        from avp.rosetta.calibrate import calibrate
+        from avp.rosetta.validate import validate_projection, ValidationConfig
+        from avp.types import CommunicationMode
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = VocabMockTokenizer(vocab_size=256)
+
+        avp_map = calibrate(
+            src_model, tgt_model, src_tok, tgt_tok, device="cpu",
+        )
+
+        # Bypass fast gate to test full pipeline with random-weight models
+        config = ValidationConfig(cosine_sim_threshold=0.0)
+        result = validate_projection(
+            src_model, tgt_model, avp_map, src_tok, tgt_tok,
+            config=config, device="cpu",
+        )
+
+        # Vocab-mediated should compute both metrics
+        assert result.cosine_similarity > 0.0
+        assert result.perplexity is not None
+        assert result.perplexity > 0
+        assert result.detail  # non-empty
+
+    def test_connector_validate_cross_model(self, tiny_gpt2_64, tiny_gpt2_128):
+        """HuggingFaceConnector.validate_cross_model() convenience method works."""
+        from avp.connectors.huggingface import HuggingFaceConnector
+        from avp.rosetta.calibrate import calibrate
+        from avp.rosetta.validate import ValidationResult
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = VocabMockTokenizer(vocab_size=256)
+
+        src_connector = HuggingFaceConnector(
+            model=src_model, tokenizer=src_tok, device="cpu",
+        )
+        tgt_connector = HuggingFaceConnector(
+            model=tgt_model, tokenizer=tgt_tok, device="cpu",
+        )
+
+        avp_map = calibrate(
+            src_model, tgt_model, src_tok, tgt_tok, device="cpu",
+        )
+
+        result = src_connector.validate_cross_model(tgt_connector, avp_map)
+
+        assert isinstance(result, ValidationResult)
+        assert isinstance(result.cosine_similarity, float)
+        assert result.detail

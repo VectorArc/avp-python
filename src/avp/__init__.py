@@ -45,7 +45,19 @@ from .types import (
 from .version import __version__
 
 # Rosetta Stone (cross-model projection) — lazy-loaded because it requires torch.
-_ROSETTA_NAMES = {"AVPMap", "calibrate", "apply_cross_model_projection", "vocabulary_mediated_projection", "save_map", "load_map", "find_map"}
+_ROSETTA_NAMES = {
+    "AVPMap",
+    "DEFAULT_ANCHORS",
+    "calibrate",
+    "apply_cross_model_projection",
+    "vocabulary_mediated_projection",
+    "save_map",
+    "load_map",
+    "find_map",
+    "ValidationConfig",
+    "ValidationResult",
+    "validate_projection",
+}
 
 # Transport classes are lazy-loaded because httpx is an optional dependency.
 # Access avp.AVPClient / avp.AVPAsyncClient / avp.create_app and they'll be
@@ -118,6 +130,9 @@ __all__ = [
     "save_map",
     "load_map",
     "find_map",
+    "ValidationConfig",
+    "ValidationResult",
+    "validate_projection",
     # Errors
     "AVPError",
     "InvalidMagicError",

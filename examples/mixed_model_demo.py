@@ -740,6 +740,10 @@ def parse_args() -> argparse.Namespace:
         "--rosetta", action="store_true",
         help="Use Rosetta Stone cross-model projection instead of JSON fallback",
     )
+    parser.add_argument(
+        "--no-validate", action="store_true",
+        help="Skip projection validation (validation runs by default with --rosetta)",
+    )
     return parser.parse_args()
 
 
@@ -793,6 +797,23 @@ def main() -> None:
                   f"Shape: [{rosetta_map.source_dim}, {rosetta_map.target_dim}] | "
                   f"Validation cosine sim: {rosetta_map.validation_score:.3f} | "
                   f"Time: {cal_elapsed:.1f}s")
+
+        # Projection quality validation
+        if not args.no_validate:
+            from avp.rosetta.validate import validate_projection
+            print("  Validating projection quality...")
+            val_t0 = time.perf_counter()
+            val_result = validate_projection(
+                models["model_a"]["model"], models["model_b"]["model"],
+                rosetta_map,
+                models["model_a"]["tokenizer"], models["model_b"]["tokenizer"],
+                device=device,
+            )
+            val_elapsed = time.perf_counter() - val_t0
+            ppl_str = f"{val_result.perplexity:.1f}" if val_result.perplexity is not None else "N/A"
+            print(f"  Validation: cos_sim={val_result.cosine_similarity:.3f}, "
+                  f"perplexity={ppl_str} => {val_result.recommended_mode.name} "
+                  f"({val_elapsed:.2f}s)")
         print()
 
     pipeline_str = " -> ".join(

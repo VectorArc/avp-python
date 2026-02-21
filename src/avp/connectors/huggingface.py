@@ -351,6 +351,36 @@ class HuggingFaceConnector(EngineConnector):
 
         return past
 
+    def validate_cross_model(
+        self,
+        target_connector: "HuggingFaceConnector",
+        avp_map: Any,
+        config: Any = None,
+    ) -> Any:
+        """Validate cross-model projection quality.
+
+        Convenience wrapper around rosetta.validate.validate_projection().
+
+        Args:
+            target_connector: Target model's HuggingFaceConnector.
+            avp_map: AVPMap with the projection to validate.
+            config: Optional ValidationConfig with custom thresholds.
+
+        Returns:
+            ValidationResult with cosine_similarity, perplexity,
+            recommended_mode, and detail string.
+        """
+        from ..rosetta.validate import validate_projection
+        return validate_projection(
+            source_model=self.model,
+            target_model=target_connector.model,
+            avp_map=avp_map,
+            source_tokenizer=self.tokenizer,
+            target_tokenizer=target_connector.tokenizer,
+            config=config,
+            device=self.device,
+        )
+
     def project_hidden_for_cross_model(
         self, hidden_state: Any, avp_map: Any
     ) -> Any:
