@@ -70,6 +70,14 @@ def parse_args() -> argparse.Namespace:
         help="Latent steps per non-judger agent (default: 10)",
     )
     parser.add_argument(
+        "--kv_mode",
+        choices=["full", "sequential", "latent_only"],
+        default="full",
+        help="KV-cache content policy between hops: full (keep all), "
+             "sequential (keep current agent only), latent_only (keep latent "
+             "steps only) (default: full)",
+    )
+    parser.add_argument(
         "--max_new_tokens",
         type=int,
         default=512,
@@ -189,6 +197,7 @@ def main() -> None:
     print(f"Model: {args.model_name}")
     print(f"Samples: {args.max_samples}")
     print(f"Latent steps: {args.latent_steps}")
+    print(f"KV mode: {args.kv_mode}")
     print(f"Max new tokens: {args.max_new_tokens}")
     print(f"Temperature: {args.temperature}")
     print(f"Seed: {args.seed}")
@@ -266,6 +275,7 @@ def main() -> None:
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_p=args.top_p,
+            kv_mode=args.kv_mode,
             verbose=args.verbose,
         )
 
@@ -305,6 +315,7 @@ def main() -> None:
             "mode": args.mode,
             "max_samples": args.max_samples,
             "latent_steps": args.latent_steps,
+            "kv_mode": args.kv_mode,
             "max_new_tokens": args.max_new_tokens,
             "temperature": args.temperature,
             "top_p": args.top_p,

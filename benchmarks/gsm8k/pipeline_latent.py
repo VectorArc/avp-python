@@ -16,6 +16,46 @@ from .agents import (
 from .evaluate import extract_gold, extract_gsm8k_answer
 
 
+def _slice_tensor(tensor: torch.Tensor, tokens_to_keep: int) -> torch.Tensor:
+    """Slice a KV tensor to keep only the last `tokens_to_keep` positions."""
+    if tokens_to_keep <= 0:
+        return tensor[..., 0:0, :].contiguous()
+    keep = min(tokens_to_keep, tensor.shape[-2])
+    start = tensor.shape[-2] - keep
+    return tensor[..., start:, :].contiguous()
+
+
+def _truncate_past(past_kv: Any, tokens_to_keep: int) -> Any:
+    """Truncate KV-cache to keep only the last `tokens_to_keep` tokens.
+
+    Handles DynamicCache (transformers v5 with .layers API), and legacy
+    tuple-of-tuples format. Adapted from LatentMAS _truncate_past.
+    """
+    if past_kv is None or tokens_to_keep <= 0:
+        return None
+    try:
+        from transformers.cache_utils import DynamicCache
+        if isinstance(past_kv, DynamicCache):
+            new_cache = DynamicCache()
+            for layer in past_kv.layers:
+                k = _slice_tensor(layer.keys, tokens_to_keep)
+                v = _slice_tensor(layer.values, tokens_to_keep)
+                new_cache.update(k, v, len(new_cache.layers))
+            return new_cache
+    except ImportError:
+        pass
+    # Legacy tuple-of-tuples format
+    trimmed_layers = []
+    for layer in past_kv:
+        if isinstance(layer, tuple):
+            trimmed_layers.append(tuple(_slice_tensor(t, tokens_to_keep) for t in layer))
+        elif torch.is_tensor(layer):
+            trimmed_layers.append(_slice_tensor(layer, tokens_to_keep))
+        else:
+            trimmed_layers.append(layer)
+    return tuple(trimmed_layers)
+
+
 def _get_past_length(past_kv: Any) -> int:
     """Get sequence length from past_key_values (DynamicCache or legacy tuple)."""
     if past_kv is None:
@@ -46,6 +86,7 @@ def run_latent_pipeline(
     max_new_tokens: int = 256,
     temperature: float = 0.7,
     top_p: float = 0.95,
+    kv_mode: str = "full",
     verbose: bool = False,
 ) -> Dict:
     """Run the 4-agent latent-mode pipeline on a single GSM8K problem.
@@ -53,6 +94,11 @@ def run_latent_pipeline(
     Non-judger agents use generate_latent_steps to produce KV-cache, which is
     serialized through the full AVP codec (serialize → encode → decode → deserialize)
     between each hop. The Judger generates text with the accumulated KV-cache.
+
+    kv_mode controls what KV-cache content is kept between hops:
+      - "full": keep everything (default, accumulates all tokens)
+      - "sequential": keep only the current agent's contribution (prompt + latent steps)
+      - "latent_only": keep only the latent step tokens, discard prompts
     """
     from avp.codec import decode as avp_decode
     from avp.codec import encode_kv_cache
@@ -85,6 +131,7 @@ def run_latent_pipeline(
 
         if agent.role != "judger":
             # --- Latent steps: generate KV-cache ---
+            prev_past_len = _get_past_length(past_kv)
             past_kv = connector.generate_latent_steps(
                 input_ids,
                 latent_steps=latent_steps,
@@ -121,6 +168,16 @@ def run_latent_pipeline(
             codec_time_ms = (time.perf_counter() - codec_t0) * 1000
             total_codec_time_ms += codec_time_ms
 
+            # --- KV-cache truncation based on kv_mode ---
+            if kv_mode != "full":
+                new_len = _get_past_length(past_kv)
+                tokens_added = new_len - prev_past_len
+                if kv_mode == "latent_only":
+                    tokens_to_keep = latent_steps
+                else:  # sequential
+                    tokens_to_keep = tokens_added
+                past_kv = _truncate_past(past_kv, tokens_to_keep)
+
             kv_seq_len = _get_past_length(past_kv)
 
             agent_traces.append({
@@ -128,6 +185,7 @@ def run_latent_pipeline(
                 "role": agent.role,
                 "prompt_tokens": int(input_ids.shape[-1]),
                 "latent_steps": latent_steps,
+                "kv_mode": kv_mode,
                 "kv_seq_len_after": kv_seq_len,
                 "wire_bytes": wire_size,
                 "codec_time_ms": codec_time_ms,
@@ -182,6 +240,7 @@ def run_latent_pipeline(
         "kv_seq_len_judger": _get_past_length(past_kv) if past_kv else 0,
         "agents": agent_traces,
         "mode": "latent",
+        "kv_mode": kv_mode,
     }
 
 
@@ -197,6 +256,7 @@ def run_latent_benchmark(
     max_new_tokens: int = 256,
     temperature: float = 0.7,
     top_p: float = 0.95,
+    kv_mode: str = "full",
     verbose: bool = False,
 ) -> List[Dict]:
     """Run latent-mode pipeline on a list of GSM8K samples."""
@@ -214,6 +274,7 @@ def run_latent_benchmark(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
+            kv_mode=kv_mode,
             verbose=verbose,
         )
         results.append(result)
