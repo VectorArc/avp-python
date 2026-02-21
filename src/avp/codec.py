@@ -183,11 +183,29 @@ def decode(data: bytes) -> AVPMessage:
         metadata_length=metadata_length,
     )
 
+    # Parse HybridPayload if FLAG_HYBRID is set
+    text_fallback = None
+    if flags & FLAG_HYBRID:
+        try:
+            hybrid_pb = avp_pb2.HybridPayload()
+            hybrid_pb.ParseFromString(raw_payload)
+            latent_data = b""
+            for chunk in hybrid_pb.chunks:
+                if chunk.chunk_type == avp_pb2.LATENT_CHUNK:
+                    latent_data = bytes(chunk.data)
+                elif chunk.chunk_type == avp_pb2.TEXT_CHUNK:
+                    text_fallback = chunk.data.decode("utf-8")
+            raw_payload = latent_data
+        except Exception:
+            # Graceful degradation: treat raw_payload as latent
+            pass
+
     return AVPMessage(
         header=header,
         metadata=metadata,
         payload=raw_payload,
         raw_size=len(data),
+        text_fallback=text_fallback,
     )
 
 
@@ -214,3 +232,45 @@ def encode_kv_cache(
     """Encode serialized KV-cache bytes into an AVP message."""
     metadata.payload_type = PayloadType.KV_CACHE
     return encode(kv_bytes, metadata, compression)
+
+
+def encode_hybrid(
+    latent_payload: bytes,
+    text_fallback: str,
+    metadata: AVPMetadata,
+    compression: CompressionLevel = CompressionLevel.NONE,
+    latent_confidence: float = 0.0,
+    text_confidence: float = 0.0,
+) -> bytes:
+    """Encode a hybrid message containing both latent data and text fallback.
+
+    Builds a HybridPayload protobuf with a LATENT_CHUNK and a TEXT_CHUNK,
+    then passes the serialized protobuf through the standard encode() path.
+
+    Args:
+        latent_payload: Raw latent bytes (hidden state or serialized KV-cache).
+        text_fallback: Short text summary for observability/fallback.
+        metadata: AVPMetadata (mode will be forced to HYBRID).
+        compression: Compression level for the HybridPayload.
+        latent_confidence: Confidence score for the latent chunk (0-1).
+        text_confidence: Confidence score for the text chunk (0-1).
+
+    Returns:
+        Raw bytes of the AVP message.
+    """
+    metadata.mode = CommunicationMode.HYBRID
+
+    hybrid_pb = avp_pb2.HybridPayload()
+
+    latent_chunk = hybrid_pb.chunks.add()
+    latent_chunk.chunk_type = avp_pb2.LATENT_CHUNK
+    latent_chunk.data = latent_payload
+    latent_chunk.confidence = latent_confidence
+
+    text_chunk = hybrid_pb.chunks.add()
+    text_chunk.chunk_type = avp_pb2.TEXT_CHUNK
+    text_chunk.data = text_fallback.encode("utf-8")
+    text_chunk.confidence = text_confidence
+
+    payload = hybrid_pb.SerializeToString()
+    return encode(payload, metadata, compression)

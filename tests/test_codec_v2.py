@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 import avp
-from avp.codec import _HEADER_FMT, encode, decode
+from avp.codec import _HEADER_FMT, encode, decode, encode_hybrid
 from avp.types import (
     FLAG_COMPRESSED,
     FLAG_HAS_MAP,
@@ -210,3 +210,122 @@ def test_encode_kv_cache():
 
     assert msg.metadata.payload_type == PayloadType.KV_CACHE
     assert msg.payload == kv_data
+
+
+# --- Hybrid codec ---
+
+
+class TestHybridCodec:
+    """Tests for HYBRID mode: encode_hybrid() and decode() with HybridPayload."""
+
+    def test_encode_hybrid_sets_flag(self):
+        """FLAG_HYBRID bit is set in header byte 3."""
+        metadata = AVPMetadata(model_id="test")
+        data = encode_hybrid(b"\x00", "hello", metadata)
+        assert data[3] & FLAG_HYBRID == FLAG_HYBRID
+
+    def test_encode_hybrid_forces_mode(self):
+        """metadata.mode is forced to HYBRID even if caller set LATENT."""
+        metadata = AVPMetadata(model_id="test", mode=CommunicationMode.LATENT)
+        data = encode_hybrid(b"\x00", "hello", metadata)
+        msg = decode(data)
+        assert msg.metadata.mode == CommunicationMode.HYBRID
+
+    def test_hybrid_roundtrip_text(self):
+        """text_fallback survives encode → decode."""
+        metadata = AVPMetadata(model_id="test")
+        data = encode_hybrid(b"\x00", "summary text here", metadata)
+        msg = decode(data)
+        assert msg.text_fallback == "summary text here"
+
+    def test_hybrid_roundtrip_latent(self):
+        """Latent payload bytes survive encode → decode."""
+        latent = b"\xde\xad\xbe\xef" * 256
+        metadata = AVPMetadata(model_id="test")
+        data = encode_hybrid(latent, "text", metadata)
+        msg = decode(data)
+        assert msg.payload == latent
+
+    def test_hybrid_roundtrip_kv_cache(self):
+        """KV_CACHE flag + payload preserved through HYBRID."""
+        kv_data = b"\xaa\xbb\xcc" * 100
+        metadata = AVPMetadata(
+            model_id="test",
+            payload_type=PayloadType.KV_CACHE,
+        )
+        data = encode_hybrid(kv_data, "kv summary", metadata)
+        msg = decode(data)
+        assert msg.header.is_hybrid
+        assert msg.header.is_kv_cache
+        assert msg.payload == kv_data
+        assert msg.text_fallback == "kv summary"
+
+    def test_hybrid_empty_text(self):
+        """Empty string text_fallback is preserved (not None)."""
+        metadata = AVPMetadata(model_id="test")
+        data = encode_hybrid(b"\x01", "", metadata)
+        msg = decode(data)
+        assert msg.text_fallback == ""
+
+    def test_hybrid_unicode_text(self):
+        """Non-ASCII text survives UTF-8 roundtrip."""
+        text = "Résumé: 数学の問題を解く 🧮"
+        metadata = AVPMetadata(model_id="test")
+        data = encode_hybrid(b"\x01", text, metadata)
+        msg = decode(data)
+        assert msg.text_fallback == text
+
+    def test_hybrid_with_compression(self):
+        """zstd compression works on HybridPayload."""
+        latent = b"\x00" * 4096  # compresses well
+        metadata = AVPMetadata(model_id="test")
+        data_uncompressed = encode_hybrid(latent, "text", metadata)
+
+        metadata2 = AVPMetadata(model_id="test")
+        data_compressed = encode_hybrid(
+            latent, "text", metadata2, compression=CompressionLevel.BALANCED
+        )
+        assert len(data_compressed) < len(data_uncompressed)
+
+        msg = decode(data_compressed)
+        assert msg.header.compressed
+        assert msg.header.is_hybrid
+        assert msg.payload == latent
+        assert msg.text_fallback == "text"
+
+    def test_hybrid_confidence_scores(self):
+        """Per-chunk confidence values are encoded in the protobuf."""
+        from avp import avp_pb2
+
+        metadata = AVPMetadata(model_id="test")
+        data = encode_hybrid(
+            b"\x01", "text", metadata,
+            latent_confidence=0.85,
+            text_confidence=0.60,
+        )
+        # Decode the raw HybridPayload to verify confidence values
+        msg = decode(data)
+        # Re-parse the wire bytes to check protobuf directly
+        raw_msg = decode.__wrapped__ if hasattr(decode, "__wrapped__") else None
+        # Just re-encode and check the protobuf layer
+        _, _, flags, payload_length, metadata_length = struct.unpack(
+            _HEADER_FMT, data[:HEADER_SIZE]
+        )
+        meta_end = HEADER_SIZE + metadata_length
+        raw_payload = data[meta_end:HEADER_SIZE + payload_length]
+
+        hybrid_pb = avp_pb2.HybridPayload()
+        hybrid_pb.ParseFromString(raw_payload)
+        confidences = {c.chunk_type: c.confidence for c in hybrid_pb.chunks}
+        assert confidences[avp_pb2.LATENT_CHUNK] == pytest.approx(0.85, abs=0.01)
+        assert confidences[avp_pb2.TEXT_CHUNK] == pytest.approx(0.60, abs=0.01)
+
+    def test_non_hybrid_has_none_fallback(self):
+        """Regular LATENT message has text_fallback=None."""
+        metadata = AVPMetadata(
+            model_id="test",
+            mode=CommunicationMode.LATENT,
+        )
+        data = encode(b"\x00", metadata)
+        msg = decode(data)
+        assert msg.text_fallback is None

@@ -545,3 +545,86 @@ def test_json_fallback_over_http(integration_server, tiny_untied_connector):
     assert data["success"] is True
     assert data["content"] == "Hello from JSON fallback!"
     assert data["source_agent_id"] == "json-client"
+
+
+# ---------------------------------------------------------------------------
+# Test 9: Hybrid KV-cache pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_kv_cache_pipeline(tiny_tied_connector):
+    """Hybrid mode: latent KV-cache + text_fallback survive full pipeline.
+
+    Verifies: latent_steps → serialize KV → encode_hybrid → decode →
+    deserialize KV → verify text_fallback + forward pass with restored cache.
+    """
+    from avp.codec import decode, encode_hybrid
+    from avp.kv_cache import deserialize_kv_cache, legacy_to_dynamic_cache, serialize_kv_cache
+    from avp.realign import compute_target_norm, normalize_to_target
+    from avp.types import AVPMetadata, CommunicationMode, DataType, PayloadType
+
+    connector = tiny_tied_connector
+    latent_steps = 3
+
+    # Agent A: tokenize and run latent steps
+    input_ids = connector.tokenize("hybrid mode test")
+    accumulated_kv = connector.generate_latent_steps(
+        input_ids=input_ids, latent_steps=latent_steps
+    )
+
+    # Agent A: serialize KV-cache
+    kv_bytes, kv_header = serialize_kv_cache(accumulated_kv)
+
+    # Agent A: also generate a text summary (simulated)
+    text_summary = "Plan: solve the math problem step by step."
+
+    # Agent A: encode as hybrid message
+    metadata = AVPMetadata(
+        session_id="hybrid-test",
+        source_agent_id="agent-a",
+        target_agent_id="agent-b",
+        model_id="tiny-gpt2",
+        hidden_dim=64,
+        num_layers=kv_header.num_layers,
+        payload_type=PayloadType.KV_CACHE,
+        dtype=DataType.FLOAT32,
+    )
+    avp_binary = encode_hybrid(kv_bytes, text_summary, metadata)
+
+    # Agent B: decode
+    msg = decode(avp_binary)
+    assert msg.header.is_hybrid
+    assert msg.header.is_kv_cache
+    assert msg.metadata.mode == CommunicationMode.HYBRID
+    assert msg.text_fallback == text_summary
+
+    # Agent B: deserialize KV-cache from latent payload
+    restored_kv, restored_header = deserialize_kv_cache(msg.payload)
+    assert restored_header.num_layers == kv_header.num_layers
+    assert restored_header.seq_len == kv_header.seq_len
+
+    # Agent B: forward pass with restored KV-cache
+    dynamic_cache = legacy_to_dynamic_cache(restored_kv)
+
+    last_hidden, _, _ = connector.extract_hidden_state(input_ids)
+    target_norm = compute_target_norm(connector.model, device="cpu")
+    normalized = normalize_to_target(last_hidden, target_norm)
+    inputs_embeds = normalized.unsqueeze(1)  # [B, 1, D]
+
+    total_len = inputs_embeds.shape[1] + kv_header.seq_len
+    attention_mask = torch.ones((1, total_len), dtype=torch.long)
+
+    with torch.no_grad():
+        outputs = connector.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=dynamic_cache,
+            use_cache=True,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+
+    assert outputs.logits.shape[0] == 1
+    assert outputs.logits.shape[1] == 1
+    assert outputs.logits.shape[2] == 256
+    assert outputs.hidden_states is not None

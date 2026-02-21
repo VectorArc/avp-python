@@ -32,7 +32,7 @@ class ValidationConfig:
     """Thresholds for projection quality validation."""
 
     cosine_sim_threshold: float = 0.5  # Below → instant JSON (skip perplexity)
-    perplexity_latent: float = 20.0    # Below → LATENT
+    perplexity_latent: float = 50.0    # Below → LATENT (calibrated: Qwen2.5-1.5B→0.5B ppl=25.8 works)
     perplexity_json: float = 100.0     # Above → JSON, between → HYBRID
     num_test_texts: int = 5
 

@@ -40,10 +40,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "direct", "both", "all"],
+        choices=["latent", "text", "direct", "hybrid", "both", "all"],
         default="all",
         help="Pipeline(s) to run. 'direct' = single-agent baseline, "
-             "'both' = latent+text chains, 'all' = direct+text+latent (default: all)",
+             "'hybrid' = latent+text summary, "
+             "'both' = latent+text chains, 'all' = direct+text+latent+hybrid (default: all)",
     )
     parser.add_argument(
         "--model_name",
@@ -82,6 +83,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
         help="Max tokens for text generation (default: 512)",
+    )
+    parser.add_argument(
+        "--summary_max_tokens",
+        type=int,
+        default=128,
+        help="Max tokens for hybrid text summary per hop (default: 128)",
     )
     parser.add_argument(
         "--temperature",
@@ -191,6 +198,7 @@ def main() -> None:
     run_direct = args.mode in ("direct", "all")
     run_latent = args.mode in ("latent", "both", "all")
     run_text = args.mode in ("text", "both", "all")
+    run_hybrid = args.mode in ("hybrid", "all")
 
     print(f"Device: {device}")
     print(f"Mode: {args.mode}")
@@ -201,7 +209,7 @@ def main() -> None:
     print(f"Max new tokens: {args.max_new_tokens}")
     print(f"Temperature: {args.temperature}")
     print(f"Seed: {args.seed}")
-    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}")
+    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, hybrid={run_hybrid}")
     print()
 
     # Load dataset
@@ -213,6 +221,7 @@ def main() -> None:
     direct_results = None
     latent_results = None
     text_results = None
+    hybrid_results = None
 
     # Run direct baseline
     if run_direct:
@@ -279,6 +288,31 @@ def main() -> None:
             verbose=args.verbose,
         )
 
+    # Run hybrid pipeline
+    if run_hybrid:
+        from benchmarks.gsm8k.pipeline_hybrid import run_hybrid_benchmark
+
+        print("\n" + "=" * 50)
+        print("Running HYBRID (AVP latent+text 4-agent chain) pipeline...")
+        print("=" * 50)
+        set_seed(args.seed)
+
+        hybrid_results = run_hybrid_benchmark(
+            connector=connector,
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            identity=identity,
+            dataset=dataset,
+            model_name=args.model_name,
+            latent_steps=args.latent_steps,
+            max_new_tokens=args.max_new_tokens,
+            summary_max_tokens=args.summary_max_tokens,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            verbose=args.verbose,
+        )
+
     # Print summary
     from benchmarks.gsm8k.evaluate import compute_accuracy, print_summary
 
@@ -292,6 +326,17 @@ def main() -> None:
         print(f"\nDirect (single-agent) baseline: "
               f"{acc['accuracy']:.1%} ({acc['correct']}/{acc['total']}), "
               f"mean {mean_t:.1f}s/sample")
+
+    # Print hybrid results if available
+    if hybrid_results is not None:
+        acc = compute_accuracy(hybrid_results)
+        times = [r["wall_time"] for r in hybrid_results if "wall_time" in r]
+        mean_t = sum(times) / len(times) if times else 0
+        overheads = [r["codec_overhead_ms"] for r in hybrid_results if "codec_overhead_ms" in r]
+        mean_oh = sum(overheads) / len(overheads) if overheads else 0
+        print(f"\nHybrid (latent+text summary): "
+              f"{acc['accuracy']:.1%} ({acc['correct']}/{acc['total']}), "
+              f"mean {mean_t:.1f}s/sample, codec={mean_oh:.1f}ms")
 
     # Save results
     output_dir = args.output_dir
@@ -337,6 +382,11 @@ def main() -> None:
         output_data["text"] = {
             "summary": compute_accuracy(text_results),
             "samples": text_results,
+        }
+    if hybrid_results is not None:
+        output_data["hybrid"] = {
+            "summary": compute_accuracy(hybrid_results),
+            "samples": hybrid_results,
         }
 
     with open(output_path, "w", encoding="utf-8") as f:

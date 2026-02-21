@@ -1,6 +1,6 @@
 """AVP — Agent Vector Protocol Python SDK."""
 
-from .codec import decode, encode, encode_hidden_state, encode_kv_cache
+from .codec import decode, encode, encode_hidden_state, encode_hybrid, encode_kv_cache
 from .compression import compress, decompress
 from .errors import (
     AVPError,
@@ -81,6 +81,7 @@ __all__ = [
     "decode",
     "encode_hidden_state",
     "encode_kv_cache",
+    "encode_hybrid",
     # Compression
     "compress",
     "decompress",

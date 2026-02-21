@@ -221,6 +221,7 @@ class AVPMessage:
     metadata: AVPMetadata
     payload: bytes = b""
     raw_size: int = 0
+    text_fallback: Optional[str] = None  # Populated for HYBRID messages
 
     @property
     def embedding(self) -> np.ndarray:
