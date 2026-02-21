@@ -313,30 +313,15 @@ def main() -> None:
             verbose=args.verbose,
         )
 
-    # Print summary
+    # Print comprehensive summary
     from benchmarks.gsm8k.evaluate import compute_accuracy, print_summary
 
-    print_summary(latent_results, text_results)
-
-    # Print direct baseline if available
-    if direct_results is not None:
-        acc = compute_accuracy(direct_results)
-        times = [r["wall_time"] for r in direct_results if "wall_time" in r]
-        mean_t = sum(times) / len(times) if times else 0
-        print(f"\nDirect (single-agent) baseline: "
-              f"{acc['accuracy']:.1%} ({acc['correct']}/{acc['total']}), "
-              f"mean {mean_t:.1f}s/sample")
-
-    # Print hybrid results if available
-    if hybrid_results is not None:
-        acc = compute_accuracy(hybrid_results)
-        times = [r["wall_time"] for r in hybrid_results if "wall_time" in r]
-        mean_t = sum(times) / len(times) if times else 0
-        overheads = [r["codec_overhead_ms"] for r in hybrid_results if "codec_overhead_ms" in r]
-        mean_oh = sum(overheads) / len(overheads) if overheads else 0
-        print(f"\nHybrid (latent+text summary): "
-              f"{acc['accuracy']:.1%} ({acc['correct']}/{acc['total']}), "
-              f"mean {mean_t:.1f}s/sample, codec={mean_oh:.1f}ms")
+    print_summary(
+        latent_results=latent_results,
+        text_results=text_results,
+        direct_results=direct_results,
+        hybrid_results=hybrid_results,
+    )
 
     # Save results
     output_dir = args.output_dir

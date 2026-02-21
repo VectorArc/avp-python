@@ -62,6 +62,10 @@ def run_hybrid_pipeline(
         PayloadType,
     )
 
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+        mem_before = torch.cuda.max_memory_allocated()
+
     t0 = time.perf_counter()
     session_id = str(uuid.uuid4())
     past_kv = None
@@ -69,6 +73,10 @@ def run_hybrid_pipeline(
     total_codec_time_ms = 0.0
     total_wire_bytes = 0
     total_cross_model_ms = 0.0
+    total_prompt_tokens = 0
+    total_latent_steps = 0
+    total_summary_tokens = 0
+    total_output_tokens = 0
 
     for idx, agent in enumerate(AGENTS):
         next_agent = AGENTS[idx + 1] if idx + 1 < len(AGENTS) else None
@@ -78,8 +86,13 @@ def run_hybrid_pipeline(
         prompt_text = render_prompt(tokenizer, messages)
         input_ids, attention_mask = tokenize_prompt(tokenizer, prompt_text, device)
 
+        agent_t0 = time.perf_counter()
+        prompt_tokens = int(input_ids.shape[-1])
+        total_prompt_tokens += prompt_tokens
+
         if agent.role != "judger":
             # --- Latent steps: generate KV-cache ---
+            total_latent_steps += latent_steps
             past_kv = connector.generate_latent_steps(
                 input_ids,
                 latent_steps=latent_steps,
@@ -104,6 +117,10 @@ def run_hybrid_pipeline(
                 top_p=top_p,
             )
             summary_time_ms = (time.perf_counter() - summary_t0) * 1000
+
+            summary_encoded = tokenizer(summary_text, add_special_tokens=False)
+            summary_tokens = len(summary_encoded["input_ids"])
+            total_summary_tokens += summary_tokens
 
             # --- AVP hybrid codec roundtrip ---
             codec_t0 = time.perf_counter()
@@ -134,16 +151,19 @@ def run_hybrid_pipeline(
             total_codec_time_ms += codec_time_ms
 
             kv_seq_len = _get_past_length(past_kv)
+            agent_time_ms = (time.perf_counter() - agent_t0) * 1000
 
             agent_traces.append({
                 "name": agent.name,
                 "role": agent.role,
-                "prompt_tokens": int(input_ids.shape[-1]),
+                "prompt_tokens": prompt_tokens,
                 "latent_steps": latent_steps,
+                "summary_tokens": summary_tokens,
                 "kv_seq_len_after": kv_seq_len,
                 "wire_bytes": wire_size,
                 "codec_time_ms": codec_time_ms,
                 "summary_time_ms": summary_time_ms,
+                "agent_time_ms": agent_time_ms,
                 "text_fallback": avp_msg.text_fallback,
                 "output": "",
             })
@@ -168,11 +188,18 @@ def run_hybrid_pipeline(
                 top_p=top_p,
             )
 
+            output_encoded = tokenizer(text, add_special_tokens=False)
+            output_tokens = len(output_encoded["input_ids"])
+            total_output_tokens += output_tokens
+            agent_time_ms = (time.perf_counter() - agent_t0) * 1000
+
             agent_traces.append({
                 "name": agent.name,
                 "role": agent.role,
-                "prompt_tokens": int(input_ids.shape[-1]),
+                "prompt_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
                 "kv_seq_len_input": kv_seq_len,
+                "agent_time_ms": agent_time_ms,
                 "output": text,
             })
 
@@ -181,6 +208,13 @@ def run_hybrid_pipeline(
                       f"output ({len(text)} chars): {text[:200]}...")
 
     wall_time = time.perf_counter() - t0
+    total_tokens = total_prompt_tokens + total_latent_steps + total_summary_tokens + total_output_tokens
+    tokens_per_sec = total_tokens / wall_time if wall_time > 0 else 0
+
+    peak_memory_mb = None
+    if device == "cuda":
+        peak_memory_mb = (torch.cuda.max_memory_allocated() - mem_before) / (1024 * 1024)
+
     gold = extract_gold(gold_solution)
     prediction = extract_gsm8k_answer(agent_traces[-1]["output"])
 
@@ -194,6 +228,13 @@ def run_hybrid_pipeline(
         "raw_output": agent_traces[-1]["output"],
         "correct": correct,
         "wall_time": wall_time,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_latent_steps": total_latent_steps,
+        "total_summary_tokens": total_summary_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_tokens": total_tokens,
+        "tokens_per_sec": tokens_per_sec,
+        "peak_memory_mb": peak_memory_mb,
         "codec_overhead_ms": total_codec_time_ms,
         "avp_wire_bytes": total_wire_bytes,
         "kv_seq_len_judger": _get_past_length(past_kv) if past_kv else 0,

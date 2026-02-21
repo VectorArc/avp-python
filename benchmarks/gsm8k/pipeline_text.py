@@ -30,16 +30,35 @@ def run_text_pipeline(
 
     Each agent generates text, which is concatenated into the next agent's prompt.
     """
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+        mem_before = torch.cuda.max_memory_allocated()
+
     t0 = time.perf_counter()
     context = ""
     agent_traces: List[Dict] = []
+    total_prompt_tokens = 0
+    total_output_tokens = 0
+    total_context_tokens = 0
 
     for agent in AGENTS:
+        agent_t0 = time.perf_counter()
+
+        # Count context tokens being re-processed (the "communication tax")
+        if context:
+            context_encoded = tokenizer(context, add_special_tokens=False)
+            context_token_count = len(context_encoded["input_ids"])
+        else:
+            context_token_count = 0
+        total_context_tokens += context_token_count
+
         if agent.role == "judger":
             # Judger generates the final answer
             messages = build_text_prompt(agent.role, question, context)
             prompt_text = render_prompt(tokenizer, messages)
             input_ids, attention_mask = tokenize_prompt(tokenizer, prompt_text, device)
+            prompt_tokens = int(input_ids.shape[-1])
+            total_prompt_tokens += prompt_tokens
 
             text, _ = generate_text(
                 model, tokenizer, input_ids, attention_mask, device,
@@ -48,10 +67,18 @@ def run_text_pipeline(
                 top_p=top_p,
             )
 
+            output_encoded = tokenizer(text, add_special_tokens=False)
+            output_tokens = len(output_encoded["input_ids"])
+            total_output_tokens += output_tokens
+            agent_time_ms = (time.perf_counter() - agent_t0) * 1000
+
             agent_traces.append({
                 "name": agent.name,
                 "role": agent.role,
-                "prompt_tokens": int(input_ids.shape[-1]),
+                "prompt_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
+                "context_tokens": context_token_count,
+                "agent_time_ms": agent_time_ms,
                 "output": text,
             })
 
@@ -62,6 +89,8 @@ def run_text_pipeline(
             messages = build_text_prompt(agent.role, question, context)
             prompt_text = render_prompt(tokenizer, messages)
             input_ids, attention_mask = tokenize_prompt(tokenizer, prompt_text, device)
+            prompt_tokens = int(input_ids.shape[-1])
+            total_prompt_tokens += prompt_tokens
 
             text, _ = generate_text(
                 model, tokenizer, input_ids, attention_mask, device,
@@ -72,10 +101,18 @@ def run_text_pipeline(
 
             context += f"[{agent.name}]:\n{text}\n\n"
 
+            output_encoded = tokenizer(text, add_special_tokens=False)
+            output_tokens = len(output_encoded["input_ids"])
+            total_output_tokens += output_tokens
+            agent_time_ms = (time.perf_counter() - agent_t0) * 1000
+
             agent_traces.append({
                 "name": agent.name,
                 "role": agent.role,
-                "prompt_tokens": int(input_ids.shape[-1]),
+                "prompt_tokens": prompt_tokens,
+                "output_tokens": output_tokens,
+                "context_tokens": context_token_count,
+                "agent_time_ms": agent_time_ms,
                 "output": text,
             })
 
@@ -83,6 +120,13 @@ def run_text_pipeline(
                 print(f"  [{agent.name}] output ({len(text)} chars): {text[:200]}...")
 
     wall_time = time.perf_counter() - t0
+    total_tokens = total_prompt_tokens + total_output_tokens
+    tokens_per_sec = total_tokens / wall_time if wall_time > 0 else 0
+
+    peak_memory_mb = None
+    if device == "cuda":
+        peak_memory_mb = (torch.cuda.max_memory_allocated() - mem_before) / (1024 * 1024)
+
     gold = extract_gold(gold_solution)
     prediction = extract_gsm8k_answer(agent_traces[-1]["output"])
 
@@ -96,6 +140,12 @@ def run_text_pipeline(
         "raw_output": agent_traces[-1]["output"],
         "correct": correct,
         "wall_time": wall_time,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_tokens": total_tokens,
+        "total_context_tokens": total_context_tokens,
+        "tokens_per_sec": tokens_per_sec,
+        "peak_memory_mb": peak_memory_mb,
         "agents": agent_traces,
         "mode": "text",
     }
