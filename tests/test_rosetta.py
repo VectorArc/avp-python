@@ -4,6 +4,8 @@ import pytest
 import torch
 from conftest import MockTokenizer, requires_torch, requires_transformers
 
+from avp.types import ProjectionMethod
+
 
 # ---------------------------------------------------------------------------
 # Mock tokenizer with get_vocab() support for tokenizer hash tests
@@ -175,7 +177,7 @@ class TestCalibrate:
             anchor_texts=self.ANCHOR_TEXTS, device="cpu",
         )
 
-        assert avp_map.method == "ridge"
+        assert avp_map.method == ProjectionMethod.RIDGE
         assert avp_map.w_map.shape == (64, 128)
         assert avp_map.source_dim == 64
         assert avp_map.target_dim == 128
@@ -195,7 +197,7 @@ class TestCalibrate:
             anchor_texts=self.ANCHOR_TEXTS, device="cpu",
         )
 
-        assert avp_map.method == "procrustes"
+        assert avp_map.method == ProjectionMethod.PROCRUSTES
         assert avp_map.w_map.shape == (64, 64)
 
         # Procrustes matrix should be approximately orthogonal: W^T @ W ≈ I
@@ -214,7 +216,7 @@ class TestCalibrate:
             src_model, tgt_model, src_tok, tgt_tok,
             anchor_texts=self.ANCHOR_TEXTS, method="auto", device="cpu",
         )
-        assert avp_map.method == "ridge"
+        assert avp_map.method == ProjectionMethod.RIDGE
 
     def test_calibrate_auto_selects_procrustes(self, tiny_gpt2_64, tiny_gpt2_64_v2):
         """Auto method selects procrustes when dims match."""
@@ -227,7 +229,7 @@ class TestCalibrate:
             src_model, tgt_model, src_tok, tgt_tok,
             anchor_texts=self.ANCHOR_TEXTS, method="auto", device="cpu",
         )
-        assert avp_map.method == "procrustes"
+        assert avp_map.method == ProjectionMethod.PROCRUSTES
 
     def test_calibrate_procrustes_fails_different_dims(self, tiny_gpt2_64, tiny_gpt2_128):
         """Procrustes raises ValueError when dims differ."""
@@ -702,7 +704,7 @@ class TestCalibrateVocabMediated:
             src_model, tgt_model, src_tok, tgt_tok, device="cpu",
         )
 
-        assert avp_map.method == "vocab_mediated"
+        assert avp_map.method == ProjectionMethod.VOCAB_MEDIATED
         assert avp_map.anchor_count == 0
         assert avp_map.validation_score == 1.0
         # w_map should be target's input embedding weights [vocab_size, D_tgt]
@@ -724,7 +726,7 @@ class TestCalibrateVocabMediated:
             src_model, tgt_model, src_tok, tgt_tok,
             anchor_texts=anchor_texts, device="cpu",
         )
-        assert avp_map.method == "ridge"
+        assert avp_map.method == ProjectionMethod.RIDGE
 
     def test_calibrate_vocab_mediated_explicit(self, tiny_gpt2_64, tiny_gpt2_128):
         """calibrate() with method='vocab_mediated' works explicitly."""
@@ -739,7 +741,7 @@ class TestCalibrateVocabMediated:
             src_model, tgt_model, src_tok, tgt_tok,
             method="vocab_mediated", device="cpu",
         )
-        assert avp_map.method == "vocab_mediated"
+        assert avp_map.method == ProjectionMethod.VOCAB_MEDIATED
 
     def test_calibrate_vocab_mediated_fails_different_vocab(self, tiny_gpt2_64, tiny_gpt2_128):
         """calibrate() with method='vocab_mediated' fails when vocab differs."""

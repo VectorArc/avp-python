@@ -6,17 +6,7 @@ embedding space using a learned linear map (W_map).
 
 from typing import Any, Optional
 
-
-def _require_torch():
-    try:
-        import torch
-        return torch
-    except ImportError:
-        from ..errors import RealignmentError
-        raise RealignmentError(
-            "torch is required for Rosetta Stone projection. "
-            "Install with: pip install avp[latent]"
-        )
+from .._torch_compat import require_torch as _require_torch
 
 
 def apply_cross_model_projection(

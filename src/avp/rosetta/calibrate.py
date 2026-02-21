@@ -5,25 +5,21 @@ and fits a linear map via ridge regression or orthogonal Procrustes.
 """
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 from ..errors import RealignmentError
-
-
-def _require_torch():
-    try:
-        import torch
-        return torch
-    except ImportError:
-        raise RealignmentError(
-            "torch is required for Rosetta Stone calibration. "
-            "Install with: pip install avp[latent]"
-        )
+from ..types import ProjectionMethod
+from .._torch_compat import require_torch as _require_torch
 
 
 @dataclass
 class AVPMap:
-    """A learned projection map between two models."""
+    """A learned or vocabulary-mediated projection map between two models.
+
+    The ``w_map`` field holds different data depending on the method:
+      - RIDGE / PROCRUSTES: projection matrix of shape [D_src, D_tgt].
+      - VOCAB_MEDIATED: target model's input embedding weights [vocab_size, D_tgt].
+    """
 
     source_model_id: str
     source_hash: str
@@ -31,12 +27,16 @@ class AVPMap:
     target_model_id: str
     target_hash: str
     target_dim: int
-    w_map: Any           # torch.Tensor [D_src, D_tgt]
+    w_map: Any           # torch.Tensor — see class docstring for shape
     bias: Optional[Any]  # torch.Tensor [D_tgt] or None
     target_norm: Any     # torch.Tensor scalar
-    method: str          # "ridge" or "procrustes"
+    method: Union[ProjectionMethod, str]  # ProjectionMethod enum (str accepted for compat)
     anchor_count: int
     validation_score: float
+
+    def __post_init__(self) -> None:
+        if isinstance(self.method, str):
+            self.method = ProjectionMethod(self.method)
 
 
 # Diverse anchor sentences for calibration.
@@ -238,11 +238,19 @@ def calibrate(
     src_hash = compute_model_hash(source_model.config.to_dict())
     tgt_hash = compute_model_hash(target_model.config.to_dict())
 
+    # Resolve method string to enum (accept both strings and enums)
+    if isinstance(method, ProjectionMethod):
+        resolved = method
+    elif method == "auto":
+        resolved = None  # decide below
+    else:
+        resolved = ProjectionMethod(method)
+
     # Check for shared vocabulary → instant vocab-mediated projection
     shared_vocab = _have_shared_vocab(source_tokenizer, target_tokenizer)
-    if method == "auto" and shared_vocab:
-        method = "vocab_mediated"
-    if method == "vocab_mediated":
+    if resolved is None and shared_vocab:
+        resolved = ProjectionMethod.VOCAB_MEDIATED
+    if resolved == ProjectionMethod.VOCAB_MEDIATED:
         if not shared_vocab:
             raise ValueError(
                 "vocab_mediated method requires tokenizers with the same vocabulary."
@@ -275,7 +283,7 @@ def calibrate(
             w_map=w_map,
             bias=None,
             target_norm=target_norm.cpu(),
-            method="vocab_mediated",
+            method=ProjectionMethod.VOCAB_MEDIATED,
             anchor_count=0,
             validation_score=1.0,  # no calibration needed
         )
@@ -321,18 +329,18 @@ def calibrate(
     d_tgt = Y_train.shape[-1]
 
     # Choose method
-    if method == "auto":
-        chosen_method = "procrustes" if d_src == d_tgt else "ridge"
+    if resolved is None:
+        chosen = ProjectionMethod.PROCRUSTES if d_src == d_tgt else ProjectionMethod.RIDGE
     else:
-        if method == "procrustes" and d_src != d_tgt:
+        if resolved == ProjectionMethod.PROCRUSTES and d_src != d_tgt:
             raise ValueError(
                 f"Procrustes requires same dimensions, got {d_src} vs {d_tgt}. "
                 f"Use method='ridge' or method='auto'."
             )
-        chosen_method = method
+        chosen = resolved
 
     # Fit projection
-    if chosen_method == "procrustes":
+    if chosen == ProjectionMethod.PROCRUSTES:
         w_map = _orthogonal_procrustes(X_train, Y_train)
     else:
         w_map = _ridge_regression(X_train, Y_train, lambda_reg)
@@ -378,7 +386,7 @@ def calibrate(
         w_map=w_map.cpu(),
         bias=None,
         target_norm=target_norm.cpu(),
-        method=chosen_method,
+        method=chosen,
         anchor_count=n_train,
         validation_score=validation_score,
     )

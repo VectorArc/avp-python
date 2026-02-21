@@ -380,6 +380,7 @@ def run_mixed_pipeline(
         CommunicationMode,
         DataType,
         PayloadType,
+        ProjectionMethod,
     )
 
     t0 = time.perf_counter()
@@ -489,7 +490,7 @@ def run_mixed_pipeline(
             hop_header = f"Hop {hop_num}: {agent.name} -> {next_agent.name}"
             print(f"\n{'':─<64}")
             print(f"  {hop_header}")
-            mode_label = "VOCAB" if rosetta_map.method == "vocab_mediated" else "ROSETTA"
+            mode_label = "VOCAB" if rosetta_map.method == ProjectionMethod.VOCAB_MEDIATED else "ROSETTA"
             print(f"  Handshake: {identity.model_family} "
                   f"({identity.hidden_dim}d, {identity.num_layers}L) <-> "
                   f"{next_identity.model_family} "
@@ -534,7 +535,7 @@ def run_mixed_pipeline(
                   f"then {mode_label} projection ({identity.hidden_dim}d -> "
                   f"{next_identity.hidden_dim}d)")
             print(f"  Projection: {rosetta_ms:.1f}ms | "
-                  f"Map: {rosetta_map.method}")
+                  f"Map: {rosetta_map.method.value}")
 
             hop_traces.append({
                 "hop": hop_num,
@@ -543,7 +544,7 @@ def run_mixed_pipeline(
                 "mode": mode_label,
                 "latent_steps": latent_steps,
                 "rosetta_ms": rosetta_ms,
-                "method": rosetta_map.method,
+                "method": rosetta_map.method.value,
                 "validation_score": rosetta_map.validation_score,
             })
 
@@ -772,6 +773,7 @@ def main() -> None:
     rosetta_map = None
     if args.rosetta:
         from avp.rosetta import calibrate as rosetta_calibrate
+        from avp.types import ProjectionMethod
 
         print("Calibrating Rosetta Stone map (Model A -> Model B)...")
         cal_t0 = time.perf_counter()
@@ -781,13 +783,13 @@ def main() -> None:
             device=device,
         )
         cal_elapsed = time.perf_counter() - cal_t0
-        if rosetta_map.method == "vocab_mediated":
+        if rosetta_map.method == ProjectionMethod.VOCAB_MEDIATED:
             print(f"  Method: VOCAB (shared tokenizer, zero calibration)")
             print(f"  Source dim: {rosetta_map.source_dim} -> "
                   f"Target dim: {rosetta_map.target_dim} | "
                   f"Time: {cal_elapsed:.1f}s")
         else:
-            print(f"  Method: {rosetta_map.method} | "
+            print(f"  Method: {rosetta_map.method.value} | "
                   f"Shape: [{rosetta_map.source_dim}, {rosetta_map.target_dim}] | "
                   f"Validation cosine sim: {rosetta_map.validation_score:.3f} | "
                   f"Time: {cal_elapsed:.1f}s")
@@ -797,7 +799,7 @@ def main() -> None:
         f"{a.name} [{a.model_key[-1].upper()}]" for a in AGENTS
     )
     print(f"Pipeline: {pipeline_str}")
-    if rosetta_map and rosetta_map.method == "vocab_mediated":
+    if rosetta_map and rosetta_map.method == ProjectionMethod.VOCAB_MEDIATED:
         print(f"Mode: LATENT -> VOCAB -> LATENT")
     elif rosetta_map:
         print(f"Mode: LATENT -> ROSETTA -> LATENT")

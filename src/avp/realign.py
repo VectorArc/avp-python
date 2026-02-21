@@ -12,20 +12,10 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from .errors import RealignmentError
+from ._torch_compat import require_torch as _require_torch
 
 # Cache directory for realignment matrices
 _CACHE_DIR = Path(os.environ.get("AVP_CACHE_DIR", str(Path.home() / ".avp"))) / "realign"
-
-
-def _require_torch():
-    """Lazy import torch, raising a clear error if not available."""
-    try:
-        import torch
-        return torch
-    except ImportError:
-        raise RealignmentError(
-            "torch is required for realignment. Install with: pip install avp[latent]"
-        )
 
 
 def needs_realignment(model_or_config: Any) -> bool:

@@ -369,11 +369,17 @@ class HuggingFaceConnector(EngineConnector):
             Projected tensor of shape [..., D_tgt] suitable for injection
             into the target model via inputs_embeds.
         """
-        if avp_map.method == "vocab_mediated":
+        from ..types import ProjectionMethod
+        if avp_map.method == ProjectionMethod.VOCAB_MEDIATED:
             from ..rosetta.project import vocabulary_mediated_projection
             source_lm_head = self.model.get_output_embeddings()
             if source_lm_head is None:
                 source_lm_head = getattr(self.model, "lm_head", None)
+            if source_lm_head is None or not hasattr(source_lm_head, "weight"):
+                raise RealignmentError(
+                    "Cannot get source output embeddings (lm_head) for "
+                    "vocabulary-mediated projection."
+                )
             return vocabulary_mediated_projection(
                 hidden_state,
                 source_lm_head_weight=source_lm_head.weight,

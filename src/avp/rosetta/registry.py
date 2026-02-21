@@ -9,18 +9,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..errors import RealignmentError
+from .._torch_compat import require_torch as _require_torch
 from .calibrate import AVPMap
-
-
-def _require_torch():
-    try:
-        import torch
-        return torch
-    except ImportError:
-        raise RealignmentError(
-            "torch is required for Rosetta Stone map I/O. "
-            "Install with: pip install avp[latent]"
-        )
 
 
 _MAP_DIR = Path(os.environ.get("AVP_CACHE_DIR", str(Path.home() / ".avp"))) / "maps"
@@ -59,7 +49,7 @@ def save_map(avp_map: AVPMap, map_dir: Optional[Path] = None) -> Path:
         "w_map": avp_map.w_map.cpu(),
         "bias": avp_map.bias.cpu() if avp_map.bias is not None else None,
         "target_norm": avp_map.target_norm.cpu(),
-        "method": avp_map.method,
+        "method": avp_map.method.value,  # serialize enum as string
         "anchor_count": avp_map.anchor_count,
         "validation_score": avp_map.validation_score,
     }

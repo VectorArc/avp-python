@@ -52,6 +52,14 @@ class CommunicationMode(enum.IntEnum):
     JSON = 2
 
 
+class ProjectionMethod(enum.Enum):
+    """Rosetta Stone cross-model projection methods."""
+
+    RIDGE = "ridge"
+    PROCRUSTES = "procrustes"
+    VOCAB_MEDIATED = "vocab_mediated"
+
+
 class DataType(enum.IntEnum):
     """Supported tensor data types."""
 

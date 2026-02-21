@@ -21,6 +21,7 @@ from .fallback import FallbackRequest, JSONMessage
 from .handshake import CompatibilityResolver, HelloMessage, compute_model_hash, compute_tokenizer_hash, extract_model_identity
 from .session import Session, SessionManager
 from .types import (
+    ProjectionMethod,
     AVP_VERSION_HEADER,
     AVP_VERSION_STRING,
     CONTENT_TYPE,
@@ -108,6 +109,7 @@ __all__ = [
     "FLAG_HYBRID",
     "FLAG_HAS_MAP",
     "FLAG_KV_CACHE",
+    "ProjectionMethod",
     # Rosetta Stone (lazy — requires torch)
     "AVPMap",
     "calibrate",
