@@ -66,6 +66,20 @@ def tiny_gpt2_64_v2():
     return model, tokenizer
 
 
+@pytest.fixture
+def seeded_tiny_gpt2_64():
+    """GPT2 tiny model: hidden_dim=64, tied weights, seeded for determinism."""
+    from transformers import GPT2Config, GPT2LMHeadModel
+    torch.manual_seed(42)
+    config = GPT2Config(
+        vocab_size=256, n_embd=64, n_head=4, n_layer=2, n_positions=128,
+    )
+    model = GPT2LMHeadModel(config)
+    model.eval()
+    tokenizer = VocabMockTokenizer(vocab_size=256)
+    return model, tokenizer
+
+
 # ---------------------------------------------------------------------------
 # Tests: projection function
 # ---------------------------------------------------------------------------
@@ -967,3 +981,178 @@ class TestValidation:
         assert isinstance(result, ValidationResult)
         assert isinstance(result.cosine_similarity, float)
         assert result.detail
+
+    # ------------------------------------------------------------------
+    # Regression tests: _compute_pseudo_perplexity & _compute_cosine_similarity
+    # ------------------------------------------------------------------
+
+    def test_perplexity_deterministic(self, seeded_tiny_gpt2_64):
+        """Calling _compute_pseudo_perplexity twice with identical inputs
+        must return bitwise-equal results."""
+        from avp.rosetta.validate import _compute_pseudo_perplexity
+
+        model, tokenizer = seeded_tiny_gpt2_64
+        encoded = tokenizer("The quick brown fox", return_tensors="pt")
+        token_ids = encoded["input_ids"][0]
+
+        embed_weight = model.get_input_embeddings().weight.detach()
+        projected = embed_weight[50]  # arbitrary token embedding
+
+        ppl_1 = _compute_pseudo_perplexity(model, projected, token_ids, "cpu")
+        ppl_2 = _compute_pseudo_perplexity(model, projected, token_ids, "cpu")
+
+        assert ppl_1 == ppl_2
+
+    def test_perplexity_own_embedding_beats_noise(self, seeded_tiny_gpt2_64):
+        """Priming with the model's own embedding should yield lower perplexity
+        than priming with random Gaussian noise of the same norm."""
+        from avp.rosetta.validate import _compute_pseudo_perplexity
+
+        model, tokenizer = seeded_tiny_gpt2_64
+        encoded = tokenizer("The quick brown fox", return_tensors="pt")
+        token_ids = encoded["input_ids"][0]
+
+        embed_weight = model.get_input_embeddings().weight.detach()
+        own_embed = embed_weight[token_ids[-1]]
+
+        # Raw randn is ~50x larger than embeddings (N(0,1) vs N(0,0.02) init),
+        # creating a genuine distributional difference after LayerNorm.
+        torch.manual_seed(123)
+        noise = torch.randn_like(own_embed)
+
+        ppl_own = _compute_pseudo_perplexity(model, own_embed, token_ids, "cpu")
+        ppl_noise = _compute_pseudo_perplexity(model, noise, token_ids, "cpu")
+
+        assert ppl_own < ppl_noise, (
+            f"Own embedding ppl ({ppl_own:.2f}) should be < noise ppl ({ppl_noise:.2f})"
+        )
+
+    def test_perplexity_noise_monotonicity(self, seeded_tiny_gpt2_64):
+        """Perplexity with clean embedding should be lower than with heavily
+        noised embedding (ppl[0] < ppl[-1])."""
+        from avp.rosetta.validate import _compute_pseudo_perplexity
+
+        model, tokenizer = seeded_tiny_gpt2_64
+        encoded = tokenizer("The quick brown fox", return_tensors="pt")
+        token_ids = encoded["input_ids"][0]
+
+        embed_weight = model.get_input_embeddings().weight.detach()
+        baseline = embed_weight[50].clone()
+
+        torch.manual_seed(99)
+        noise_dir = torch.randn_like(baseline)
+
+        noise_scales = [0.0, 1.0, 5.0, 20.0]
+        ppls = []
+        for scale in noise_scales:
+            noised = baseline + scale * noise_dir
+            ppl = _compute_pseudo_perplexity(model, noised, token_ids, "cpu")
+            ppls.append(ppl)
+
+        assert ppls[0] < ppls[-1], (
+            f"Clean ppl ({ppls[0]:.2f}) should be < heavily noised ppl ({ppls[-1]:.2f}). "
+            f"All: {[f'{p:.2f}' for p in ppls]}"
+        )
+
+    def test_perplexity_bounded_edge_cases(self, seeded_tiny_gpt2_64):
+        """Zero, very large, and very small vectors must all produce finite
+        positive perplexity (no nan, inf, or negative values)."""
+        import math
+        from avp.rosetta.validate import _compute_pseudo_perplexity
+
+        model, tokenizer = seeded_tiny_gpt2_64
+        encoded = tokenizer("The quick brown fox", return_tensors="pt")
+        token_ids = encoded["input_ids"][0]
+
+        hidden_dim = 64
+        cases = {
+            "zero": torch.zeros(hidden_dim),
+            "large": torch.ones(hidden_dim) * 1e6,
+            "small": torch.ones(hidden_dim) * 1e-8,
+        }
+
+        for name, vec in cases.items():
+            ppl = _compute_pseudo_perplexity(model, vec, token_ids, "cpu")
+            assert math.isfinite(ppl) and ppl > 0, (
+                f"{name} vector: expected finite positive ppl, got {ppl}"
+            )
+
+    def test_perplexity_snapshot_regression(self, seeded_tiny_gpt2_64):
+        """Perplexity for a fixed seed/model/text/embedding must match a
+        hardcoded snapshot. Any change to the computation logic breaks this."""
+        from avp.rosetta.validate import _compute_pseudo_perplexity
+
+        model, tokenizer = seeded_tiny_gpt2_64
+        encoded = tokenizer("The quick brown fox", return_tensors="pt")
+        token_ids = encoded["input_ids"][0]
+
+        embed_weight = model.get_input_embeddings().weight.detach()
+        projected = embed_weight[50]
+
+        ppl = _compute_pseudo_perplexity(model, projected, token_ids, "cpu")
+
+        # Snapshot established with torch.manual_seed(42), GPT2 tiny (256 vocab,
+        # 64 hidden, 4 heads, 2 layers, 128 positions), token index 50,
+        # text "The quick brown fox".
+        EXPECTED = 242.69
+        assert abs(ppl - EXPECTED) < 0.5, (
+            f"Snapshot regression: expected {EXPECTED}, got {ppl:.4f}"
+        )
+
+    def test_cosine_perplexity_correlation(self, seeded_tiny_gpt2_64):
+        """The projection with higher cosine similarity should also have
+        lower perplexity — both metrics measure the same quality signal."""
+        from avp.rosetta.validate import (
+            _compute_cosine_similarity,
+            _compute_pseudo_perplexity,
+        )
+
+        model, tokenizer = seeded_tiny_gpt2_64
+        encoded = tokenizer("The quick brown fox", return_tensors="pt")
+        token_ids = encoded["input_ids"][0]
+
+        embed_weight = model.get_input_embeddings().weight.detach()
+
+        # Good: model's own embeddings (cos_sim ≈ 1.0 by construction)
+        good_proj = embed_weight[token_ids]
+        good_last = good_proj[-1]
+
+        # Bad: random vectors
+        torch.manual_seed(77)
+        bad_proj = torch.randn_like(good_proj)
+        bad_last = bad_proj[-1]
+
+        cos_good = _compute_cosine_similarity(
+            good_proj, embed_weight, token_ids, is_next_token=False,
+        )
+        cos_bad = _compute_cosine_similarity(
+            bad_proj, embed_weight, token_ids, is_next_token=False,
+        )
+
+        ppl_good = _compute_pseudo_perplexity(model, good_last, token_ids, "cpu")
+        ppl_bad = _compute_pseudo_perplexity(model, bad_last, token_ids, "cpu")
+
+        assert cos_good > cos_bad, f"cos_good={cos_good:.3f} <= cos_bad={cos_bad:.3f}"
+        assert ppl_good < ppl_bad, (
+            f"ppl_good={ppl_good:.2f} should be < ppl_bad={ppl_bad:.2f}"
+        )
+
+    def test_perplexity_short_sequence_returns_inf(self, seeded_tiny_gpt2_64):
+        """Single-token input must return inf; two-token must return finite positive."""
+        import math
+        from avp.rosetta.validate import _compute_pseudo_perplexity
+
+        model, _ = seeded_tiny_gpt2_64
+
+        embed_weight = model.get_input_embeddings().weight.detach()
+        projected = embed_weight[50]
+
+        # Single token → inf (guard at line 165-166)
+        single = torch.tensor([50])
+        ppl_single = _compute_pseudo_perplexity(model, projected, single, "cpu")
+        assert ppl_single == float("inf")
+
+        # Two tokens → finite positive
+        two = torch.tensor([50, 60])
+        ppl_two = _compute_pseudo_perplexity(model, projected, two, "cpu")
+        assert math.isfinite(ppl_two) and ppl_two > 0
