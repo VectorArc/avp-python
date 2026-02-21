@@ -139,18 +139,21 @@ def _compute_cosine_similarity(
 
 def _compute_pseudo_perplexity(
     model: Any,
-    projected: Any,
+    projected_last_hidden: Any,
     token_ids: Any,
     device: str,
 ) -> float:
-    """Feed projected embeddings into target model and measure prediction quality.
+    """Measure if the target model can function after receiving a projected embedding.
 
-    Computes cross-entropy of logits[i] vs token_ids[i+1] for all positions,
-    then perplexity = exp(mean_loss).
+    Mirrors how the pipeline uses projections: inject ONE projected embedding
+    (the source model's last-token hidden state) to prime the target model's
+    context, then feed the actual text tokens and measure prediction quality.
+
+    Perplexity = exp(mean cross-entropy) on the text portion only.
 
     Args:
         model: Target model.
-        projected: Projected hidden states [seq_len, D_tgt].
+        projected_last_hidden: Projected last-token hidden state [D_tgt].
         token_ids: Token IDs [seq_len] from the shared tokenizer.
         device: Computation device.
 
@@ -159,27 +162,42 @@ def _compute_pseudo_perplexity(
     """
     torch = _require_torch()
 
-    if projected.shape[0] < 2:
+    if token_ids.shape[0] < 2:
         return float("inf")
 
-    # Match the model's parameter dtype (e.g. bfloat16) to avoid mat-mul errors
     model_dtype = next(model.parameters()).dtype
-    inputs_embeds = projected.unsqueeze(0).to(device=device, dtype=model_dtype)
+
+    # Get target model's own embeddings for the text tokens
+    tgt_input_embeds = model.get_input_embeddings()
+    text_embeds = tgt_input_embeds(token_ids.to(device))  # [seq_len, D_tgt]
+
+    # Prepend the single projected embedding as a context token:
+    # [projected_embed, text_embed[0], text_embed[1], ..., text_embed[N-1]]
+    proj_embed = projected_last_hidden.unsqueeze(0).to(
+        device=device, dtype=model_dtype,
+    )  # [1, D_tgt]
+    combined = torch.cat([proj_embed, text_embeds], dim=0)  # [1+seq_len, D_tgt]
+    combined = combined.unsqueeze(0).to(model_dtype)  # [1, 1+seq_len, D_tgt]
 
     with torch.no_grad():
         outputs = model(
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=combined,
             return_dict=True,
         )
 
-    # logits: [1, seq_len, vocab_size]
-    logits = outputs.logits[0].to(torch.float32)  # [seq_len, vocab_size]
+    # logits: [1, 1+seq_len, vocab_size]
+    logits = outputs.logits[0].to(torch.float32)  # [1+seq_len, vocab_size]
 
-    # Shift: predict token[i+1] from logits[i]
-    shift_logits = logits[:-1]          # [seq_len-1, vocab_size]
-    shift_labels = token_ids[1:].to(device)  # [seq_len-1]
+    # Score only the text portion: logits[i] predicts the token after position i.
+    # Position 0 = projected embed → logits[0] predicts token_ids[0]
+    # Position 1 = text_embed[0]   → logits[1] predicts token_ids[1]
+    # ...
+    # Position N = text_embed[N-1] → logits[N] predicts token_ids[N] (doesn't exist)
+    # So: score logits[0..N-1] against token_ids[0..N-1]
+    score_logits = logits[:token_ids.shape[0]]        # [seq_len, vocab_size]
+    score_labels = token_ids.to(device)               # [seq_len]
 
-    loss = torch.nn.functional.cross_entropy(shift_logits, shift_labels)
+    loss = torch.nn.functional.cross_entropy(score_logits, score_labels)
     perplexity = torch.exp(loss).item()
 
     return perplexity
@@ -314,10 +332,15 @@ def validate_projection(
             detail=detail,
         )
 
-    # Compute pseudo-perplexity across all test sentences
+    # Compute pseudo-perplexity across all test sentences.
+    # Use the last-token projected hidden state (matching how the pipeline
+    # injects a single embedding to prime the target model's KV-cache).
     all_ppl = []
     for projected, token_ids in zip(projected_list, token_ids_list):
-        ppl = _compute_pseudo_perplexity(target_model, projected, token_ids, device)
+        last_projected = projected[-1]  # [D_tgt] — last token's projection
+        ppl = _compute_pseudo_perplexity(
+            target_model, last_projected, token_ids, device,
+        )
         all_ppl.append(ppl)
 
     mean_ppl = sum(all_ppl) / len(all_ppl)
