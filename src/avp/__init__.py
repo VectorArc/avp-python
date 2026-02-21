@@ -18,7 +18,7 @@ from .errors import (
     UnsupportedVersionError,
 )
 from .fallback import FallbackRequest, JSONMessage
-from .handshake import CompatibilityResolver, HelloMessage, compute_model_hash, extract_model_identity
+from .handshake import CompatibilityResolver, HelloMessage, compute_model_hash, compute_tokenizer_hash, extract_model_identity
 from .session import Session, SessionManager
 from .types import (
     AVP_VERSION_HEADER,
@@ -43,6 +43,9 @@ from .types import (
 )
 from .version import __version__
 
+# Rosetta Stone (cross-model projection) — lazy-loaded because it requires torch.
+_ROSETTA_NAMES = {"AVPMap", "calibrate", "apply_cross_model_projection", "vocabulary_mediated_projection", "save_map", "load_map", "find_map"}
+
 # Transport classes are lazy-loaded because httpx is an optional dependency.
 # Access avp.AVPClient / avp.AVPAsyncClient / avp.create_app and they'll be
 # imported on first use; raises ImportError with install hint if httpx is missing.
@@ -53,6 +56,9 @@ def __getattr__(name: str):
     if name in _TRANSPORT_NAMES:
         from . import transport as _transport
         return getattr(_transport, name)
+    if name in _ROSETTA_NAMES:
+        from . import rosetta as _rosetta
+        return getattr(_rosetta, name)
     raise AttributeError(f"module 'avp' has no attribute {name}")
 
 
@@ -73,6 +79,7 @@ __all__ = [
     "HelloMessage",
     "CompatibilityResolver",
     "compute_model_hash",
+    "compute_tokenizer_hash",
     "extract_model_identity",
     # Session
     "Session",
@@ -101,6 +108,14 @@ __all__ = [
     "FLAG_HYBRID",
     "FLAG_HAS_MAP",
     "FLAG_KV_CACHE",
+    # Rosetta Stone (lazy — requires torch)
+    "AVPMap",
+    "calibrate",
+    "apply_cross_model_projection",
+    "vocabulary_mediated_projection",
+    "save_map",
+    "load_map",
+    "find_map",
     # Errors
     "AVPError",
     "InvalidMagicError",

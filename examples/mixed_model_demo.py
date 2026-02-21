@@ -4,11 +4,14 @@
 Runs a 4-agent reasoning chain where agents 1-2 use Model A and agents 3-4 use
 Model B. The AVP handshake protocol automatically negotiates:
   - Same-model pairs → LATENT mode (KV-cache transfer via AVP codec)
-  - Different-model pairs → JSON fallback (text)
+  - Different-model pairs → JSON fallback (text) or ROSETTA (cross-model projection)
 
 Usage:
     # Default (Qwen2.5-1.5B + Qwen2.5-0.5B on CUDA)
     python examples/mixed_model_demo.py
+
+    # With Rosetta Stone cross-model projection (LATENT → ROSETTA → LATENT)
+    python examples/mixed_model_demo.py --rosetta
 
     # With verbose output
     python examples/mixed_model_demo.py --verbose
@@ -360,6 +363,7 @@ def run_mixed_pipeline(
     temperature: float = 0.7,
     top_p: float = 0.95,
     verbose: bool = False,
+    rosetta_map: Optional[Any] = None,
 ) -> Dict:
     """Run the 4-agent mixed-model pipeline on a single question."""
     from avp.codec import decode as avp_decode
@@ -385,6 +389,7 @@ def run_mixed_pipeline(
 
     past_kv = None
     json_content = None  # text received from JSON fallback
+    rosetta_embeds = None  # projected hidden state from Rosetta Stone
     hop_traces: List[Dict] = []
     total_codec_ms = 0.0
     total_wire_bytes = 0
@@ -411,15 +416,22 @@ def run_mixed_pipeline(
 
         # --- Determine incoming mode (how this agent received data) ---
         if idx == 0:
-            incoming_mode = None  # first agent
+            incoming_rosetta = False
+            incoming_json = False
         else:
             prev_agent = AGENTS[idx - 1]
-            prev_identity = models[prev_agent.model_key]["identity"]
-            incoming_info = CompatibilityResolver.resolve(prev_identity, identity)
-            incoming_mode = incoming_info.mode
+            incoming_rosetta = rosetta_embeds is not None
+            # JSON fallback = different model without rosetta
+            incoming_json = (
+                prev_agent.model_key != agent.model_key
+                and not incoming_rosetta
+            )
 
         # --- Build prompt based on incoming mode ---
-        if incoming_mode == CommunicationMode.JSON:
+        if incoming_rosetta:
+            # Received projected hidden state via Rosetta Stone / Vocab
+            messages = build_latent_prompt(agent.role, question)
+        elif incoming_json:
             # Received JSON text — include it as context
             messages = build_text_prompt(agent.role, question, json_content or "")
             past_kv = None  # fresh start on new model
@@ -429,6 +441,24 @@ def run_mixed_pipeline(
 
         prompt_text = render_prompt(tokenizer, messages)
         input_ids, attention_mask = tokenize_prompt(tokenizer, prompt_text, device_str)
+
+        # --- If incoming Rosetta, inject projected embedding before this agent's prompt ---
+        if incoming_rosetta:
+            # Run a forward pass with the projected embedding to prime the KV-cache
+            # The projected hidden state becomes a "context token" for this model
+            embed_input = rosetta_embeds.to(device_str)  # [1, 1, D_tgt]
+            embed_mask = torch.ones(
+                (1, embed_input.shape[1]), dtype=torch.long, device=device_str
+            )
+            with torch.no_grad():
+                prime_out = model(
+                    inputs_embeds=embed_input,
+                    attention_mask=embed_mask,
+                    use_cache=True,
+                    return_dict=True,
+                )
+            past_kv = prime_out.past_key_values
+            rosetta_embeds = None  # consumed
 
         is_final = (idx == len(AGENTS) - 1)
 
@@ -453,7 +483,71 @@ def run_mixed_pipeline(
             for line in preview.split("\n"):
                 print(f"    {line}")
 
-        elif next_mode == CommunicationMode.JSON:
+        elif rosetta_map is not None and agent.model_key != next_agent.model_key:
+            # --- ROSETTA mode: cross-model projection via learned map ---
+            hop_num = idx + 1
+            hop_header = f"Hop {hop_num}: {agent.name} -> {next_agent.name}"
+            print(f"\n{'':─<64}")
+            print(f"  {hop_header}")
+            mode_label = "VOCAB" if rosetta_map.method == "vocab_mediated" else "ROSETTA"
+            print(f"  Handshake: {identity.model_family} "
+                  f"({identity.hidden_dim}d, {identity.num_layers}L) <-> "
+                  f"{next_identity.model_family} "
+                  f"({next_identity.hidden_dim}d, {next_identity.num_layers}L) "
+                  f"=> {mode_label}")
+
+            # Run latent steps to accumulate thinking
+            past_kv = connector.generate_latent_steps(
+                input_ids, latent_steps=latent_steps,
+                attention_mask=attention_mask, past_key_values=past_kv,
+            )
+
+            # Extract final hidden state from source model
+            rosetta_t0 = time.perf_counter()
+            # Do one more forward pass to get the hidden state
+            past_len = get_past_length(past_kv)
+            dummy_mask = torch.ones(
+                (1, past_len + 1), dtype=torch.long, device=device_str
+            )
+            # Get the last hidden state by feeding a dummy token
+            eos_id = tokenizer.eos_token_id or 0
+            dummy_ids = torch.tensor([[eos_id]], device=device_str)
+            with torch.no_grad():
+                out = model(
+                    input_ids=dummy_ids,
+                    attention_mask=dummy_mask,
+                    past_key_values=past_kv,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+            last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
+
+            # Project to target model space
+            projected = connector.project_hidden_for_cross_model(last_hidden, rosetta_map)
+            rosetta_embeds = projected.unsqueeze(1)  # [1, 1, D_tgt]
+            rosetta_ms = (time.perf_counter() - rosetta_t0) * 1000
+
+            past_kv = None  # discard source KV-cache — switching models
+            json_content = None
+
+            print(f"  {agent.name}: {latent_steps} latent steps, "
+                  f"then {mode_label} projection ({identity.hidden_dim}d -> "
+                  f"{next_identity.hidden_dim}d)")
+            print(f"  Projection: {rosetta_ms:.1f}ms | "
+                  f"Map: {rosetta_map.method}")
+
+            hop_traces.append({
+                "hop": hop_num,
+                "source": agent.name,
+                "target": next_agent.name,
+                "mode": mode_label,
+                "latent_steps": latent_steps,
+                "rosetta_ms": rosetta_ms,
+                "method": rosetta_map.method,
+                "validation_score": rosetta_map.validation_score,
+            })
+
+        elif agent.model_key != next_agent.model_key:
             # --- This agent's output goes to a different model via JSON ---
             hop_num = idx + 1
             hop_header = f"Hop {hop_num}: {agent.name} -> {next_agent.name}"
@@ -577,6 +671,7 @@ def run_mixed_pipeline(
     wall_time = time.perf_counter() - t0
     latent_hops = sum(1 for h in hop_traces if h["mode"] == "LATENT")
     json_hops = sum(1 for h in hop_traces if h["mode"] == "JSON")
+    rosetta_hops = sum(1 for h in hop_traces if h["mode"] in ("ROSETTA", "VOCAB"))
 
     return {
         "question": question,
@@ -585,6 +680,7 @@ def run_mixed_pipeline(
         "hops": hop_traces,
         "latent_hops": latent_hops,
         "json_hops": json_hops,
+        "rosetta_hops": rosetta_hops,
         "total_codec_ms": total_codec_ms,
         "total_wire_bytes": total_wire_bytes,
         "total_json_chars": total_json_chars,
@@ -639,6 +735,10 @@ def parse_args() -> argparse.Namespace:
         "--verbose", action="store_true",
         help="Show full agent outputs",
     )
+    parser.add_argument(
+        "--rosetta", action="store_true",
+        help="Use Rosetta Stone cross-model projection instead of JSON fallback",
+    )
     return parser.parse_args()
 
 
@@ -668,10 +768,41 @@ def main() -> None:
           f"hidden={id_b.hidden_dim}, layers={id_b.num_layers})")
     print()
 
+    # Rosetta Stone calibration
+    rosetta_map = None
+    if args.rosetta:
+        from avp.rosetta import calibrate as rosetta_calibrate
+
+        print("Calibrating Rosetta Stone map (Model A -> Model B)...")
+        cal_t0 = time.perf_counter()
+        rosetta_map = rosetta_calibrate(
+            models["model_a"]["model"], models["model_b"]["model"],
+            models["model_a"]["tokenizer"], models["model_b"]["tokenizer"],
+            device=device,
+        )
+        cal_elapsed = time.perf_counter() - cal_t0
+        if rosetta_map.method == "vocab_mediated":
+            print(f"  Method: VOCAB (shared tokenizer, zero calibration)")
+            print(f"  Source dim: {rosetta_map.source_dim} -> "
+                  f"Target dim: {rosetta_map.target_dim} | "
+                  f"Time: {cal_elapsed:.1f}s")
+        else:
+            print(f"  Method: {rosetta_map.method} | "
+                  f"Shape: [{rosetta_map.source_dim}, {rosetta_map.target_dim}] | "
+                  f"Validation cosine sim: {rosetta_map.validation_score:.3f} | "
+                  f"Time: {cal_elapsed:.1f}s")
+        print()
+
     pipeline_str = " -> ".join(
         f"{a.name} [{a.model_key[-1].upper()}]" for a in AGENTS
     )
     print(f"Pipeline: {pipeline_str}")
+    if rosetta_map and rosetta_map.method == "vocab_mediated":
+        print(f"Mode: LATENT -> VOCAB -> LATENT")
+    elif rosetta_map:
+        print(f"Mode: LATENT -> ROSETTA -> LATENT")
+    else:
+        print(f"Mode: LATENT -> JSON -> LATENT")
     print()
 
     q_preview = question[:100] + ("..." if len(question) > 100 else "")
@@ -686,13 +817,26 @@ def main() -> None:
         temperature=args.temperature,
         top_p=args.top_p,
         verbose=args.verbose,
+        rosetta_map=rosetta_map,
     )
 
     # Summary
     print()
     print("=" * 64)
+    mode_parts = []
+    if result["latent_hops"]:
+        mode_parts.append(f"{result['latent_hops']} LATENT")
+    if result.get("rosetta_hops"):
+        vocab_count = sum(1 for h in result["hops"] if h["mode"] == "VOCAB")
+        rosetta_count = sum(1 for h in result["hops"] if h["mode"] == "ROSETTA")
+        if vocab_count:
+            mode_parts.append(f"{vocab_count} VOCAB")
+        if rosetta_count:
+            mode_parts.append(f"{rosetta_count} ROSETTA")
+    if result["json_hops"]:
+        mode_parts.append(f"{result['json_hops']} JSON")
     print(f"Summary: {len(result['hops'])} hops "
-          f"({result['latent_hops']} LATENT, {result['json_hops']} JSON) | "
+          f"({', '.join(mode_parts)}) | "
           f"Total: {result['wall_time']:.1f}s")
     if result["total_wire_bytes"] > 0:
         print(f"  LATENT wire: {result['total_wire_bytes']:,} bytes | "

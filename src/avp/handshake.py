@@ -61,7 +61,35 @@ def compute_model_hash(config: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def extract_model_identity(model_or_config: Any) -> ModelIdentity:
+def compute_tokenizer_hash(tokenizer: Any) -> str:
+    """Compute a deterministic SHA-256 hash of a tokenizer's vocabulary.
+
+    Two tokenizers with the same vocabulary (same token→id mapping) produce
+    the same hash, enabling vocabulary-mediated cross-model projection.
+
+    Args:
+        tokenizer: A tokenizer with get_vocab() method, or a dict-like
+                   object with items().
+
+    Returns:
+        Hex-encoded SHA-256 hash string.
+    """
+    if hasattr(tokenizer, "get_vocab"):
+        vocab = tokenizer.get_vocab()
+    elif hasattr(tokenizer, "items"):
+        vocab = dict(tokenizer)
+    else:
+        return ""
+
+    # Sort by token string for deterministic ordering
+    canonical = json.dumps(sorted(vocab.items()), separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def extract_model_identity(
+    model_or_config: Any,
+    tokenizer: Any = None,
+) -> ModelIdentity:
     """Extract ModelIdentity from a HuggingFace model, config, or dict.
 
     Args:
@@ -69,6 +97,8 @@ def extract_model_identity(model_or_config: Any) -> ModelIdentity:
             - A HuggingFace PreTrainedModel
             - A HuggingFace PretrainedConfig
             - A dict with model config fields
+        tokenizer: Optional tokenizer to compute tokenizer_hash for
+                   vocabulary-mediated cross-model projection.
 
     Returns:
         ModelIdentity with fields populated from the config.
@@ -97,6 +127,11 @@ def extract_model_identity(model_or_config: Any) -> ModelIdentity:
     # Compute hash
     model_hash = compute_model_hash(config_dict)
 
+    # Compute tokenizer hash if tokenizer provided
+    tok_hash = ""
+    if tokenizer is not None:
+        tok_hash = compute_tokenizer_hash(tokenizer)
+
     return ModelIdentity(
         model_family=model_family,
         model_id=model_id,
@@ -105,6 +140,7 @@ def extract_model_identity(model_or_config: Any) -> ModelIdentity:
         num_layers=config_dict.get("num_hidden_layers", 0),
         num_kv_heads=config_dict.get("num_key_value_heads", config_dict.get("num_attention_heads", 0)),
         head_dim=config_dict.get("head_dim", 0),
+        tokenizer_hash=tok_hash,
     )
 
 
@@ -116,9 +152,11 @@ class CompatibilityResolver:
         """Determine communication mode based on model identities.
 
         Resolution rules (in order):
-            1. model_hash match → LATENT
-            2. model_family + hidden_dim + num_layers match → LATENT
-            3. Otherwise → JSON
+            1. model_hash match → LATENT (identical models)
+            2. model_family + hidden_dim + num_layers match → LATENT (structural match)
+            3. shared tokenizer_hash → LATENT (vocab-mediated, avp_map_id="vocab:...")
+            4. Rosetta Stone .avp-map file exists → LATENT (pre-calibrated)
+            5. Otherwise → JSON
 
         Args:
             local: Local agent's model identity.
@@ -130,6 +168,7 @@ class CompatibilityResolver:
         session_id = uuid.uuid4().hex
 
         mode = CommunicationMode.JSON  # default
+        avp_map_id = ""
 
         if local.model_hash and remote.model_hash and local.model_hash == remote.model_hash:
             mode = CommunicationMode.LATENT
@@ -143,9 +182,27 @@ class CompatibilityResolver:
         ):
             mode = CommunicationMode.LATENT
 
+        # Check for shared tokenizer (vocab-mediated projection)
+        if (
+            mode == CommunicationMode.JSON
+            and local.tokenizer_hash
+            and remote.tokenizer_hash
+            and local.tokenizer_hash == remote.tokenizer_hash
+        ):
+            mode = CommunicationMode.LATENT
+            avp_map_id = f"vocab:{local.tokenizer_hash[:16]}"
+
+        # Check for Rosetta Stone map file before falling back to JSON
+        if mode == CommunicationMode.JSON and local.model_hash and remote.model_hash:
+            from .rosetta.registry import find_map, map_id
+            if find_map(local.model_hash, remote.model_hash):
+                mode = CommunicationMode.LATENT
+                avp_map_id = map_id(local.model_hash, remote.model_hash)
+
         return SessionInfo(
             session_id=session_id,
             mode=mode,
             local_identity=local,
             remote_identity=remote,
+            avp_map_id=avp_map_id,
         )

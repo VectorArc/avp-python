@@ -101,7 +101,7 @@ class HuggingFaceConnector(EngineConnector):
                 self.model.resize_token_embeddings(len(self.tokenizer))
 
         self._model_hash = compute_model_hash(self.model.config.to_dict())
-        self._identity = extract_model_identity(self.model)
+        self._identity = extract_model_identity(self.model, tokenizer=self.tokenizer)
         self._w_realign = None
         self._target_norm = None
 
@@ -350,3 +350,37 @@ class HuggingFaceConnector(EngineConnector):
             last_hidden = outputs.hidden_states[-1][:, -1, :]
 
         return past
+
+    def project_hidden_for_cross_model(
+        self, hidden_state: Any, avp_map: Any
+    ) -> Any:
+        """Project source hidden state to target embedding space via Rosetta Stone.
+
+        Supports two methods:
+        - vocab_mediated: Uses shared vocabulary as bridge (zero learned params).
+          source lm_head → softmax → target input embeddings.
+        - ridge/procrustes: Uses learned linear map (W_map).
+
+        Args:
+            hidden_state: Tensor of shape [..., D_src] from this (source) model.
+            avp_map: AVPMap with w_map, target_norm, and optional bias.
+
+        Returns:
+            Projected tensor of shape [..., D_tgt] suitable for injection
+            into the target model via inputs_embeds.
+        """
+        if avp_map.method == "vocab_mediated":
+            from ..rosetta.project import vocabulary_mediated_projection
+            source_lm_head = self.model.get_output_embeddings()
+            if source_lm_head is None:
+                source_lm_head = getattr(self.model, "lm_head", None)
+            return vocabulary_mediated_projection(
+                hidden_state,
+                source_lm_head_weight=source_lm_head.weight,
+                target_embed_weight=avp_map.w_map,  # target input embeddings
+            )
+        else:
+            from ..rosetta.project import apply_cross_model_projection
+            return apply_cross_model_projection(
+                hidden_state, avp_map.w_map, avp_map.target_norm, avp_map.bias
+            )

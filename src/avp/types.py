@@ -127,9 +127,10 @@ class ModelIdentity:
     num_layers: int = 0
     num_kv_heads: int = 0
     head_dim: int = 0
+    tokenizer_hash: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "model_family": self.model_family,
             "model_id": self.model_id,
             "model_hash": self.model_hash,
@@ -138,6 +139,9 @@ class ModelIdentity:
             "num_kv_heads": self.num_kv_heads,
             "head_dim": self.head_dim,
         }
+        if self.tokenizer_hash:
+            d["tokenizer_hash"] = self.tokenizer_hash
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ModelIdentity":
@@ -149,6 +153,7 @@ class ModelIdentity:
             num_layers=d.get("num_layers", 0),
             num_kv_heads=d.get("num_kv_heads", 0),
             head_dim=d.get("head_dim", 0),
+            tokenizer_hash=d.get("tokenizer_hash", ""),
         )
 
 
@@ -160,6 +165,7 @@ class SessionInfo:
     mode: CommunicationMode = CommunicationMode.JSON
     local_identity: Optional[ModelIdentity] = None
     remote_identity: Optional[ModelIdentity] = None
+    avp_map_id: str = ""  # non-empty if cross-model via Rosetta Stone
 
 
 @dataclass
