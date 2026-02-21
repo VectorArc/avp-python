@@ -22,10 +22,14 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
     boxes = re.findall(r"\\boxed\{([^}]*)\}", text)
     if boxes:
         content = boxes[-1]
+        # Strip \text{} wrapper if present (model sometimes wraps non-numeric text)
+        text_inner = re.search(r"\\text\{([^}]*)\}", content)
+        if text_inner:
+            content = text_inner.group(1)
         number = re.search(_NUM, content)
         if number:
             return number.group(0).replace(",", "")
-        return content.strip()
+        # No number in \boxed{} — fall through to other extraction patterns
 
     # 2. #### <number> (GSM8K convention)
     hashes = re.findall(r"####\s*(" + _NUM + r")", text)

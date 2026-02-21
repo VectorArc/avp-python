@@ -73,10 +73,11 @@ def build_latent_prompt(role: str, question: str) -> List[Dict[str, str]]:
             f"for reference and a target question to solve.\n\n"
             f"The latent information might contain irrelevant contents. "
             f"Ignore it if it is not helpful for solving the target question.\n\n"
-            f"You must reason step-by-step to solve the provided Target Question "
-            f"without outputting other irrelevant information.\n\n"
-            f"Now, reason step by step and output the final answer inside "
-            f"\\boxed{{YOUR_FINAL_ANSWER}}."
+            f"You must reason step-by-step to solve the provided Target Question. "
+            f"Calculate all intermediate values explicitly using actual numbers "
+            f"(not symbolic expressions). Show each calculation.\n\n"
+            f"Output the final NUMERIC answer inside "
+            f"\\boxed{{YOUR_FINAL_ANSWER}}. The answer must be a number."
         )
     else:
         raise ValueError(f"Unknown role: {role}")
