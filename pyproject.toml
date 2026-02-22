@@ -27,6 +27,7 @@ dependencies = [
 transport = ["httpx[http2]>=0.25"]
 server = ["avp[transport]", "fastapi>=0.104", "uvicorn[standard]>=0.24"]
 latent = ["torch>=2.0", "transformers>=4.36"]
+vllm = ["vllm>=0.8.0"]
 demo = ["sentence-transformers>=2.2", "torch>=2.0"]
 benchmark = [
     "torch>=2.0",
@@ -40,7 +41,7 @@ dev = [
     "grpcio-tools>=1.59",
     "avp[transport,server]",
 ]
-all = ["avp[transport,server,latent,demo,benchmark,dev]"]
+all = ["avp[transport,server,latent,vllm,demo,benchmark,dev]"]
 
 [tool.hatch.version]
 path = "src/avp/version.py"

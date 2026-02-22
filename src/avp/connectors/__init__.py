@@ -9,4 +9,7 @@ def __getattr__(name: str):
     if name == "HuggingFaceConnector":
         from .huggingface import HuggingFaceConnector
         return HuggingFaceConnector
+    if name == "VLLMConnector":
+        from .vllm import VLLMConnector
+        return VLLMConnector
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
