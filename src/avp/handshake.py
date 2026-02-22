@@ -139,7 +139,10 @@ def extract_model_identity(
         hidden_dim=config_dict.get("hidden_size", 0),
         num_layers=config_dict.get("num_hidden_layers", 0),
         num_kv_heads=config_dict.get("num_key_value_heads", config_dict.get("num_attention_heads", 0)),
-        head_dim=config_dict.get("head_dim", 0),
+        head_dim=config_dict.get("head_dim", 0) or (
+            config_dict.get("hidden_size", 0) // config_dict.get("num_attention_heads", 1)
+            if config_dict.get("num_attention_heads", 0) > 0 else 0
+        ),
         tokenizer_hash=tok_hash,
     )
 

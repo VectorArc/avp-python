@@ -55,7 +55,9 @@ testpaths = ["tests"]
 markers = [
     "requires_torch: marks tests that require torch",
     "requires_transformers: marks tests that require transformers",
+    "requires_vllm: marks tests that require vLLM + CUDA GPU (deselected by default)",
 ]
+addopts = "-m 'not requires_vllm'"
 
 [tool.ruff]
 line-length = 99

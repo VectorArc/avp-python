@@ -21,7 +21,7 @@ import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 try:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorBase_V1,
+        KVConnectorMetadata,
         KVConnectorRole,
     )
     HAS_VLLM = True
@@ -37,14 +38,17 @@ except ImportError:
 
     class KVConnectorRole:
         """Stub for development."""
-        KV_BOTH = "kv_both"
-        KV_PRODUCER = "kv_producer"
-        KV_CONSUMER = "kv_consumer"
+        SCHEDULER = 0
+        WORKER = 1
 
     class KVConnectorBase_V1:
         """Stub base class for development on non-Linux platforms."""
         def __init__(self, **kwargs):
             pass
+
+    class KVConnectorMetadata:
+        """Stub metadata class."""
+        pass
 
 
 def _require_torch():
@@ -61,6 +65,11 @@ def _require_torch():
 class _LayerBuffer:
     """Buffers per-layer KV tensors during a single request's forward pass."""
     tensors: Dict[str, Any] = field(default_factory=dict)  # layer_name → tensor
+
+
+class _AVPConnectorMetadata(KVConnectorMetadata):
+    """Minimal metadata for AVP's file-based KV store."""
+    pass
 
 
 class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
@@ -80,8 +89,12 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         AVP_BLOCK_SIZE: PagedAttention block size (default: 16)
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, vllm_config=None, role=None, **kwargs):
+        if HAS_VLLM and vllm_config is not None:
+            super().__init__(vllm_config=vllm_config, role=role, **kwargs)
+        else:
+            # Stub mode (testing without vLLM runtime)
+            pass
         self._torch = _require_torch()
 
         # Store configuration
@@ -109,8 +122,8 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         )
 
     @property
-    def role(self) -> str:
-        return KVConnectorRole.KV_BOTH
+    def role(self):
+        return KVConnectorRole.WORKER
 
     # ----- Producer methods -----
 
@@ -153,7 +166,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         request: Any,
         block_ids: Optional[List[int]] = None,
         **kwargs,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """Called when a request finishes. Triggers serialization if pending.
 
         Args:
@@ -161,7 +174,8 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             block_ids: Physical block IDs used by this request.
 
         Returns:
-            Optional dict with transfer metadata.
+            Tuple of (free_blocks, metadata). free_blocks=True allows vLLM
+            to reclaim blocks.
         """
         request_id = self._get_request_id_from_request(request)
 
@@ -169,7 +183,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             if request_id in self._save_buffers:
                 self._flush_request(request_id)
 
-        return None
+        return (True, None)
 
     def _flush_request(self, request_id: str) -> None:
         """Serialize buffered layers for a request and write to store."""
@@ -297,33 +311,34 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
     def get_num_new_matched_tokens(
         self,
         request: Any,
-        num_computed: int,
+        num_computed_tokens: int,
         **kwargs,
-    ) -> int:
+    ) -> Tuple[Optional[int], bool]:
         """Check how many tokens from the store match this request.
 
         Args:
             request: The vLLM request object.
-            num_computed: Number of tokens already computed.
+            num_computed_tokens: Number of tokens already computed.
 
         Returns:
-            Number of tokens that can be loaded from the store.
+            Tuple of (num_matched_tokens, is_async). is_async=False since
+            our file-based loading is synchronous.
         """
         request_id = self._get_request_id_from_request(request)
         store_path = self._store_path(request_id)
 
         if not store_path.exists():
-            return 0
+            return (0, False)
 
         from ..kv_cache import KVCacheHeader, _KV_HEADER_SIZE
 
         data = store_path.read_bytes()
         if len(data) < _KV_HEADER_SIZE:
-            return 0
+            return (0, False)
 
         header = KVCacheHeader.from_bytes(data)
-        # Return stored seq_len minus already computed
-        return max(0, header.seq_len - num_computed)
+        matched = max(0, header.seq_len - num_computed_tokens)
+        return (matched, False)
 
     def register_kv_caches(self, kv_caches: Dict[str, Any]) -> None:
         """Store reference to vLLM's GPU KV cache buffers.
@@ -336,15 +351,31 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         self._kv_caches = kv_caches
         logger.debug("Registered %d KV cache layers", len(kv_caches))
 
+    # ----- Scheduler/allocation hooks -----
+
+    def build_connector_meta(self, scheduler_output: Any) -> "KVConnectorMetadata":
+        """Build connector metadata for this scheduler step.
+
+        Returns a minimal metadata object. AVP's file-based store doesn't
+        need per-step scheduler coordination.
+        """
+        return _AVPConnectorMetadata()
+
+    def update_state_after_alloc(
+        self, request: Any, blocks: Any, num_external_tokens: int,
+    ) -> None:
+        """Update state after block allocation. No-op for file-based store."""
+        pass
+
     # ----- Stub methods (no-op for Phase 1) -----
 
     def handle_preemptions(self, **kwargs) -> None:
         """Handle request preemptions (no-op)."""
         pass
 
-    def get_block_ids_with_load_errors(self, **kwargs) -> List[int]:
+    def get_block_ids_with_load_errors(self, **kwargs) -> Set[int]:
         """Return block IDs that failed to load (none for Phase 1)."""
-        return []
+        return set()
 
     def get_kv_connector_stats(self, **kwargs) -> Dict[str, Any]:
         """Return connector statistics."""

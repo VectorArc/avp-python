@@ -54,9 +54,9 @@ def test_init_creates_store_dir(connector, store_dir):
     assert os.path.isdir(store_dir)
 
 
-def test_role_is_kv_both(connector):
+def test_role_is_worker(connector):
     from avp.connectors.vllm_kv_connector import KVConnectorRole
-    assert connector.role == KVConnectorRole.KV_BOTH
+    assert connector.role == KVConnectorRole.WORKER
 
 
 def test_save_kv_layer_buffers_tensors(connector):
@@ -153,14 +153,16 @@ def test_get_num_new_matched_tokens(connector, store_dir):
     with open(store_path, "wb") as f:
         f.write(data)
 
-    tokens = connector.get_num_new_matched_tokens(MockRequest("req-006"), num_computed=30)
-    assert tokens == 70  # 100 - 30
+    matched, is_async = connector.get_num_new_matched_tokens(MockRequest("req-006"), num_computed_tokens=30)
+    assert matched == 70  # 100 - 30
+    assert is_async is False
 
 
 def test_get_num_new_matched_tokens_no_store(connector):
-    """get_num_new_matched_tokens returns 0 when no store file exists."""
-    tokens = connector.get_num_new_matched_tokens(MockRequest("nonexistent"), num_computed=0)
-    assert tokens == 0
+    """get_num_new_matched_tokens returns (0, False) when no store file exists."""
+    matched, is_async = connector.get_num_new_matched_tokens(MockRequest("nonexistent"), num_computed_tokens=0)
+    assert matched == 0
+    assert is_async is False
 
 
 def test_roundtrip_save_load(connector):
@@ -212,8 +214,8 @@ def test_handle_preemptions_noop(connector):
 
 
 def test_get_block_ids_with_load_errors_empty(connector):
-    """get_block_ids_with_load_errors returns empty list."""
-    assert connector.get_block_ids_with_load_errors() == []
+    """get_block_ids_with_load_errors returns empty set."""
+    assert connector.get_block_ids_with_load_errors() == set()
 
 
 def test_parse_layer_index():
