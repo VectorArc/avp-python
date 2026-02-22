@@ -109,6 +109,10 @@ Bytes 12..N: Protobuf-encoded metadata
 Bytes N..:   Raw tensor bytes (optionally zstd-compressed)
 ```
 
+## Benchmarks
+
+See **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)** for full benchmark results: GSM8K 4-agent chain across 3 model families (Llama-3.2-3B, Qwen2.5-1.5B, DeepSeek-R1-1.5B). Key findings: 73-78% token savings, 2-4x faster, consistent across architectures.
+
 ## Tests
 
 ```bash
