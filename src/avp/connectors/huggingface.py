@@ -6,20 +6,20 @@ interface for latent communication.
 Requires torch and transformers — uses lazy imports.
 """
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from ..errors import EngineNotAvailableError, RealignmentError
+from ..context import AVPContext
+from ..errors import EngineNotAvailableError, IncompatibleModelsError, RealignmentError
 from ..handshake import compute_model_hash, extract_model_identity
 from ..realign import (
     apply_realignment,
     compute_target_norm,
     get_or_compute_realignment,
     needs_realignment,
-    normalize_to_target,
     project_to_embedding_space,
 )
 from ..types import ModelIdentity
-from .base import EngineConnector
+from .base import EngineConnector, _render_prompt, _tokenize_prompt
 
 
 def _require_deps():
@@ -54,6 +54,13 @@ def _past_length(past_kv: Any) -> int:
         if isinstance(first, (tuple, list)) and len(first) > 0:
             return first[0].shape[-2]
     return 0
+
+
+def _to_messages(prompt: Union[str, List[Dict[str, str]]]) -> List[Dict[str, str]]:
+    """Normalize prompt to a list of chat message dicts."""
+    if isinstance(prompt, str):
+        return [{"role": "user", "content": prompt}]
+    return prompt
 
 
 class HuggingFaceConnector(EngineConnector):
@@ -104,6 +111,59 @@ class HuggingFaceConnector(EngineConnector):
         self._identity = extract_model_identity(self.model, tokenizer=self.tokenizer)
         self._w_realign = None
         self._target_norm = None
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_id: str,
+        device: Optional[str] = None,
+        dtype: Optional[Any] = None,
+        **model_kwargs: Any,
+    ) -> "HuggingFaceConnector":
+        """Load a model from HuggingFace Hub with auto-detected device and dtype.
+
+        Args:
+            model_id: HuggingFace model identifier (e.g. 'Qwen/Qwen2.5-7B-Instruct').
+            device: Target device. Auto-detects: cuda > mps > cpu.
+            dtype: Torch dtype. Auto-detects: bfloat16 (cuda+bf16) > float16 (cuda) > float32.
+            **model_kwargs: Extra kwargs passed to AutoModelForCausalLM.from_pretrained().
+
+        Returns:
+            Configured HuggingFaceConnector with model in eval mode.
+        """
+        torch, transformers = _require_deps()
+
+        # Auto-detect device
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+
+        # Auto-detect dtype
+        if dtype is None:
+            if device == "cuda" and torch.cuda.is_bf16_supported():
+                dtype = torch.bfloat16
+            elif device == "cuda":
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
+
+        # If user specified device_map in kwargs, skip explicit .to(device)
+        has_device_map = "device_map" in model_kwargs
+
+        model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=dtype, **model_kwargs
+        )
+        model.eval()
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
+
+        if has_device_map:
+            # device_map handles placement; infer device from parameters
+            return cls(model=model, tokenizer=tokenizer)
+        return cls(model=model, tokenizer=tokenizer, device=device)
 
     def get_model_identity(self) -> ModelIdentity:
         return self._identity
@@ -351,6 +411,148 @@ class HuggingFaceConnector(EngineConnector):
 
         return past
 
+    # --- High-level API ---
+
+    @property
+    def can_think(self) -> bool:
+        return True
+
+    def think(
+        self,
+        prompt: Union[str, List[Dict[str, str]]],
+        steps: int = 20,
+        context: Optional[AVPContext] = None,
+    ) -> AVPContext:
+        """Generate latent context via thinking steps.
+
+        Args:
+            prompt: A string (wrapped as user message) or list of chat messages.
+            steps: Number of latent thinking steps (must be >= 1).
+            context: Optional AVPContext from a prior think() to continue from.
+
+        Returns:
+            AVPContext with accumulated KV-cache.
+
+        Raises:
+            ValueError: If steps < 1.
+            IncompatibleModelsError: If context is from a different model.
+        """
+        if steps < 1:
+            raise ValueError(f"steps must be >= 1, got {steps}")
+
+        messages = _to_messages(prompt)
+        prompt_text = _render_prompt(self.tokenizer, messages)
+        input_ids, attention_mask = _tokenize_prompt(
+            self.tokenizer, prompt_text, self.device
+        )
+
+        past_kv = None
+        accumulated_steps = 0
+        if context is not None:
+            if context.model_hash != self._model_hash:
+                raise IncompatibleModelsError(
+                    f"Context model_hash {context.model_hash!r} does not match "
+                    f"this connector's model_hash {self._model_hash!r}. "
+                    "Use the same model or serialize via to_bytes() for cross-model transfer."
+                )
+            past_kv = context.past_key_values
+            accumulated_steps = context.num_steps
+
+        past_kv = self.generate_latent_steps(
+            input_ids, steps, attention_mask=attention_mask, past_key_values=past_kv
+        )
+
+        return AVPContext(
+            past_key_values=past_kv,
+            model_hash=self._model_hash,
+            num_steps=accumulated_steps + steps,
+            seq_len=_past_length(past_kv),
+            model_family=self._identity.model_family,
+            hidden_dim=self._identity.hidden_dim,
+            num_layers=self._identity.num_layers,
+        )
+
+    def generate(
+        self,
+        prompt: Union[str, List[Dict[str, str]]],
+        context: Optional[AVPContext] = None,
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.95,
+        do_sample: bool = True,
+    ) -> str:
+        """Generate text, optionally conditioned on latent context from think().
+
+        Args:
+            prompt: A string (wrapped as user message) or list of chat messages.
+            context: Optional AVPContext to condition generation on.
+            max_new_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
+            do_sample: Whether to use sampling (True) or greedy decoding (False).
+
+        Returns:
+            Generated text string.
+
+        Raises:
+            IncompatibleModelsError: If context is from a different model.
+        """
+        import torch
+
+        messages = _to_messages(prompt)
+        prompt_text = _render_prompt(self.tokenizer, messages)
+        input_ids, attention_mask = _tokenize_prompt(
+            self.tokenizer, prompt_text, self.device
+        )
+
+        past_kv = None
+        cache_position = None
+
+        if context is not None:
+            if context.model_hash != self._model_hash:
+                raise IncompatibleModelsError(
+                    f"Context model_hash {context.model_hash!r} does not match "
+                    f"this connector's model_hash {self._model_hash!r}. "
+                    "Use the same model or serialize via to_bytes() for cross-model transfer."
+                )
+            past_kv = context.past_key_values
+            past_len = _past_length(past_kv)
+
+            cache_position = torch.arange(
+                past_len,
+                past_len + input_ids.shape[-1],
+                dtype=torch.long,
+                device=self.device,
+            )
+            if past_len > 0:
+                past_mask = torch.ones(
+                    (attention_mask.shape[0], past_len),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
+
+        prompt_len = attention_mask.sum(dim=1).tolist()[0]
+
+        with torch.no_grad():
+            gen_kwargs = dict(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=do_sample,
+                pad_token_id=self.tokenizer.pad_token_id,
+                return_dict_in_generate=True,
+            )
+            if past_kv is not None:
+                gen_kwargs["past_key_values"] = past_kv
+                gen_kwargs["cache_position"] = cache_position
+            outputs = self.model.generate(**gen_kwargs)
+
+        generated_ids = outputs.sequences[0, prompt_len:]
+        return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+
     def validate_cross_model(
         self,
         target_connector: "HuggingFaceConnector",
@@ -388,7 +590,7 @@ class HuggingFaceConnector(EngineConnector):
 
         Supports two methods:
         - vocab_mediated: Uses shared vocabulary as bridge (zero learned params).
-          source lm_head → softmax → target input embeddings.
+          source lm_head -> softmax -> target input embeddings.
         - ridge/procrustes: Uses learned linear map (W_map).
 
         Args:

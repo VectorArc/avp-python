@@ -43,7 +43,54 @@ Full results: **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**
 
 ## Quick Start
 
-**Check compatibility between two models:**
+**High-level API (5 lines):**
+
+```python
+from avp import HuggingFaceConnector
+
+connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+
+# Agent A: latent reasoning (no text output, builds KV-cache)
+context = connector.think("Analyze this math problem: 24 * 17 + 3", steps=20)
+
+# Agent B: generate with Agent A's context
+answer = connector.generate("Now compute the final answer.", context=context)
+```
+
+**Cross-process transfer:**
+
+```python
+# Process A: serialize context
+wire_bytes = context.to_bytes(session_id="s1", source_agent_id="agent-a")
+
+# Process B: restore and generate
+from avp import AVPContext
+restored = AVPContext.from_bytes(wire_bytes, device="cuda")
+answer = connector.generate("Solve it.", context=restored)
+```
+
+**Production serving (vLLM):**
+
+vLLM can't expose per-step hidden states, so latent transfer happens at the engine level via a KV connector plugin — transparent to your application code:
+
+```bash
+# Launch vLLM with AVP KV connector
+vllm serve Qwen/Qwen2.5-7B-Instruct \
+    --kv-connector AVPKVConnectorV1Dynamic \
+    --kv-connector-module-path avp.connectors.vllm_kv_connector
+```
+
+```python
+# Application code stays simple — KV transfer happens behind the scenes
+from avp import VLLMConnector
+
+connector = VLLMConnector(model_id="Qwen/Qwen2.5-7B-Instruct")
+answer = connector.generate("Analyze and solve: 24 * 17 + 3")
+```
+
+The `AVPKVConnectorV1Dynamic` plugin saves/loads KV-cache between vLLM instances via a file-based store, so agents on the same machine share computed attention states without re-processing.
+
+**Check model compatibility (low-level):**
 
 ```python
 from avp import extract_model_identity, CompatibilityResolver
@@ -52,25 +99,6 @@ local = extract_model_identity(model_a)
 remote = extract_model_identity(model_b)
 session = CompatibilityResolver.resolve(local, remote)
 # session.mode → LATENT (same model) or JSON (different)
-```
-
-**Latent communication pipeline:**
-
-```python
-from avp.connectors.huggingface import HuggingFaceConnector
-import avp
-
-connector = HuggingFaceConnector(model, tokenizer)
-
-# Agent A: generate latent reasoning (no text output)
-kv_cache = connector.generate_latent_steps(input_ids, num_steps=20)
-
-# Encode for transfer
-wire_bytes = avp.encode_kv_cache(kv_cache, metadata)
-
-# Agent B: decode and continue generation with Agent A's context
-restored_kv = avp.decode_kv_cache(wire_bytes)
-output = model.generate(input_ids_b, past_key_values=restored_kv)
 ```
 
 ## How It Works

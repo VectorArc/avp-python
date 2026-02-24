@@ -18,12 +18,12 @@ It does NOT support:
 Requires vllm — uses lazy imports so the core SDK works without it.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..errors import EngineNotAvailableError
 from ..handshake import compute_model_hash, extract_model_identity
 from ..types import ModelIdentity
-from .base import EngineConnector
+from .base import EngineConnector, _render_prompt
 
 
 def _require_vllm():
@@ -352,6 +352,53 @@ class VLLMConnector(EngineConnector):
 
         outputs = self._engine.generate(prompts, sampling_params)
         return [output.outputs[0].text for output in outputs]
+
+    # --- High-level API ---
+
+    def generate(
+        self,
+        prompt: Union[str, List[Dict[str, str]]],
+        context: Optional[Any] = None,
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.95,
+        do_sample: bool = True,
+    ) -> str:
+        """Generate text from a prompt. Context injection is not supported.
+
+        Args:
+            prompt: A string (wrapped as user message) or list of chat messages.
+            context: Not supported — raises EngineNotAvailableError if provided.
+            max_new_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
+            do_sample: Whether to use sampling. If False, temperature is set to 0.
+
+        Returns:
+            Generated text string.
+
+        Raises:
+            EngineNotAvailableError: If context is provided.
+        """
+        if context is not None:
+            raise EngineNotAvailableError(
+                "vllm (generate() does not support context injection at the SDK level. "
+                "vLLM manages KV-cache internally. For cross-process KV-cache transfer, "
+                "use the AVPKVConnectorV1Dynamic plugin at the engine level.)"
+            )
+
+        if isinstance(prompt, str):
+            messages = [{"role": "user", "content": prompt}]
+        else:
+            messages = prompt
+
+        rendered = _render_prompt(self._tokenizer, messages)
+
+        temp = temperature if do_sample else 0.0
+        result = self.generate_text(
+            [rendered], max_tokens=max_new_tokens, temperature=temp, top_p=top_p
+        )
+        return result[0]
 
     @property
     def engine(self) -> Any:

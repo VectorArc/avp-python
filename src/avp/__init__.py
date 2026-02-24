@@ -64,6 +64,9 @@ _ROSETTA_NAMES = {
 # imported on first use; raises ImportError with install hint if httpx is missing.
 _TRANSPORT_NAMES = {"AVPClient", "AVPAsyncClient", "create_app"}
 
+# Connector and context classes are lazy-loaded because they require torch/transformers/vllm.
+_CONNECTOR_NAMES = {"AVPContext", "HuggingFaceConnector", "VLLMConnector"}
+
 
 def __getattr__(name: str):
     if name in _TRANSPORT_NAMES:
@@ -72,6 +75,15 @@ def __getattr__(name: str):
     if name in _ROSETTA_NAMES:
         from . import rosetta as _rosetta
         return getattr(_rosetta, name)
+    if name == "AVPContext":
+        from .context import AVPContext
+        return AVPContext
+    if name == "HuggingFaceConnector":
+        from .connectors.huggingface import HuggingFaceConnector
+        return HuggingFaceConnector
+    if name == "VLLMConnector":
+        from .connectors.vllm import VLLMConnector
+        return VLLMConnector
     raise AttributeError(f"module 'avp' has no attribute {name}")
 
 
@@ -134,6 +146,10 @@ __all__ = [
     "ValidationConfig",
     "ValidationResult",
     "validate_projection",
+    # Connectors & Context (lazy — requires torch/transformers/vllm)
+    "AVPContext",
+    "HuggingFaceConnector",
+    "VLLMConnector",
     # Errors
     "AVPError",
     "InvalidMagicError",
