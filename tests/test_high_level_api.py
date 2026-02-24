@@ -7,6 +7,7 @@ import pytest
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
 HAS_TRANSFORMERS = importlib.util.find_spec("transformers") is not None
+HAS_VLLM = importlib.util.find_spec("vllm") is not None
 
 if HAS_TORCH:
     import torch
@@ -318,6 +319,7 @@ class MockLLM:
         return results
 
 
+@pytest.mark.skipif(not HAS_VLLM, reason="vllm not installed")
 class TestVLLMGenerate:
     @pytest.fixture
     def vllm_connector(self):
@@ -369,14 +371,32 @@ class TestFromPretrained:
     def test_from_pretrained_auto_device_cpu(self):
         """from_pretrained auto-detects CPU when no GPU available."""
         from avp.connectors.huggingface import HuggingFaceConnector
-
         from transformers import GPT2Config, GPT2LMHeadModel
-        from tests.conftest import MockTokenizer as ConfMockTokenizer
+
+        # Simple mock tokenizer for this test
+        class _MockTokenizer:
+            pad_token_id = 0
+            eos_token_id = 1
+            chat_template = None
+
+            def __init__(self):
+                self._vocab = {f"tok_{i}": i for i in range(256)}
+
+            def __call__(self, text, **kw):
+                ids = [ord(c) % 254 + 2 for c in text]
+                return {"input_ids": torch.tensor([ids]),
+                        "attention_mask": torch.ones(1, len(ids), dtype=torch.long)}
+
+            def decode(self, ids, **kw):
+                return "".join(chr(int(i) % 128) for i in ids if int(i) >= 2)
+
+            def get_vocab(self):
+                return self._vocab
 
         # Patch AutoModel and AutoTokenizer to avoid downloads
         config = GPT2Config(vocab_size=256, n_embd=64, n_head=4, n_layer=2, n_positions=128)
         model = GPT2LMHeadModel(config)
-        tokenizer = ConfMockTokenizer(vocab_size=256)
+        tokenizer = _MockTokenizer()
 
         from unittest.mock import patch
         with patch("transformers.AutoModelForCausalLM.from_pretrained", return_value=model), \
