@@ -6,7 +6,7 @@ import time
 import numpy as np
 
 import avp
-from avp.utils import embedding_to_json
+from avp.utils import embedding_to_bytes, embedding_to_json
 
 
 def main():
@@ -21,16 +21,24 @@ def main():
 
     for dim in dims:
         emb = np.random.randn(dim).astype(np.float32)
+        payload = embedding_to_bytes(emb)
+        metadata = avp.AVPMetadata(
+            model_id="bench",
+            hidden_dim=dim,
+            payload_type=avp.PayloadType.HIDDEN_STATE,
+            dtype=avp.DataType.FLOAT32,
+            tensor_shape=emb.shape,
+        )
 
         # Sizes
-        avp_raw = avp.encode(emb, model_id="bench")
-        avp_zstd = avp.encode(emb, model_id="bench", compression=avp.CompressionLevel.BALANCED)
+        avp_raw = avp.encode(payload, metadata)
+        avp_zstd = avp.encode(payload, metadata, compression=avp.CompressionLevel.BALANCED)
         json_data = embedding_to_json(emb, {"model_id": "bench"})
 
         # Encode speed
         t0 = time.perf_counter()
         for _ in range(iterations):
-            avp.encode(emb, model_id="bench")
+            avp.encode(payload, metadata)
         encode_us = (time.perf_counter() - t0) / iterations * 1e6
 
         # Decode speed

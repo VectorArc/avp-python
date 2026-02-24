@@ -1,56 +1,114 @@
 #!/usr/bin/env python3
-"""Quickstart: encode/decode an embedding and compare size to JSON."""
+"""AVP Quickstart: latent communication between agents in 5 lines.
 
-import numpy as np
+Requires: pip install "avp[latent]"
+(torch + transformers for HuggingFace connector)
+
+Uses a tiny GPT-2 model with random weights — no downloads, runs on CPU.
+"""
 
 import avp
-from avp.utils import embedding_to_json
 
 
 def main():
     print("=== AVP Quickstart ===\n")
 
-    # Create a random embedding (simulating a 384-dim model output)
+    # --- High-Level API: think() / generate() ---
+    print("--- High-Level API ---\n")
+
+    try:
+        from transformers import GPT2Config, GPT2LMHeadModel
+    except ImportError:
+        print("transformers not installed. Install with: pip install 'avp[latent]'")
+        return
+
+    # Create a tiny model (random weights, no download, CPU-only)
+    config = GPT2Config(vocab_size=256, n_embd=64, n_head=4, n_layer=2, n_positions=128)
+    model = GPT2LMHeadModel(config).eval()
+
+    # Minimal tokenizer for demo purposes
+    class SimpleTokenizer:
+        pad_token_id = 0
+        eos_token_id = 1
+
+        def __call__(self, text, **kw):
+            import torch
+            ids = [ord(c) % 254 + 2 for c in text]
+            return {"input_ids": torch.tensor([ids]), "attention_mask": torch.ones(1, len(ids), dtype=torch.long)}
+
+        def decode(self, ids, **kw):
+            return "".join(chr(int(i) % 128) for i in ids if int(i) >= 2).strip()
+
+        def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+            parts = [f"<|{m['role']}|>\n{m['content']}" for m in messages]
+            return "\n".join(parts) + "\n<|assistant|>"
+
+    tokenizer = SimpleTokenizer()
+    tokenizer.chat_template = True  # signal that apply_chat_template exists
+
+    connector = avp.HuggingFaceConnector(model=model, tokenizer=tokenizer, device="cpu")
+
+    # Agent A: latent reasoning (no text output, builds KV-cache)
+    context = connector.think("What is 2 + 2?", steps=5)
+    print(f"Agent A: think() produced context with {context.num_steps} steps, "
+          f"seq_len={context.seq_len}")
+
+    # Agent B: generate with Agent A's context
+    answer = connector.generate("Give the answer.", context=context, max_new_tokens=20)
+    print(f"Agent B: generate() -> {answer!r}")
+
+    # Capability discovery
+    print(f"\ncan_think: {connector.can_think}")
+    print(f"model_hash: {context.model_hash[:16]}...")
+
+    # --- Cross-Process Transfer ---
+    print("\n--- Cross-Process Serialization ---\n")
+
+    wire = context.to_bytes(session_id="demo", source_agent_id="agent-a")
+    print(f"Serialized:  {len(wire):,} bytes")
+
+    restored = avp.AVPContext.from_bytes(wire, device="cpu")
+    print(f"Restored:    steps={restored.num_steps}, "
+          f"hash={restored.model_hash[:16]}...")
+    print(f"Hash match:  {restored.model_hash == context.model_hash}")
+
+    # --- Low-Level Codec ---
+    print("\n--- Low-Level Codec (no model needed) ---\n")
+
+    import numpy as np
+    from avp.utils import embedding_to_json
+
     embedding = np.random.randn(384).astype(np.float32)
-    print(f"Embedding: {embedding.shape} {embedding.dtype}")
 
-    # --- Encode as AVP binary ---
-    avp_data = avp.encode(
-        embedding,
+    # Encode as AVP binary
+    metadata = avp.AVPMetadata(
         model_id="all-MiniLM-L6-v2",
-        agent_id="quickstart-agent",
+        source_agent_id="quickstart-agent",
+        hidden_dim=384,
+        payload_type=avp.PayloadType.HIDDEN_STATE,
+        dtype=avp.DataType.FLOAT32,
+        tensor_shape=embedding.shape,
     )
-    print(f"\nAVP binary size:        {len(avp_data):,} bytes")
+    from avp.utils import embedding_to_bytes
+    avp_data = avp.encode(embedding_to_bytes(embedding), metadata)
+    print(f"AVP binary:    {len(avp_data):,} bytes")
 
-    # --- Encode with compression ---
-    avp_compressed = avp.encode(
-        embedding,
-        model_id="all-MiniLM-L6-v2",
+    # Encode with compression
+    avp_zstd = avp.encode(
+        embedding_to_bytes(embedding), metadata,
         compression=avp.CompressionLevel.BALANCED,
     )
-    print(f"AVP compressed size:    {len(avp_compressed):,} bytes")
+    print(f"AVP+zstd:      {len(avp_zstd):,} bytes")
 
-    # --- JSON baseline ---
+    # JSON baseline
     json_data = embedding_to_json(embedding, {"model_id": "all-MiniLM-L6-v2"})
-    print(f"JSON size:              {len(json_data):,} bytes")
+    print(f"JSON baseline: {len(json_data):,} bytes")
+    print(f"AVP is {len(json_data) / len(avp_data):.1f}x smaller than JSON")
 
-    # --- Size comparison ---
-    ratio = len(json_data) / len(avp_data)
-    compressed_ratio = len(json_data) / len(avp_compressed)
-    print(f"\nAVP is {ratio:.1f}x smaller than JSON")
-    print(f"AVP+zstd is {compressed_ratio:.1f}x smaller than JSON")
-
-    # --- Decode and verify ---
+    # Decode and verify roundtrip
     msg = avp.decode(avp_data)
-    print(f"\nDecoded: model={msg.metadata.model_id}, dim={msg.metadata.embedding_dim}")
-    print(f"Roundtrip exact: {np.array_equal(embedding, msg.embedding)}")
-
-    # --- Convenience API ---
-    print("\n--- Convenience API ---")
-    data = avp.encode_simple(embedding, model_id="test", compress=True)
-    arr, meta = avp.decode_simple(data)
-    print(f"encode_simple -> {len(data)} bytes")
-    print(f"decode_simple -> shape={arr.shape}, meta={meta}")
+    decoded = np.frombuffer(msg.payload, dtype=np.float32)
+    print(f"Roundtrip exact: {np.array_equal(embedding, decoded)}")
 
 
 if __name__ == "__main__":

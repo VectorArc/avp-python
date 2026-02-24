@@ -18,7 +18,6 @@ Usage:
   python examples/agent_demo.py
 """
 
-import asyncio
 import threading
 import time
 
@@ -26,6 +25,7 @@ import numpy as np
 import uvicorn
 
 import avp
+from avp.utils import embedding_to_bytes, embedding_to_json
 
 # --- Corpus for Agent B ---
 
@@ -45,9 +45,21 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
+def _make_metadata(agent_id: str, dim: int) -> avp.AVPMetadata:
+    """Build AVPMetadata for an embedding payload."""
+    return avp.AVPMetadata(
+        model_id="all-MiniLM-L6-v2",
+        source_agent_id=agent_id,
+        hidden_dim=dim,
+        payload_type=avp.PayloadType.HIDDEN_STATE,
+        dtype=avp.DataType.FLOAT32,
+        tensor_shape=(dim,),
+    )
+
+
 def main():
     print("=" * 60)
-    print("AVP Agent Demo: Researcher → Analyst")
+    print("AVP Agent Demo: Researcher -> Analyst")
     print("=" * 60)
 
     # --- Load embedding model ---
@@ -75,11 +87,9 @@ def main():
         similarities = [cosine_similarity(query_emb, ce) for ce in corpus_embeddings]
         best_idx = int(np.argmax(similarities))
 
-        # Encode the best match embedding as AVP for the response payload
         response_avp = avp.encode(
-            corpus_embeddings[best_idx],
-            model_id="all-MiniLM-L6-v2",
-            agent_id="analyst",
+            embedding_to_bytes(corpus_embeddings[best_idx]),
+            _make_metadata("analyst", dim),
         )
 
         return {
@@ -87,7 +97,7 @@ def main():
             "similarity": round(similarities[best_idx], 4),
             "match_index": best_idx,
             "response_avp_size": len(response_avp),
-            "received_from": msg.metadata.agent_id or "unknown",
+            "received_from": msg.metadata.source_agent_id or "unknown",
         }
 
     app = avp.create_app(analyst_handler)
@@ -129,26 +139,17 @@ def main():
 
             # Encode as AVP
             t0 = time.perf_counter()
-            avp_data = avp.encode(
-                query_emb,
-                model_id="all-MiniLM-L6-v2",
-                agent_id="researcher",
-                compression=avp.CompressionLevel.BALANCED,
-            )
+            payload = embedding_to_bytes(query_emb)
+            metadata = _make_metadata("researcher", dim)
+            avp_data = avp.encode(payload, metadata, compression=avp.CompressionLevel.BALANCED)
             encode_time = time.perf_counter() - t0
 
             # Transmit
             t0 = time.perf_counter()
-            resp = client.transmit(
-                query_emb,
-                model_id="all-MiniLM-L6-v2",
-                compression=avp.CompressionLevel.BALANCED,
-            )
+            resp = client.transmit(payload, metadata, compression=avp.CompressionLevel.BALANCED)
             transmit_time = time.perf_counter() - t0
 
             result = resp.json()
-            from avp.utils import embedding_to_json
-
             json_size = len(embedding_to_json(query_emb, {"model_id": "all-MiniLM-L6-v2"}))
 
             print(f"  Best match: \"{result['best_match']}\"")
@@ -199,15 +200,15 @@ def run_with_random_embeddings():
     with avp.AVPClient("http://127.0.0.1:9200", agent_id="researcher") as client:
         for query in queries:
             emb = np.random.randn(dim).astype(np.float32)
-            avp_data = avp.encode(emb, model_id="random", agent_id="researcher")
+            payload = embedding_to_bytes(emb)
+            metadata = _make_metadata("researcher", dim)
+            avp_data = avp.encode(payload, metadata)
 
             t0 = time.perf_counter()
-            resp = client.transmit(emb, model_id="random")
+            resp = client.transmit(payload, metadata)
             elapsed = time.perf_counter() - t0
 
             result = resp.json()
-            from avp.utils import embedding_to_json
-
             json_size = len(embedding_to_json(emb))
 
             print(f"Query: \"{query}\"")
