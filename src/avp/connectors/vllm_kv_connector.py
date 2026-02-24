@@ -187,7 +187,6 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
 
     def _flush_request(self, request_id: str) -> None:
         """Serialize buffered layers for a request and write to store."""
-        from .page_convert import paged_to_contiguous
         from ..kv_cache import serialize_kv_cache
 
         with self._lock:
@@ -199,9 +198,6 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         # Sort layers by name to ensure consistent ordering
         sorted_names = sorted(buf.tensors.keys())
         num_layers = len(sorted_names)
-
-        # Get shape info from first layer
-        first_tensor = buf.tensors[sorted_names[0]]
 
         # Handle two possible tensor formats:
         # 1. Already contiguous: [batch, 2, num_kv_heads, seq_len, head_dim]
@@ -220,7 +216,6 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                 else:
                     # Multiple blocks — need block_table context
                     # For simplicity, concatenate and assume sequential
-                    num_blocks_used = t.shape[0]
                     k_cat = t[:, 0].reshape(1, t.shape[2], -1, t.shape[4])
                     v_cat = t[:, 1].reshape(1, t.shape[2], -1, t.shape[4])
                     legacy_kv.append((k_cat, v_cat))

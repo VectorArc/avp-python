@@ -6,7 +6,7 @@ to structured JSON messages.
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from .types import AVP_VERSION_STRING
 

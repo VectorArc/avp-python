@@ -11,7 +11,6 @@ Wire format:
 """
 
 import struct
-from typing import Optional
 
 import numpy as np
 

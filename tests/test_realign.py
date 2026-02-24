@@ -1,15 +1,12 @@
 """Tests for AVP realignment matrix computation (requires torch)."""
 
+import importlib.util
 import tempfile
 from pathlib import Path
 
 import pytest
 
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 
@@ -17,7 +14,6 @@ pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 @pytest.fixture
 def tiny_model():
     """Create a tiny mock model with untied embeddings (hidden_dim=8, vocab=16)."""
-    import torch
     import torch.nn as nn
 
     class TinyModel(nn.Module):
@@ -53,7 +49,6 @@ def tiny_model():
 @pytest.fixture
 def tiny_model_tied():
     """Create a tiny mock model with tied embeddings."""
-    import torch
     import torch.nn as nn
 
     class TinyModelTied(nn.Module):
@@ -134,7 +129,6 @@ def test_apply_realignment(tiny_model):
 
 
 def test_compute_target_norm(tiny_model):
-    import torch
     from avp.realign import compute_target_norm
 
     target_norm = compute_target_norm(tiny_model)
@@ -211,7 +205,6 @@ def test_load_nonexistent_returns_none():
 
 def test_vocab_size_mismatch():
     """compute_realignment_matrix should raise a clear error on vocab mismatch."""
-    import torch
     import torch.nn as nn
     from avp.realign import compute_realignment_matrix
     from avp.errors import RealignmentError

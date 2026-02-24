@@ -69,8 +69,6 @@ def paged_to_contiguous(
     for layer_idx in range(num_layers):
         layer_kv = kv_cache_blocks[layer_idx]
         # layer_kv shape: [num_blocks, 2, num_kv_heads, block_size, head_dim]
-        num_kv_heads = layer_kv.shape[2]
-        head_dim = layer_kv.shape[4]
 
         # Gather blocks in logical order
         k_blocks = []
@@ -112,7 +110,7 @@ def contiguous_to_paged(
             Shape: [num_seqs, max_blocks_per_seq]. We use the first sequence (index 0).
         block_size: Tokens per block.
     """
-    torch = _require_torch()
+    _require_torch()
 
     if not legacy_kv:
         raise ValueError("Empty KV-cache")

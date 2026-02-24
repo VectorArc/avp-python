@@ -8,7 +8,6 @@ from avp.handshake import (
     CompatibilityResolver,
     HelloMessage,
     compute_model_hash,
-    compute_tokenizer_hash,
     extract_model_identity,
 )
 from avp.types import CommunicationMode, ModelIdentity
@@ -338,7 +337,7 @@ def test_resolve_avp_map_id_format():
         hidden_dim=896, num_layers=24, tokenizer_hash=tok_hash,
     )
     result = CompatibilityResolver.resolve(local, remote)
-    assert result.avp_map_id == f"vocab:abcdef1234567890"
+    assert result.avp_map_id == "vocab:abcdef1234567890"
 
 
 def test_resolve_no_tokenizer_hash_skips_rule3():

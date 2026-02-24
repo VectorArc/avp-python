@@ -6,7 +6,6 @@ space back to input embedding space for same-model latent communication.
 Requires torch — this module uses lazy imports so the core SDK works without it.
 """
 
-import hashlib
 import os
 from pathlib import Path
 from typing import Any, Optional, Tuple

@@ -2,7 +2,6 @@
 
 import time
 
-import pytest
 
 from avp.session import Session, SessionManager
 from avp.types import CommunicationMode, ModelIdentity

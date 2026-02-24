@@ -13,7 +13,6 @@ from avp.types import (
     FLAG_HYBRID,
     FLAG_KV_CACHE,
     HEADER_SIZE,
-    MAGIC,
     PROTOCOL_VERSION,
     AVPMetadata,
     CommunicationMode,
@@ -303,11 +302,7 @@ class TestHybridCodec:
             latent_confidence=0.85,
             text_confidence=0.60,
         )
-        # Decode the raw HybridPayload to verify confidence values
-        msg = decode(data)
         # Re-parse the wire bytes to check protobuf directly
-        raw_msg = decode.__wrapped__ if hasattr(decode, "__wrapped__") else None
-        # Just re-encode and check the protobuf layer
         _, _, flags, payload_length, metadata_length = struct.unpack(
             _HEADER_FMT, data[:HEADER_SIZE]
         )

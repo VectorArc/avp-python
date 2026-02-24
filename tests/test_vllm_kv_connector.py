@@ -1,7 +1,6 @@
 """Tests for AVPKVConnectorV1Dynamic (mock-based, no vLLM required)."""
 
 import os
-import tempfile
 
 import pytest
 

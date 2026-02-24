@@ -1,8 +1,6 @@
 """Tests for AVP JSON fallback messages."""
 
-import json
 
-import pytest
 
 from avp.fallback import FallbackRequest, JSONMessage
 

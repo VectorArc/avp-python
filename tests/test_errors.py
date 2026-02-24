@@ -1,6 +1,5 @@
 """Tests for AVP error types and hierarchy."""
 
-import pytest
 
 from avp.errors import (
     AVPError,

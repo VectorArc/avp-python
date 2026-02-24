@@ -85,7 +85,6 @@ class SessionManager:
     def find(self, agent_id: str) -> List[Session]:
         """Find all active sessions involving an agent."""
         with self._lock:
-            now = time.time()
             return [
                 s for s in self._sessions.values()
                 if agent_id in s.agents and not s.is_expired

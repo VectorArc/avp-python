@@ -215,7 +215,7 @@ def test_prompt_embeds_injection(connector):
     """inject_and_generate works with real vLLM prompt_embeds API."""
     # Get a real embedding for a known token
     input_embed, _ = connector.get_embedding_weights()
-    identity = connector.get_model_identity()
+    _identity = connector.get_model_identity()
 
     # Create a small embedding sequence (3 tokens worth)
     # Use actual embedding vectors from the model

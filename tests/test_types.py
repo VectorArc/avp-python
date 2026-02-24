@@ -1,7 +1,6 @@
 """Tests for AVP v0.2.0 types, enums, and dataclasses."""
 
 import numpy as np
-import pytest
 
 from avp.types import (
     FLAG_COMPRESSED,

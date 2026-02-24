@@ -1,18 +1,11 @@
 """Tests for AVP engine connectors (requires torch + transformers)."""
 
+import importlib.util
+
 import pytest
 
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
-
-try:
-    import transformers
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+HAS_TRANSFORMERS = importlib.util.find_spec("transformers") is not None
 
 pytestmark = [
     pytest.mark.skipif(not HAS_TORCH, reason="torch not installed"),

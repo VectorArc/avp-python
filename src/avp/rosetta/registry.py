@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from ..errors import RealignmentError
 from .._torch_compat import require_torch as _require_torch
 from .calibrate import AVPMap
 

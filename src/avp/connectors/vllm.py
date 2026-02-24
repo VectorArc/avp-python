@@ -228,7 +228,6 @@ class VLLMConnector(EngineConnector):
 
     def _load_embeddings_from_safetensors(self, model_id: str) -> Tuple[Any, Any]:
         """Load only embedding layers from safetensors (avoids full model load)."""
-        import torch
         from safetensors import safe_open
 
         from huggingface_hub import hf_hub_download
@@ -308,7 +307,6 @@ class VLLMConnector(EngineConnector):
 
     def tokenize(self, text: str) -> Any:
         """Tokenize text into input IDs."""
-        import torch
 
         encoded = self._tokenizer(
             text,

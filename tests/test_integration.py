@@ -5,22 +5,17 @@ decode → deserialize → inject → generate. Uses tiny random-weight models
 (no downloads required).
 """
 
+import importlib.util
 import threading
 import time
 
 import pytest
 
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+HAS_TRANSFORMERS = importlib.util.find_spec("transformers") is not None
 
-try:
-    import transformers
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
+if HAS_TORCH:
+    import torch
 
 pytestmark = [
     pytest.mark.skipif(not HAS_TORCH, reason="torch not installed"),
@@ -400,7 +395,6 @@ def integration_server():
     """AVP server for integration tests (port 9124)."""
     import uvicorn
 
-    from avp.codec import decode as avp_decode
     from avp.handshake import HelloMessage, extract_model_identity
     from avp.kv_cache import deserialize_kv_cache
     from avp.transport import create_app

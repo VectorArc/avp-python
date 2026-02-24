@@ -1,24 +1,12 @@
 """Shared test fixtures and markers for AVP tests."""
 
-import sys
+import importlib.util
 
 import pytest
 
 # Check for optional dependencies
-HAS_TORCH = False
-HAS_TRANSFORMERS = False
-
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    pass
-
-try:
-    import transformers
-    HAS_TRANSFORMERS = True
-except ImportError:
-    pass
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+HAS_TRANSFORMERS = importlib.util.find_spec("transformers") is not None
 
 # Custom markers
 requires_torch = pytest.mark.skipif(

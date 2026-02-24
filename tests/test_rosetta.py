@@ -374,7 +374,7 @@ class TestHandshakeIntegration:
     def test_handshake_with_map(self, tmp_path):
         """CompatibilityResolver returns LATENT when a Rosetta map exists."""
         from avp.handshake import CompatibilityResolver
-        from avp.rosetta.registry import _map_filename, _MAP_DIR
+        from avp.rosetta.registry import _map_filename
         from avp.types import CommunicationMode, ModelIdentity
         import avp.rosetta.registry as registry
 
@@ -789,9 +789,8 @@ class TestValidation:
         With real trained models, same-model projection gives cos_sim > 0.9.
         Here we bypass the fast gate to test the full validation pipeline.
         """
-        from avp.rosetta.calibrate import AVPMap, calibrate
+        from avp.rosetta.calibrate import calibrate
         from avp.rosetta.validate import validate_projection, ValidationConfig
-        from avp.types import CommunicationMode
 
         model, _ = tiny_gpt2_64
         tok = VocabMockTokenizer(vocab_size=256)
@@ -930,7 +929,6 @@ class TestValidation:
         """Vocab-mediated map between same-vocab models — full pipeline runs."""
         from avp.rosetta.calibrate import calibrate
         from avp.rosetta.validate import validate_projection, ValidationConfig
-        from avp.types import CommunicationMode
 
         src_model, _ = tiny_gpt2_64
         tgt_model, _ = tiny_gpt2_128

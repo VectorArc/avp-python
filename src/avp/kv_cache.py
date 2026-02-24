@@ -8,9 +8,9 @@ Requires torch — this module uses lazy imports so the core SDK works without i
 
 import struct
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Tuple
 
-from .errors import DecodeError, ShapeMismatchError
+from .errors import DecodeError
 
 
 def _require_torch():
@@ -155,13 +155,6 @@ def deserialize_kv_cache(
     offset = _KV_HEADER_SIZE
 
     import numpy as np
-
-    torch_dtype_map = {
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-    }
-    torch_dtype = torch_dtype_map.get(header.dtype, torch.float16)
 
     # Compute size per K or V tensor in bytes
     tensor_elements = header.num_kv_heads * header.seq_len * header.head_dim

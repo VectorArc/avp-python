@@ -1,20 +1,15 @@
 """Tests for the high-level API: think(), generate(), AVPContext."""
 
+import importlib.util
 from unittest.mock import MagicMock
 
 import pytest
 
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+HAS_TRANSFORMERS = importlib.util.find_spec("transformers") is not None
 
-try:
-    import transformers
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
+if HAS_TORCH:
+    import torch
 
 pytestmark = pytest.mark.skipif(
     not (HAS_TORCH and HAS_TRANSFORMERS),
@@ -407,7 +402,6 @@ class TestLazyImports:
 
     def test_huggingface_connector_lazy_import(self):
         """HuggingFaceConnector is importable from top-level avp package."""
-        import avp
         from avp import HuggingFaceConnector
         from avp.connectors.huggingface import HuggingFaceConnector as Direct
         assert HuggingFaceConnector is Direct

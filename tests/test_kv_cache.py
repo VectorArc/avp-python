@@ -1,12 +1,10 @@
 """Tests for AVP KV-cache serialization (requires torch)."""
 
+import importlib.util
+
 import pytest
 
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+HAS_TORCH = importlib.util.find_spec("torch") is not None
 
 pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
 
