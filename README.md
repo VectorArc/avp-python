@@ -1,6 +1,6 @@
 # Agent Vector Protocol (AVP)
 
-[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen)](tests/)
+[![CI](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml/badge.svg)](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.2-blue.svg)](https://github.com/VectorArc/avp-spec)
