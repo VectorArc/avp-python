@@ -37,7 +37,7 @@ AVP eliminates this by transferring the KV-cache (the computed attention states)
 | Speed improvement | **2-4.3x** faster |
 | HotpotQA: latent beats text AND direct | **35% EM / 0.54 F1** (vs 30% / 20%) |
 | Models validated | Qwen2.5, DeepSeek-R1, Llama 3.2 |
-| Tests | 260 passing (248 unit + 12 integration) |
+| Tests | 288 passing (276 unit + 12 integration) |
 
 Full results: **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**
 
