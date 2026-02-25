@@ -1,4 +1,4 @@
-# Agent Vector Protocol (AVP)
+# Agent Vector Protocol (AVP) — KV-Cache Transfer for Multi-Agent LLMs
 
 [![CI](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml/badge.svg)](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -101,9 +101,47 @@ session = CompatibilityResolver.resolve(local, remote)
 # session.mode → LATENT (same model) or JSON (different)
 ```
 
+## Requirements
+
+- **Self-hosted models only.** AVP needs direct access to model weights, KV-cache, and hidden states. Cloud APIs (OpenAI, Anthropic, Google) don't expose these internals — AVP cannot work with them.
+- **Same model on all agents** for latent transfer. Same-family models (e.g. Qwen2.5-1.5B ↔ 0.5B) are supported via cross-model projection. Different families fall back to JSON automatically.
+- **GPU recommended.** Benchmarks run on NVIDIA RTX 3070 Ti (8GB VRAM). CPU works but is significantly slower.
+- **Datacenter bandwidth** for cross-machine transfer (28-130 MB per hop at fp32). Same-machine or shared-memory is ideal.
+- **Python 3.9+**, PyTorch 2.0+, HuggingFace Transformers 4.36+ (for latent features).
+
+## When NOT to Use AVP
+
+- **Cloud API models** (OpenAI `gpt-4o`, Anthropic `claude`, Google `gemini`) — no KV-cache access available
+- **Single-agent applications** — no inter-agent communication to optimize
+- **Different model families** without shared tokenizer (e.g. Llama ↔ Qwen) — falls back to JSON, no latent benefit
+- **Low-bandwidth cross-machine links** (<1 Gbps) — 28-130 MB per hop makes latent transfer impractical over the internet
+- **Edge or mobile deployment** — requires GPU and significant VRAM (1-2 GB for 1.5B-3B models)
+
 ## How It Works
 
-AVP defines a binary format, handshake, and codec — not the transport. It works alongside any agent protocol.
+AVP defines a binary format, handshake, and codec — not the transport. It works alongside any agent protocol (LangChain, CrewAI, AutoGen, or custom).
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Your Orchestrator (LangChain / CrewAI / AutoGen / custom)   │
+│                                                              │
+│  Agent A                          Agent B                    │
+│    │                                ▲                        │
+│    │  connector.think() ──►         │  connector.generate()  │
+│    │  AVPContext                     │  with context=...      │
+│    │                                │                        │
+│    │    context.to_bytes()          │  AVPContext.from_bytes()│
+│    ▼                                │                        │
+│  ┌────────────────────────────────────────────┐              │
+│  │  AVP (this library)                        │              │
+│  │  • Handshake — resolves LATENT/JSON mode   │              │
+│  │  • Codec — serialize/deserialize KV-cache  │              │
+│  │  • Session — TTL, thread safety            │              │
+│  └────────────────────────────────────────────┘              │
+│         │                                                    │
+│    Transport: HTTP/2, gRPC, shared memory, file, any         │
+└──────────────────────────────────────────────────────────────┘
+```
 
 **Three communication modes, auto-negotiated via handshake:**
 
@@ -150,6 +188,40 @@ AVP defines a binary format, handshake, and codec — not the transport. It work
 - **[A2A](https://github.com/google/A2A)** — Transport binding via `multipart/related` with binary payloads
 - **[MCP](https://github.com/modelcontextprotocol)** — Complementary: MCP handles tools and context, AVP handles tensor transfer
 
+## API Reference
+
+### High-Level API (most users)
+
+| Import | What It Does |
+|--------|-------------|
+| `HuggingFaceConnector` | Main connector. `think()` builds KV-cache (returns `AVPContext`), `generate()` produces text. `from_pretrained()` for easy setup. |
+| `VLLMConnector` | Production connector. `generate()` returns text. Latent transfer happens at engine level via KV connector plugin. |
+| `AVPContext` | Wraps KV-cache + model metadata. Pass between `think()` and `generate()`, or serialize with `to_bytes()` / `from_bytes()` for cross-process transfer. |
+
+### Protocol Layer
+
+| Import | What It Does |
+|--------|-------------|
+| `encode` / `decode` | Binary codec for hidden states, KV-cache, and hybrid payloads. |
+| `extract_model_identity` | Extract `ModelIdentity` (family, dimensions, hash) from a HuggingFace model. |
+| `CompatibilityResolver.resolve()` | Handshake: compares two `ModelIdentity` objects, returns LATENT, HYBRID, or JSON mode. |
+| `SessionManager` | Manage communication sessions with TTL and thread safety. |
+| `AVPClient` / `AVPAsyncClient` | HTTP/2 client (sync and async) for sending AVP messages over the network. |
+| `create_app` | Create a FastAPI server that receives AVP messages. |
+
+### Cross-Model (Rosetta Stone)
+
+| Import | What It Does |
+|--------|-------------|
+| `calibrate` | Build a projection map (`AVPMap`) between two models for cross-model transfer. |
+| `vocabulary_mediated_projection` | Project hidden states from source model to target model using shared vocabulary as a bridge. |
+| `validate_projection` | Quality gate: cosine similarity (fast) + pseudo-perplexity (thorough). Returns LATENT/HYBRID/JSON recommendation. |
+| `save_map` / `load_map` / `find_map` | Persist and retrieve `.avp-map` files for reuse. |
+
+### Error Types
+
+All errors inherit from `AVPError`. Key types: `IncompatibleModelsError`, `HandshakeError`, `DecodeError`, `ShapeMismatchError`, `RealignmentError`, `SessionExpiredError`, `EngineNotAvailableError`, `FallbackRequested`.
+
 ## Benchmarks
 
 | Benchmark | Latent Accuracy | Text Accuracy | Token Savings | Speed vs Text |
@@ -193,6 +265,18 @@ pip install -e ".[all]"
 - **[Benchmark Results](docs/BENCHMARKS.md)** — Full results across 4 benchmarks and 3 model families
 - **[Examples](examples/)** — Agent demo, mixed-model demo, quickstart
 - **[Contributing](CONTRIBUTING.md)** — Dev setup, tests, code style
+
+## Key Concepts
+
+| Term | What It Means |
+|------|---------------|
+| **KV-cache** | During text generation, each transformer layer computes key and value vectors for the attention mechanism. These are cached so they don't need to be recomputed for each new token. AVP transfers this cache between agents so the receiving agent doesn't recompute what the sender already processed. |
+| **Hidden states** | The internal vector representations at each transformer layer — the model's "understanding" of the input at that point in the network. Richer than text because they carry information that gets lost when converting to tokens. |
+| **Latent transfer** | Sending KV-cache or hidden states (the "latent" internal representations) instead of converting to text and back. Avoids the lossy text bottleneck. |
+| **Realignment** | Normalizing hidden states before injecting them into another model instance, so they match the expected input distribution. Required because hidden state magnitudes can drift. |
+| **Tied weights** | When a model reuses the same weight matrix for both input embeddings and output projection (common in smaller models like Qwen <=3B, Llama 3.2 <=3B). Requires a special softmax-based projection instead of simple normalization. |
+| **Vocabulary-mediated projection** | Cross-model transfer technique: convert source hidden states to token probabilities using the source model's output head, then reconstruct target-compatible representations using the target model's input embeddings. Works for same-family models that share a tokenizer. |
+| **PagedAttention** | vLLM's memory management for KV-cache — stores cache in non-contiguous pages. AVP's `page_convert` module handles conversion between paged and contiguous formats. |
 
 ## Research Foundation
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "avp"
 dynamic = ["version"]
-description = "Python SDK for the Agent Vector Protocol (AVP)"
+description = "Transfer LLM KV-cache between agents instead of regenerating text — 73-78% fewer tokens, 2-4x faster multi-agent pipelines"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
