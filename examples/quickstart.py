@@ -54,6 +54,7 @@ def main():
           f"seq_len={context.seq_len}")
 
     # Agent B: generate with Agent A's context
+    # (random weights produce empty/garbage output — real models give real answers)
     answer = connector.generate("Give the answer.", context=context, max_new_tokens=20)
     print(f"Agent B: generate() -> {answer!r}")
 

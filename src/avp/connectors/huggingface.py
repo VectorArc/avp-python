@@ -155,7 +155,7 @@ class HuggingFaceConnector(EngineConnector):
         has_device_map = "device_map" in model_kwargs
 
         model = transformers.AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=dtype, **model_kwargs
+            model_id, dtype=dtype, **model_kwargs
         )
         model.eval()
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)

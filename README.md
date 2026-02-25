@@ -48,7 +48,7 @@ Full results: **[docs/BENCHMARKS.md](docs/BENCHMARKS.md)**
 ```python
 from avp import HuggingFaceConnector
 
-connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
 
 # Agent A: latent reasoning (no text output, builds KV-cache)
 context = connector.think("Analyze this math problem: 24 * 17 + 3", steps=20)
