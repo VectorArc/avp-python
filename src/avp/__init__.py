@@ -42,6 +42,7 @@ from .types import (
     PayloadType,
     SessionInfo,
 )
+from .easy import PackedMessage, pack, unpack
 from .version import __version__
 
 # Rosetta Stone (cross-model projection) — lazy-loaded because it requires torch.
@@ -67,6 +68,9 @@ _TRANSPORT_NAMES = {"AVPClient", "AVPAsyncClient", "create_app"}
 # Connector and context classes are lazy-loaded because they require torch/transformers/vllm.
 _CONNECTOR_NAMES = {"AVPContext", "HuggingFaceConnector", "VLLMConnector"}
 
+# Easy API helpers that need lazy loading
+_EASY_NAMES = {"clear_cache"}
+
 
 def __getattr__(name: str):
     if name in _TRANSPORT_NAMES:
@@ -84,6 +88,9 @@ def __getattr__(name: str):
     if name == "VLLMConnector":
         from .connectors.vllm import VLLMConnector
         return VLLMConnector
+    if name in _EASY_NAMES:
+        from . import easy as _easy
+        return getattr(_easy, name)
     raise AttributeError(f"module 'avp' has no attribute {name}")
 
 
@@ -150,6 +157,11 @@ __all__ = [
     "AVPContext",
     "HuggingFaceConnector",
     "VLLMConnector",
+    # Easy API (pack/unpack)
+    "pack",
+    "unpack",
+    "PackedMessage",
+    "clear_cache",
     # Errors
     "AVPError",
     "InvalidMagicError",
