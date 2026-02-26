@@ -198,3 +198,49 @@ class TestEdgeCases:
     def test_whitespace_before_json(self):
         raw = '  \n {"avp": "0.2", "content": "whitespace"}'
         assert unpack(raw) == "whitespace"
+
+
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
+
+class TestValidation:
+    def test_pack_rejects_non_string_content(self):
+        with pytest.raises(TypeError, match="content must be str"):
+            pack(123)
+
+    def test_pack_rejects_none_content(self):
+        with pytest.raises(TypeError, match="content must be str"):
+            pack(None)
+
+    def test_pack_rejects_list_content(self):
+        with pytest.raises(TypeError, match="content must be str"):
+            pack(["a", "b"])
+
+    def test_pack_think_steps_requires_model(self):
+        with pytest.raises(ValueError, match="think_steps requires model="):
+            pack("hello", think_steps=20)
+
+    def test_unpack_bytearray(self):
+        raw = bytearray(json.dumps({"avp": "0.2", "content": "from buffer"}).encode())
+        assert unpack(raw) == "from buffer"
+
+    def test_unpack_memoryview(self):
+        raw = memoryview(json.dumps({"avp": "0.2", "content": "from mv"}).encode())
+        assert unpack(raw) == "from mv"
+
+    def test_from_wire_json(self):
+        raw = json.dumps({
+            "avp": "0.2",
+            "content": "hello",
+            "identity": {"model_hash": "abc"},
+        }).encode()
+        msg = PackedMessage.from_wire(raw)
+        assert msg.content == "hello"
+        assert msg.identity == {"model_hash": "abc"}
+
+    def test_from_wire_plain_text(self):
+        msg = PackedMessage.from_wire("just text")
+        assert msg.content == "just text"
+        assert msg.identity is None

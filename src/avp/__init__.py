@@ -1,14 +1,51 @@
-"""AVP — Agent Vector Protocol Python SDK."""
+"""AVP — Agent Vector Protocol Python SDK.
 
-from .codec import decode, encode, encode_hidden_state, encode_hybrid, encode_kv_cache
-from .compression import compress, decompress
-from .errors import (
-    AVPError,
-    DecodeError,
+Start here:
+    >>> import avp
+    >>> msg = avp.pack("Hello from agent A")
+    >>> avp.unpack(msg.to_bytes())
+    'Hello from agent A'
+
+Add model identity (downloads config only, not weights):
+    >>> msg = avp.pack("Hello", model="Qwen/Qwen2.5-7B-Instruct")
+
+Add latent reasoning (requires GPU + torch):
+    >>> msg = avp.pack("Analyze this", model="Qwen/...", think_steps=20)
+    >>> answer = avp.unpack(msg, model="Qwen/...")
+
+For direct connector access (advanced):
+    >>> connector = avp.HuggingFaceConnector.from_pretrained("Qwen/...")
+    >>> context = connector.think("...", steps=20)
+    >>> answer = connector.generate("...", context=context)
+"""
+
+# --- Easy API (start here) ---
+from .easy import PackedMessage, pack, unpack
+
+# --- Protocol layer ---
+from .codec import decode, encode
+from .codec import encode_hidden_state, encode_hybrid, encode_kv_cache  # noqa: F401
+from .compression import compress, decompress  # noqa: F401
+from .handshake import CompatibilityResolver, extract_model_identity
+from .handshake import HelloMessage, compute_model_hash, compute_tokenizer_hash  # noqa: F401
+from .session import Session, SessionManager  # noqa: F401
+from .fallback import FallbackRequest, JSONMessage  # noqa: F401
+
+# --- Types ---
+from .types import (
+    AVPMessage,
+    AVPMetadata,
+    CommunicationMode,
+    CompressionLevel,
+    ModelIdentity,
+)
+from .types import AVPHeader, DataType, PayloadType, ProjectionMethod, SessionInfo  # noqa: F401
+
+# --- Errors ---
+from .errors import AVPError, DecodeError, HandshakeError, IncompatibleModelsError
+from .errors import (  # noqa: F401
     EngineNotAvailableError,
     FallbackRequested,
-    HandshakeError,
-    IncompatibleModelsError,
     InvalidMagicError,
     RealignmentError,
     SessionError,
@@ -17,11 +54,9 @@ from .errors import (
     TransportError,
     UnsupportedVersionError,
 )
-from .fallback import FallbackRequest, JSONMessage
-from .handshake import CompatibilityResolver, HelloMessage, compute_model_hash, compute_tokenizer_hash, extract_model_identity
-from .session import Session, SessionManager
-from .types import (
-    ProjectionMethod,
+
+# --- Wire-format constants (importable, not promoted in __all__) ---
+from .types import (  # noqa: F401
     AVP_VERSION_HEADER,
     AVP_VERSION_STRING,
     CONTENT_TYPE,
@@ -32,17 +67,8 @@ from .types import (
     HEADER_SIZE,
     MAGIC,
     PROTOCOL_VERSION,
-    AVPHeader,
-    AVPMessage,
-    AVPMetadata,
-    CommunicationMode,
-    CompressionLevel,
-    DataType,
-    ModelIdentity,
-    PayloadType,
-    SessionInfo,
 )
-from .easy import PackedMessage, pack, unpack
+
 from .version import __version__
 
 # Rosetta Stone (cross-model projection) — lazy-loaded because it requires torch.
@@ -95,87 +121,41 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    # Codec
-    "encode",
-    "decode",
-    "encode_hidden_state",
-    "encode_kv_cache",
-    "encode_hybrid",
-    # Compression
-    "compress",
-    "decompress",
-    # Transport (lazy — requires httpx)
-    "AVPClient",
-    "AVPAsyncClient",
-    "create_app",
-    # Handshake
-    "HelloMessage",
-    "CompatibilityResolver",
-    "compute_model_hash",
-    "compute_tokenizer_hash",
-    "extract_model_identity",
-    # Session
-    "Session",
-    "SessionManager",
-    # Fallback
-    "JSONMessage",
-    "FallbackRequest",
-    # Types
-    "AVPHeader",
-    "AVPMessage",
-    "AVPMetadata",
-    "ModelIdentity",
-    "SessionInfo",
-    "CompressionLevel",
-    "PayloadType",
-    "CommunicationMode",
-    "DataType",
-    # Constants
-    "MAGIC",
-    "PROTOCOL_VERSION",
-    "HEADER_SIZE",
-    "CONTENT_TYPE",
-    "AVP_VERSION_HEADER",
-    "AVP_VERSION_STRING",
-    "FLAG_COMPRESSED",
-    "FLAG_HYBRID",
-    "FLAG_HAS_MAP",
-    "FLAG_KV_CACHE",
-    "ProjectionMethod",
-    # Rosetta Stone (lazy — requires torch)
-    "AVPMap",
-    "calibrate",
-    "apply_cross_model_projection",
-    "vocabulary_mediated_projection",
-    "save_map",
-    "load_map",
-    "find_map",
-    "ValidationConfig",
-    "ValidationResult",
-    "validate_projection",
-    # Connectors & Context (lazy — requires torch/transformers/vllm)
-    "AVPContext",
-    "HuggingFaceConnector",
-    "VLLMConnector",
-    # Easy API (pack/unpack)
+    # Easy API (start here)
     "pack",
     "unpack",
     "PackedMessage",
     "clear_cache",
+    # Connectors (lazy — requires torch/transformers/vllm)
+    "HuggingFaceConnector",
+    "VLLMConnector",
+    "AVPContext",
+    # Protocol
+    "encode",
+    "decode",
+    "CompatibilityResolver",
+    "extract_model_identity",
+    "SessionManager",
+    # Types
+    "ModelIdentity",
+    "CommunicationMode",
+    "CompressionLevel",
+    "AVPMessage",
+    "AVPMetadata",
+    # Transport (lazy — requires httpx)
+    "AVPClient",
+    "AVPAsyncClient",
+    "create_app",
+    # Cross-model / Rosetta Stone (lazy — requires torch)
+    "AVPMap",
+    "calibrate",
+    "vocabulary_mediated_projection",
+    "validate_projection",
     # Errors
     "AVPError",
-    "InvalidMagicError",
-    "UnsupportedVersionError",
-    "DecodeError",
-    "TransportError",
-    "HandshakeError",
-    "SessionError",
-    "SessionExpiredError",
-    "ShapeMismatchError",
-    "RealignmentError",
-    "FallbackRequested",
     "IncompatibleModelsError",
-    "EngineNotAvailableError",
+    "DecodeError",
+    "HandshakeError",
     # Version
     "__version__",
 ]

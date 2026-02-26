@@ -1,12 +1,20 @@
 """Zero-friction pack()/unpack() API for AVP.
 
-Progressive layers — developer only pays for what they use:
+This is the recommended entry point. Progressive layers — you only pay
+for what you use:
 
-  Layer 0: JSON messaging     pack(text) / unpack(data)
-  Layer 1: + Model identity   pack(text, model="Qwen/...")
-  Layer 2: + Latent context   pack(text, model="Qwen/...", think_steps=20)
+  Layer 0: JSON messaging     pack(text) / unpack(data)        (no optional deps)
+  Layer 1: + Model identity   pack(text, model="Qwen/...")     (+ transformers)
+  Layer 2: + Latent context   pack(..., think_steps=20)        (+ torch)
 
-Messages are self-describing. No handshake required.
+Messages are self-describing (first-byte detection). No handshake required.
+
+When to use pack()/unpack() vs HuggingFaceConnector directly:
+  - pack()/unpack(): Simple integration, gradual opt-in to latent features.
+    Manages connector lifecycle, caching, and identity extraction for you.
+  - HuggingFaceConnector: Direct control over model loading, device placement,
+    batch generation, and AVPContext serialization. Use when you need to manage
+    the model yourself or integrate with custom orchestration.
 """
 
 import json
@@ -57,6 +65,21 @@ class PackedMessage:
 
     def __bytes__(self) -> bytes:
         return self.to_bytes()
+
+    @classmethod
+    def from_wire(cls, data: Union[bytes, bytearray, memoryview, str]) -> "PackedMessage":
+        """Decode wire data into a PackedMessage for inspection.
+
+        Use this when you need access to identity or context, not just text.
+
+        Example::
+
+            msg = PackedMessage.from_wire(wire_bytes)
+            print(msg.content)    # text
+            print(msg.identity)   # model identity dict (if present)
+            print(msg.context)    # AVPContext (if binary with latent data)
+        """
+        return _decode_input(data)
 
 
 # ---------------------------------------------------------------------------
@@ -151,15 +174,30 @@ def pack(
 ) -> PackedMessage:
     """Pack a text message for transfer between agents.
 
+    Examples::
+
+        msg = avp.pack("Hello")                              # Layer 0: JSON
+        msg = avp.pack("Hello", model="Qwen/Qwen2.5-7B")    # Layer 1: + identity
+        msg = avp.pack("Hello", model="Qwen/...",            # Layer 2: + latent
+                        think_steps=20)
+
     Args:
         content: The text to send.
-        model: Local model identifier (HuggingFace path/name).
+        model: HuggingFace model name/path (self-hosted, local weights).
+            Layer 1 downloads only the config (~1 KB) for identity.
+            Layer 2 (think_steps > 0) loads the full model (cached after first call).
         context: A previous PackedMessage whose latent context should be reused.
-        think_steps: Number of latent thinking steps (Layer 2).
+        think_steps: Number of latent thinking steps. 0 = no latent (Layer 0/1).
+            20 is the recommended value (accuracy plateaus beyond this).
 
     Returns:
         PackedMessage — use str(msg) for text, bytes(msg) for wire format.
     """
+    if not isinstance(content, str):
+        raise TypeError(f"pack() content must be str, got {type(content).__name__}")
+    if think_steps > 0 and model is None:
+        raise ValueError("think_steps requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
+
     identity = None
     avp_context = None
 
@@ -187,7 +225,7 @@ def pack(
 
 
 def unpack(
-    data: Union[bytes, str, "PackedMessage"],
+    data: Union[bytes, bytearray, memoryview, str, "PackedMessage"],
     *,
     model: Optional[str] = None,
     context: Optional[PackedMessage] = None,
@@ -196,9 +234,19 @@ def unpack(
 ) -> str:
     """Unpack an AVP message back to text. Optionally generate a response.
 
+    Accepts any format — AVP binary, AVP JSON, legacy JSONMessage, plain text,
+    or a PackedMessage object. Format is detected automatically.
+
+    Examples::
+
+        text = avp.unpack(wire_bytes)                          # extract text
+        text = avp.unpack("plain string")                      # passthrough
+        answer = avp.unpack(msg, model="Qwen/Qwen2.5-7B")     # generate response
+
     Args:
         data: Wire bytes, JSON string, raw text, or PackedMessage.
-        model: Local model to use for generation. If None, just extracts text.
+        model: HuggingFace model name/path for generation. If None, just
+            extracts text (no model needed, no GPU needed).
         context: Previous PackedMessage providing latent context for generation.
         max_new_tokens: Max tokens for generation (only used with model=).
         temperature: Sampling temperature for generation (only used with model=).
@@ -235,7 +283,8 @@ def _decode_input(data: Union[bytes, str, "PackedMessage"]) -> PackedMessage:
     if isinstance(data, PackedMessage):
         return data
 
-    if isinstance(data, bytes):
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        data = bytes(data)
         # First-byte detection
         if data[:2] == MAGIC:
             return _decode_avp_binary(data)
