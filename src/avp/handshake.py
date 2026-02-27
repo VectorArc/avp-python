@@ -7,12 +7,15 @@ Agents exchange HelloMessage to determine communication mode:
 
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from .errors import HandshakeError
 from .types import CommunicationMode, ModelIdentity, SessionInfo
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -172,9 +175,12 @@ class CompatibilityResolver:
 
         mode = CommunicationMode.JSON  # default
         avp_map_id = ""
+        resolution_path = "json_fallback"
 
         if local.model_hash and remote.model_hash and local.model_hash == remote.model_hash:
             mode = CommunicationMode.LATENT
+            resolution_path = "hash_match"
+            logger.debug("Handshake: hash_match (hash=%s)", local.model_hash[:16])
         elif (
             local.model_family
             and local.model_family == remote.model_family
@@ -184,6 +190,11 @@ class CompatibilityResolver:
             and local.num_layers == remote.num_layers
         ):
             mode = CommunicationMode.LATENT
+            resolution_path = "structural_match"
+            logger.debug(
+                "Handshake: structural_match (family=%s dim=%d layers=%d)",
+                local.model_family, local.hidden_dim, local.num_layers,
+            )
 
         # Check for shared tokenizer (vocab-mediated projection)
         if (
@@ -194,6 +205,8 @@ class CompatibilityResolver:
         ):
             mode = CommunicationMode.LATENT
             avp_map_id = f"vocab:{local.tokenizer_hash[:16]}"
+            resolution_path = "shared_tokenizer"
+            logger.debug("Handshake: shared_tokenizer (hash=%s)", local.tokenizer_hash[:16])
 
         # Check for Rosetta Stone map file before falling back to JSON
         if mode == CommunicationMode.JSON and local.model_hash and remote.model_hash:
@@ -201,6 +214,19 @@ class CompatibilityResolver:
             if find_map(local.model_hash, remote.model_hash):
                 mode = CommunicationMode.LATENT
                 avp_map_id = map_id(local.model_hash, remote.model_hash)
+                resolution_path = "avp_map_file"
+                logger.debug("Handshake: avp_map_file (id=%s)", avp_map_id)
+
+        if resolution_path == "json_fallback":
+            logger.debug(
+                "Handshake: json_fallback (local=%s remote=%s)",
+                local.model_id, remote.model_id,
+            )
+
+        logger.info(
+            "Handshake resolved: path=%s mode=%s local=%s remote=%s",
+            resolution_path, mode.name, local.model_id, remote.model_id,
+        )
 
         return SessionInfo(
             session_id=session_id,

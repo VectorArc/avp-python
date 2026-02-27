@@ -1,5 +1,6 @@
 """Tests for AVP handshake negotiation."""
 
+import logging
 import tempfile
 
 import pytest
@@ -367,3 +368,34 @@ def test_resolve_no_tokenizer_hash_skips_rule3():
             assert result.avp_map_id == ""
         finally:
             registry._MAP_DIR = old_dir
+
+
+# --- Handshake logging ---
+
+
+def test_resolve_logs_hash_match(caplog):
+    """Verify hash_match resolution is logged."""
+    local = ModelIdentity(model_hash="aaa", model_family="llama", hidden_dim=4096, num_layers=32)
+    remote = ModelIdentity(model_hash="aaa", model_family="llama", hidden_dim=4096, num_layers=32)
+    with caplog.at_level(logging.DEBUG, logger="avp.handshake"):
+        CompatibilityResolver.resolve(local, remote)
+    assert any("hash_match" in r.message for r in caplog.records)
+
+
+def test_resolve_logs_json_fallback(caplog):
+    """Verify json_fallback resolution is logged."""
+    import avp.rosetta.registry as registry
+
+    local = ModelIdentity(model_hash="aaa", model_family="gpt2", hidden_dim=64, num_layers=2)
+    remote = ModelIdentity(model_hash="bbb", model_family="llama", hidden_dim=128, num_layers=4)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        import pathlib
+        old_dir = registry._MAP_DIR
+        try:
+            registry._MAP_DIR = pathlib.Path(tmp)
+            with caplog.at_level(logging.DEBUG, logger="avp.handshake"):
+                CompatibilityResolver.resolve(local, remote)
+        finally:
+            registry._MAP_DIR = old_dir
+    assert any("json_fallback" in r.message for r in caplog.records)

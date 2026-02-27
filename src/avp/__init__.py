@@ -21,6 +21,7 @@ For direct connector access (advanced):
 
 # --- Easy API (start here) ---
 from .easy import PackedMessage, pack, unpack
+from .context_store import ContextStore
 
 # --- Protocol layer ---
 from .codec import decode, encode
@@ -97,6 +98,9 @@ _CONNECTOR_NAMES = {"AVPContext", "HuggingFaceConnector", "VLLMConnector"}
 # Easy API helpers that need lazy loading
 _EASY_NAMES = {"clear_cache"}
 
+# Metrics classes — lazy-loaded to avoid unconditional import
+_METRICS_NAMES = {"PackMetrics", "UnpackMetrics", "HandshakeMetrics"}
+
 
 def __getattr__(name: str):
     if name in _TRANSPORT_NAMES:
@@ -117,6 +121,9 @@ def __getattr__(name: str):
     if name in _EASY_NAMES:
         from . import easy as _easy
         return getattr(_easy, name)
+    if name in _METRICS_NAMES:
+        from . import metrics as _metrics
+        return getattr(_metrics, name)
     raise AttributeError(f"module 'avp' has no attribute {name}")
 
 
@@ -126,6 +133,11 @@ __all__ = [
     "unpack",
     "PackedMessage",
     "clear_cache",
+    "ContextStore",
+    # Observability (lazy — stdlib only)
+    "PackMetrics",
+    "UnpackMetrics",
+    "HandshakeMetrics",
     # Connectors (lazy — requires torch/transformers/vllm)
     "HuggingFaceConnector",
     "VLLMConnector",

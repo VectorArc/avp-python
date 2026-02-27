@@ -19,9 +19,10 @@ When to use pack()/unpack() vs HuggingFaceConnector directly:
 
 import json
 import logging
+import time as _time
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from .types import AVP_VERSION_HEADER, MAGIC
 
@@ -171,7 +172,8 @@ def pack(
     model: Optional[str] = None,
     context: Optional[PackedMessage] = None,
     think_steps: int = 0,
-) -> PackedMessage:
+    collect_metrics: bool = False,
+) -> Union[PackedMessage, Tuple[PackedMessage, "PackMetrics"]]:
     """Pack a text message for transfer between agents.
 
     Examples::
@@ -181,6 +183,9 @@ def pack(
         msg = avp.pack("Hello", model="Qwen/...",            # Layer 2: + latent
                         think_steps=20)
 
+        # With metrics:
+        msg, metrics = avp.pack("Hello", collect_metrics=True)
+
     Args:
         content: The text to send.
         model: HuggingFace model name/path (self-hosted, local weights).
@@ -189,10 +194,14 @@ def pack(
         context: A previous PackedMessage whose latent context should be reused.
         think_steps: Number of latent thinking steps. 0 = no latent (Layer 0/1).
             20 is the recommended value (accuracy plateaus beyond this).
+        collect_metrics: If True, return ``(PackedMessage, PackMetrics)`` tuple.
 
     Returns:
         PackedMessage — use str(msg) for text, bytes(msg) for wire format.
+        If collect_metrics=True, returns (PackedMessage, PackMetrics).
     """
+    t_start = _time.perf_counter()
+
     if not isinstance(content, str):
         raise TypeError(f"pack() content must be str, got {type(content).__name__}")
     if think_steps > 0 and model is None:
@@ -200,23 +209,55 @@ def pack(
 
     identity = None
     avp_context = None
+    identity_duration = 0.0
+    think_duration = 0.0
 
     if model is not None:
+        t_id = _time.perf_counter()
         identity = _get_local_identity(model)
+        identity_duration = _time.perf_counter() - t_id
 
         if think_steps > 0:
             connector = _get_or_create_connector(model)
             prior_context = context.context if context is not None else None
+            t_think = _time.perf_counter()
             avp_context = connector.think(
                 content, steps=think_steps, context=prior_context
             )
+            think_duration = _time.perf_counter() - t_think
+            logger.info(
+                "pack() latent thinking: steps=%d duration=%.3fs",
+                think_steps, think_duration,
+            )
 
-    return PackedMessage(
+    layer = 0 if model is None else (2 if think_steps > 0 else 1)
+    logger.debug(
+        "pack() layer=%d model=%s think_steps=%d",
+        layer, model, think_steps,
+    )
+
+    result = PackedMessage(
         content=content,
         identity=identity,
         context=avp_context,
         model=model,
     )
+
+    if collect_metrics:
+        from .metrics import PackMetrics
+
+        metrics = PackMetrics(
+            layer=layer,
+            model=model,
+            think_steps=think_steps,
+            has_prior_context=context is not None,
+            duration_s=_time.perf_counter() - t_start,
+            identity_duration_s=identity_duration,
+            think_duration_s=think_duration,
+        )
+        return result, metrics
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +272,8 @@ def unpack(
     context: Optional[PackedMessage] = None,
     max_new_tokens: int = 512,
     temperature: float = 0.7,
-) -> str:
+    collect_metrics: bool = False,
+) -> Union[str, Tuple[str, "UnpackMetrics"]]:
     """Unpack an AVP message back to text. Optionally generate a response.
 
     Accepts any format — AVP binary, AVP JSON, legacy JSONMessage, plain text,
@@ -243,6 +285,9 @@ def unpack(
         text = avp.unpack("plain string")                      # passthrough
         answer = avp.unpack(msg, model="Qwen/Qwen2.5-7B")     # generate response
 
+        # With metrics:
+        text, metrics = avp.unpack("hello", collect_metrics=True)
+
     Args:
         data: Wire bytes, JSON string, raw text, or PackedMessage.
         model: HuggingFace model name/path for generation. If None, just
@@ -250,27 +295,89 @@ def unpack(
         context: Previous PackedMessage providing latent context for generation.
         max_new_tokens: Max tokens for generation (only used with model=).
         temperature: Sampling temperature for generation (only used with model=).
+        collect_metrics: If True, return ``(str, UnpackMetrics)`` tuple.
 
     Returns:
         The text content, or generated response if model= is provided.
+        If collect_metrics=True, returns (str, UnpackMetrics).
     """
+    t_start = _time.perf_counter()
+
+    input_format = _detect_format(data)
+
+    t_decode = _time.perf_counter()
     packed = _decode_input(data)
+    decode_duration = _time.perf_counter() - t_decode
 
+    logger.debug("unpack() format=%s model=%s", input_format, model)
+
+    generate_duration = 0.0
     if model is None:
-        return packed.content
+        text = packed.content
+    else:
+        connector = _get_or_create_connector(model)
+        avp_context = None
+        if context is not None:
+            avp_context = context.context
+        elif packed.context is not None:
+            avp_context = packed.context
 
-    connector = _get_or_create_connector(model)
-    avp_context = None
-    if context is not None:
-        avp_context = context.context
-    elif packed.context is not None:
-        avp_context = packed.context
-    return connector.generate(
-        packed.content,
-        context=avp_context,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-    )
+        t_gen = _time.perf_counter()
+        text = connector.generate(
+            packed.content,
+            context=avp_context,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+        )
+        generate_duration = _time.perf_counter() - t_gen
+        has_ctx = avp_context is not None
+        logger.info(
+            "unpack() generated: has_context=%s duration=%.3fs",
+            has_ctx, generate_duration,
+        )
+
+    if collect_metrics:
+        from .metrics import UnpackMetrics
+
+        has_context = False
+        if context is not None and context.context is not None:
+            has_context = True
+        elif packed.context is not None:
+            has_context = True
+
+        metrics = UnpackMetrics(
+            input_format=input_format,
+            has_context=has_context,
+            generated=model is not None,
+            duration_s=_time.perf_counter() - t_start,
+            decode_duration_s=decode_duration,
+            generate_duration_s=generate_duration,
+        )
+        return text, metrics
+
+    return text
+
+
+def _detect_format(data: Union[bytes, bytearray, memoryview, str, "PackedMessage"]) -> str:
+    """Determine input format label for metrics."""
+    if isinstance(data, PackedMessage):
+        return "packed_message"
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        raw = bytes(data) if not isinstance(data, bytes) else data
+        if raw[:2] == MAGIC:
+            return "binary"
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return "binary"
+        if text.lstrip().startswith("{"):
+            return "json"
+        return "text"
+    if isinstance(data, str):
+        if data.lstrip().startswith("{"):
+            return "json"
+        return "text"
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
