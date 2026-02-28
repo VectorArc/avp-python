@@ -4,6 +4,7 @@ Standard HotpotQA evaluation after answer normalization:
 lowercase, remove articles/punctuation/extra whitespace.
 """
 
+import math
 import re
 import string
 from collections import Counter
@@ -78,21 +79,31 @@ def token_f1(prediction: str, gold: str) -> float:
 
 
 def compute_accuracy(results: List[Dict]) -> Dict:
-    """Compute HotpotQA metrics from a list of results."""
+    """Compute HotpotQA metrics from a list of results, with Wilson score 95% CI."""
     total = len(results)
     if total == 0:
-        return {"exact_match": 0.0, "f1": 0.0, "correct": 0, "total": 0, "accuracy": 0.0}
+        return {"exact_match": 0.0, "f1": 0.0, "correct": 0, "total": 0,
+                "accuracy": 0.0, "ci_95_lo": 0.0, "ci_95_hi": 0.0}
 
     em_count = sum(1 for r in results if r.get("exact_match", False))
     f1_scores = [r.get("f1", 0.0) for r in results]
     mean_f1 = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+    acc = em_count / total
+
+    # Wilson score interval
+    z = 1.96
+    denom = 1 + z**2 / total
+    center = (acc + z**2 / (2 * total)) / denom
+    margin = z * math.sqrt((acc * (1 - acc) + z**2 / (4 * total)) / total) / denom
 
     return {
-        "exact_match": em_count / total,
+        "exact_match": acc,
         "f1": mean_f1,
         "correct": em_count,
         "total": total,
-        "accuracy": em_count / total,  # For compatibility with shared print_summary
+        "accuracy": acc,  # For compatibility with shared print_summary
+        "ci_95_lo": max(0.0, center - margin),
+        "ci_95_hi": min(1.0, center + margin),
     }
 
 

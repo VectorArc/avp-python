@@ -328,12 +328,26 @@ def run_benchmark(config: dict) -> dict:
 
     # Print comprehensive summary
     from benchmarks.gsm8k.evaluate import compute_accuracy, print_summary
+    from benchmarks.shared.evaluate_common import compute_agreement
+
+    # Compute agreement across available modes
+    available = {}
+    if direct_results is not None:
+        available["direct"] = direct_results
+    if text_results is not None:
+        available["text"] = text_results
+    if latent_results is not None:
+        available["latent"] = latent_results
+    if hybrid_results is not None:
+        available["hybrid"] = hybrid_results
+    agreement_data = compute_agreement(available) if len(available) > 1 else None
 
     print_summary(
         latent_results=latent_results,
         text_results=text_results,
         direct_results=direct_results,
         hybrid_results=hybrid_results,
+        agreement=agreement_data,
     )
 
     # Save results
@@ -385,6 +399,8 @@ def run_benchmark(config: dict) -> dict:
             "summary": compute_accuracy(hybrid_results),
             "samples": hybrid_results,
         }
+    if agreement_data is not None:
+        output_data["agreement"] = agreement_data
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2, default=str)

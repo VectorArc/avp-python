@@ -1,5 +1,6 @@
 """GSM8K answer extraction and accuracy evaluation."""
 
+import math
 import re
 from typing import Dict, List, Optional
 
@@ -80,16 +81,27 @@ def check_correct(prediction: Optional[str], gold: Optional[str]) -> bool:
 
 
 def compute_accuracy(results: List[Dict]) -> Dict:
-    """Compute accuracy and summary statistics from a list of results."""
+    """Compute accuracy with Wilson score 95% CI from a list of results."""
     total = len(results)
     if total == 0:
-        return {"accuracy": 0.0, "correct": 0, "total": 0}
+        return {"accuracy": 0.0, "correct": 0, "total": 0,
+                "ci_95_lo": 0.0, "ci_95_hi": 0.0}
 
     correct = sum(1 for r in results if r.get("correct", False))
+    acc = correct / total
+
+    # Wilson score interval
+    z = 1.96
+    denom = 1 + z**2 / total
+    center = (acc + z**2 / (2 * total)) / denom
+    margin = z * math.sqrt((acc * (1 - acc) + z**2 / (4 * total)) / total) / denom
+
     return {
-        "accuracy": correct / total,
+        "accuracy": acc,
         "correct": correct,
         "total": total,
+        "ci_95_lo": max(0.0, center - margin),
+        "ci_95_hi": min(1.0, center + margin),
     }
 
 
@@ -108,6 +120,7 @@ def print_summary(
     text_results: Optional[List[Dict]] = None,
     direct_results: Optional[List[Dict]] = None,
     hybrid_results: Optional[List[Dict]] = None,
+    agreement: Optional[Dict] = None,
 ) -> str:
     """Print a formatted comparison summary and return it as a string."""
     lines = []
@@ -142,9 +155,18 @@ def print_summary(
 
     # Accuracy
     row = f"| {'Accuracy':<30} |"
+    stats_per_mode = []
     for _, w, res in modes:
         acc = compute_accuracy(res)
+        stats_per_mode.append(acc)
         cell = f"{acc['accuracy']:.1%} ({acc['correct']}/{acc['total']})"
+        row += f" {cell:>{w}} |"
+    lines.append(row)
+
+    # Accuracy 95% CI
+    row = f"| {'Accuracy 95% CI':<30} |"
+    for (_, w, _res), stats in zip(modes, stats_per_mode):
+        cell = f"[{stats['ci_95_lo']:.0%}-{stats['ci_95_hi']:.0%}]"
         row += f" {cell:>{w}} |"
     lines.append(row)
 
@@ -314,6 +336,45 @@ def print_summary(
                 cost = wall * hourly_rate / 3600
                 row += f"  ${cost:>11.6f}"
             lines.append(row)
+
+    # Agreement analysis
+    if agreement and agreement.get("total_samples", 0) > 0:
+        n_agree = agreement["total_samples"]
+        lines.append("")
+        lines.append(f"Agreement Analysis (N={n_agree}):")
+        lines.append(f"  All modes agree correct:  {agreement['all_correct']:>3} ({agreement['all_correct']/n_agree:.0%})"
+                     f"    All modes agree wrong: {agreement['all_wrong']:>3} ({agreement['all_wrong']/n_agree:.0%})")
+        lines.append(f"  Partial agreement:        {agreement['partial_agreement']:>3} ({agreement['partial_agreement']/n_agree:.0%})")
+
+        concordance = agreement.get("concordance", {})
+        if concordance:
+            lines.append("")
+            lines.append("  Pairwise Significance (McNemar's test):")
+            for pair_key, pair_data in concordance.items():
+                parts = pair_key.split("_vs_")
+                if len(parts) == 2:
+                    la, lb = parts
+                else:
+                    la, lb = "A", "B"
+                a_only = pair_data.get(f"{la}_only", 0)
+                b_only = pair_data.get(f"{lb}_only", 0)
+                lines.append(
+                    f"    {pair_key}: "
+                    f" both_ok={pair_data['both_correct']}"
+                    f"  {la}_only={a_only}"
+                    f"  {lb}_only={b_only}"
+                    f"  both_wrong={pair_data['both_wrong']}"
+                    f"  p={pair_data['p_value']:.4f}"
+                )
+
+        if agreement.get("latent_unique_fails") is not None:
+            n_fails = len(agreement["latent_unique_fails"])
+            n_wins = len(agreement.get("latent_unique_wins", []))
+            lines.append("")
+            s_fail = "sample" if n_fails == 1 else "samples"
+            s_win = "sample" if n_wins == 1 else "samples"
+            lines.append(f"  Latent unique failures: {n_fails} {s_fail} (wrong when others right)")
+            lines.append(f"  Latent unique wins:     {n_wins} {s_win} (right when others wrong)")
 
     lines.append("")
     lines.append("=" * 80)

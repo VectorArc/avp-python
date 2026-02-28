@@ -1,5 +1,6 @@
 """Common evaluation utilities shared across benchmarks."""
 
+import math
 import re
 from typing import Dict, List, Optional
 
@@ -38,6 +39,147 @@ def compute_accuracy(results: List[Dict]) -> Dict:
     }
 
 
+def compute_stats(results: List[Dict]) -> Dict:
+    """Compute accuracy with Wilson score 95% CI.
+
+    Superset of compute_accuracy() — returns all existing keys plus CI bounds.
+    """
+    n = len(results)
+    if n == 0:
+        return {"accuracy": 0.0, "correct": 0, "total": 0,
+                "ci_95_lo": 0.0, "ci_95_hi": 0.0}
+
+    k = sum(1 for r in results if r.get("correct", False))
+    acc = k / n
+    # Wilson score interval
+    z = 1.96
+    denom = 1 + z**2 / n
+    center = (acc + z**2 / (2 * n)) / denom
+    margin = z * math.sqrt((acc * (1 - acc) + z**2 / (4 * n)) / n) / denom
+    return {
+        "accuracy": acc,
+        "correct": k,
+        "total": n,
+        "ci_95_lo": max(0.0, center - margin),
+        "ci_95_hi": min(1.0, center + margin),
+    }
+
+
+def _chi2_sf_1df(x: float) -> float:
+    """Survival function for chi-squared distribution with 1 degree of freedom.
+
+    Uses erfc: P(X > x) = erfc(sqrt(x/2) / sqrt(2)) for df=1,
+    which simplifies to erfc(sqrt(x/2)).
+    """
+    if x <= 0:
+        return 1.0
+    return math.erfc(math.sqrt(x / 2))
+
+
+def mcnemar_test(
+    results_a: List[Dict],
+    results_b: List[Dict],
+    label_a: str = "A",
+    label_b: str = "B",
+) -> Dict:
+    """McNemar's test for paired nominal data (continuity-corrected).
+
+    Compares two modes on the same samples (aligned by list index).
+    Returns 2x2 contingency counts, chi-square statistic, and p-value.
+    """
+    n = min(len(results_a), len(results_b))
+    both_correct = a_only = b_only = both_wrong = 0
+    for i in range(n):
+        a_ok = results_a[i].get("correct", False)
+        b_ok = results_b[i].get("correct", False)
+        if a_ok and b_ok:
+            both_correct += 1
+        elif a_ok:
+            a_only += 1
+        elif b_ok:
+            b_only += 1
+        else:
+            both_wrong += 1
+
+    discordant = a_only + b_only
+    if discordant == 0:
+        return {
+            "both_correct": both_correct, "both_wrong": both_wrong,
+            f"{label_a}_only": a_only, f"{label_b}_only": b_only,
+            "chi2": 0.0, "p_value": 1.0, "significant": False,
+        }
+
+    chi2 = (abs(a_only - b_only) - 1) ** 2 / discordant  # continuity-corrected
+    p = _chi2_sf_1df(chi2)
+    return {
+        "both_correct": both_correct, "both_wrong": both_wrong,
+        f"{label_a}_only": a_only, f"{label_b}_only": b_only,
+        "chi2": round(chi2, 4), "p_value": round(p, 4),
+        "significant": p < 0.05,
+    }
+
+
+def compute_agreement(mode_results: Dict[str, List[Dict]]) -> Dict:
+    """Per-sample concordance analysis across modes.
+
+    Takes {mode_name: results_list}, returns agreement summary with
+    pairwise McNemar tests and latent-specific failure analysis.
+    """
+    modes = list(mode_results.keys())
+    n = min(len(v) for v in mode_results.values())
+
+    per_sample = []
+    for i in range(n):
+        correct_modes = [m for m in modes if mode_results[m][i].get("correct", False)]
+        per_sample.append({
+            "index": i,
+            "question_prefix": mode_results[modes[0]][i].get("question", "")[:80],
+            "correct_by_mode": {m: mode_results[m][i].get("correct", False) for m in modes},
+            "agreement": (
+                "all" if len(correct_modes) == len(modes)
+                else "none" if not correct_modes
+                else "partial"
+            ),
+        })
+
+    all_correct = sum(1 for s in per_sample if s["agreement"] == "all")
+    all_wrong = sum(1 for s in per_sample if s["agreement"] == "none")
+
+    # Pairwise concordance tables
+    concordance = {}
+    for i, a in enumerate(modes):
+        for b in modes[i + 1:]:
+            concordance[f"{a}_vs_{b}"] = mcnemar_test(
+                mode_results[a], mode_results[b], label_a=a, label_b=b)
+
+    # Latent-specific failure analysis
+    latent_unique_fails = None
+    latent_unique_wins = None
+    if "latent" in modes:
+        other_modes = [m for m in modes if m != "latent"]
+        latent_unique_fails = [
+            s["index"] for s in per_sample
+            if not s["correct_by_mode"].get("latent", False)
+            and any(s["correct_by_mode"].get(m, False) for m in other_modes)
+        ]
+        latent_unique_wins = [
+            s["index"] for s in per_sample
+            if s["correct_by_mode"].get("latent", False)
+            and not any(s["correct_by_mode"].get(m, False) for m in other_modes)
+        ]
+
+    return {
+        "total_samples": n,
+        "all_correct": all_correct,
+        "all_wrong": all_wrong,
+        "partial_agreement": n - all_correct - all_wrong,
+        "concordance": concordance,
+        "latent_unique_fails": latent_unique_fails,
+        "latent_unique_wins": latent_unique_wins,
+        "per_sample": per_sample,
+    }
+
+
 def _mean(vals: list) -> float:
     """Safe mean of a list, returns 0 if empty."""
     return sum(vals) / len(vals) if vals else 0
@@ -55,6 +197,7 @@ def print_summary(
     modes: List[tuple],
     text_results: Optional[List[Dict]] = None,
     direct_results: Optional[List[Dict]] = None,
+    agreement: Optional[Dict] = None,
 ) -> str:
     """Print a formatted comparison summary and return it as a string.
 
@@ -63,6 +206,7 @@ def print_summary(
         modes: List of (label, col_width, results) tuples for each mode
         text_results: Text mode results (for token savings comparison)
         direct_results: Direct mode results (excluded from token savings)
+        agreement: Output of compute_agreement() for concordance analysis
     """
     lines = []
 
@@ -84,9 +228,18 @@ def print_summary(
 
     # Accuracy
     row = f"| {'Accuracy':<30} |"
+    stats_per_mode = []
     for _, w, res in modes:
-        acc = compute_accuracy(res)
-        cell = f"{acc['accuracy']:.1%} ({acc['correct']}/{acc['total']})"
+        stats = compute_stats(res)
+        stats_per_mode.append(stats)
+        cell = f"{stats['accuracy']:.1%} ({stats['correct']}/{stats['total']})"
+        row += f" {cell:>{w}} |"
+    lines.append(row)
+
+    # Accuracy 95% CI
+    row = f"| {'Accuracy 95% CI':<30} |"
+    for (_, w, _res), stats in zip(modes, stats_per_mode):
+        cell = f"[{stats['ci_95_lo']:.0%}-{stats['ci_95_hi']:.0%}]"
         row += f" {cell:>{w}} |"
     lines.append(row)
 
@@ -251,6 +404,47 @@ def print_summary(
                 cost = wall * hourly_rate / 3600
                 row += f"  ${cost:>11.6f}"
             lines.append(row)
+
+    # Agreement analysis
+    if agreement and agreement.get("total_samples", 0) > 0:
+        n_agree = agreement["total_samples"]
+        lines.append("")
+        lines.append(f"Agreement Analysis (N={n_agree}):")
+        lines.append(f"  All modes agree correct:  {agreement['all_correct']:>3} ({agreement['all_correct']/n_agree:.0%})"
+                     f"    All modes agree wrong: {agreement['all_wrong']:>3} ({agreement['all_wrong']/n_agree:.0%})")
+        lines.append(f"  Partial agreement:        {agreement['partial_agreement']:>3} ({agreement['partial_agreement']/n_agree:.0%})")
+
+        concordance = agreement.get("concordance", {})
+        if concordance:
+            lines.append("")
+            lines.append("  Pairwise Significance (McNemar's test):")
+            for pair_key, pair_data in concordance.items():
+                parts = pair_key.split("_vs_")
+                if len(parts) == 2:
+                    la, lb = parts
+                else:
+                    la, lb = "A", "B"
+                a_only_key = f"{la}_only"
+                b_only_key = f"{lb}_only"
+                a_only = pair_data.get(a_only_key, 0)
+                b_only = pair_data.get(b_only_key, 0)
+                lines.append(
+                    f"    {pair_key}: "
+                    f" both_ok={pair_data['both_correct']}"
+                    f"  {la}_only={a_only}"
+                    f"  {lb}_only={b_only}"
+                    f"  both_wrong={pair_data['both_wrong']}"
+                    f"  p={pair_data['p_value']:.4f}"
+                )
+
+        if agreement.get("latent_unique_fails") is not None:
+            n_fails = len(agreement["latent_unique_fails"])
+            n_wins = len(agreement.get("latent_unique_wins", []))
+            lines.append("")
+            s_fail = "sample" if n_fails == 1 else "samples"
+            s_win = "sample" if n_wins == 1 else "samples"
+            lines.append(f"  Latent unique failures: {n_fails} {s_fail} (wrong when others right)")
+            lines.append(f"  Latent unique wins:     {n_wins} {s_win} (right when others wrong)")
 
     lines.append("")
     lines.append("=" * 80)

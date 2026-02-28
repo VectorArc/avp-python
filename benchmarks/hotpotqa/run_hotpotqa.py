@@ -107,9 +107,10 @@ def print_hotpotqa_summary(
     modes: list,
     text_results=None,
     direct_results=None,
+    agreement=None,
 ) -> str:
-    """Print HotpotQA-specific summary with EM and F1."""
-    from benchmarks.shared.evaluate_common import _get_field, _mean
+    """Print HotpotQA-specific summary with EM, F1, CI, and agreement."""
+    from benchmarks.shared.evaluate_common import _get_field, _mean, compute_stats
 
     lines = []
     lines.append("")
@@ -127,11 +128,21 @@ def print_hotpotqa_summary(
 
     # Exact Match
     row = f"| {'Exact Match':<30} |"
+    stats_per_mode = []
     for _, w, res in modes:
-        em_count = sum(1 for r in res if r.get("exact_match", False))
-        total = len(res)
-        pct = em_count / total if total > 0 else 0
+        stats = compute_stats(res)
+        stats_per_mode.append(stats)
+        em_count = stats["correct"]
+        total = stats["total"]
+        pct = stats["accuracy"]
         cell = f"{pct:.1%} ({em_count}/{total})"
+        row += f" {cell:>{w}} |"
+    lines.append(row)
+
+    # EM 95% CI
+    row = f"| {'EM 95% CI':<30} |"
+    for (_, w, _res), stats in zip(modes, stats_per_mode):
+        cell = f"[{stats['ci_95_lo']:.0%}-{stats['ci_95_hi']:.0%}]"
         row += f" {cell:>{w}} |"
     lines.append(row)
 
@@ -188,6 +199,45 @@ def print_hotpotqa_summary(
                 pct = saved / text_tok * 100 if text_tok > 0 else 0
                 lines.append(f"  {label}: {mode_tok:,.0f} vs {text_tok:,.0f} text tokens "
                              f"({pct:+.1f}% {'saved' if saved > 0 else 'more'})")
+
+    # Agreement analysis
+    if agreement and agreement.get("total_samples", 0) > 0:
+        n_agree = agreement["total_samples"]
+        lines.append("")
+        lines.append(f"Agreement Analysis (N={n_agree}):")
+        lines.append(f"  All modes agree correct:  {agreement['all_correct']:>3} ({agreement['all_correct']/n_agree:.0%})"
+                     f"    All modes agree wrong: {agreement['all_wrong']:>3} ({agreement['all_wrong']/n_agree:.0%})")
+        lines.append(f"  Partial agreement:        {agreement['partial_agreement']:>3} ({agreement['partial_agreement']/n_agree:.0%})")
+
+        concordance = agreement.get("concordance", {})
+        if concordance:
+            lines.append("")
+            lines.append("  Pairwise Significance (McNemar's test):")
+            for pair_key, pair_data in concordance.items():
+                parts = pair_key.split("_vs_")
+                if len(parts) == 2:
+                    la, lb = parts
+                else:
+                    la, lb = "A", "B"
+                a_only = pair_data.get(f"{la}_only", 0)
+                b_only = pair_data.get(f"{lb}_only", 0)
+                lines.append(
+                    f"    {pair_key}: "
+                    f" both_ok={pair_data['both_correct']}"
+                    f"  {la}_only={a_only}"
+                    f"  {lb}_only={b_only}"
+                    f"  both_wrong={pair_data['both_wrong']}"
+                    f"  p={pair_data['p_value']:.4f}"
+                )
+
+        if agreement.get("latent_unique_fails") is not None:
+            n_fails = len(agreement["latent_unique_fails"])
+            n_wins = len(agreement.get("latent_unique_wins", []))
+            lines.append("")
+            s_fail = "sample" if n_fails == 1 else "samples"
+            s_win = "sample" if n_wins == 1 else "samples"
+            lines.append(f"  Latent unique failures: {n_fails} {s_fail} (wrong when others right)")
+            lines.append(f"  Latent unique wins:     {n_wins} {s_win} (right when others wrong)")
 
     lines.append("")
     lines.append("=" * 80)
@@ -289,6 +339,8 @@ def run_benchmark(config: dict) -> dict:
         )
 
     # Print summary
+    from benchmarks.shared.evaluate_common import compute_agreement
+
     modes = []
     if direct_results is not None:
         modes.append(("Direct", 13, direct_results))
@@ -297,7 +349,20 @@ def run_benchmark(config: dict) -> dict:
     if text_results is not None:
         modes.append(("Text", 13, text_results))
 
-    print_hotpotqa_summary(modes, text_results=text_results, direct_results=direct_results)
+    # Compute agreement across available modes
+    available = {}
+    if direct_results is not None:
+        available["direct"] = direct_results
+    if text_results is not None:
+        available["text"] = text_results
+    if latent_results is not None:
+        available["latent"] = latent_results
+    agreement_data = compute_agreement(available) if len(available) > 1 else None
+
+    print_hotpotqa_summary(
+        modes, text_results=text_results, direct_results=direct_results,
+        agreement=agreement_data,
+    )
 
     # Save results
     from benchmarks.hotpotqa.evaluate import compute_accuracy
@@ -337,6 +402,8 @@ def run_benchmark(config: dict) -> dict:
             "summary": compute_accuracy(text_results),
             "samples": text_results,
         }
+    if agreement_data is not None:
+        output_data["agreement"] = agreement_data
 
     save_results(output_data, output_dir, "hotpotqa", model_name, mode, max_samples)
 

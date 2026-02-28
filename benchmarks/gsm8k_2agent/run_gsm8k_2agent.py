@@ -159,7 +159,7 @@ def run_benchmark(config: dict) -> dict:
         )
 
     # Print summary
-    from benchmarks.shared.evaluate_common import print_summary, compute_accuracy
+    from benchmarks.shared.evaluate_common import print_summary, compute_stats, compute_agreement
 
     modes = []
     if direct_results is not None:
@@ -169,11 +169,22 @@ def run_benchmark(config: dict) -> dict:
     if text_results is not None:
         modes.append(("Text", 13, text_results))
 
+    # Compute agreement across available modes
+    available = {}
+    if direct_results is not None:
+        available["direct"] = direct_results
+    if text_results is not None:
+        available["text"] = text_results
+    if latent_results is not None:
+        available["latent"] = latent_results
+    agreement_data = compute_agreement(available) if len(available) > 1 else None
+
     print_summary(
         benchmark_name="GSM8K 2-Agent",
         modes=modes,
         text_results=text_results,
         direct_results=direct_results,
+        agreement=agreement_data,
     )
 
     # Save results
@@ -198,19 +209,21 @@ def run_benchmark(config: dict) -> dict:
     }
     if direct_results is not None:
         output_data["direct"] = {
-            "summary": compute_accuracy(direct_results),
+            "summary": compute_stats(direct_results),
             "samples": direct_results,
         }
     if latent_results is not None:
         output_data["latent"] = {
-            "summary": compute_accuracy(latent_results),
+            "summary": compute_stats(latent_results),
             "samples": latent_results,
         }
     if text_results is not None:
         output_data["text"] = {
-            "summary": compute_accuracy(text_results),
+            "summary": compute_stats(text_results),
             "samples": text_results,
         }
+    if agreement_data is not None:
+        output_data["agreement"] = agreement_data
 
     save_results(output_data, output_dir, "gsm8k_2agent", model_name, mode, max_samples)
 
