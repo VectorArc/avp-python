@@ -22,9 +22,12 @@ import logging
 import time as _time
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
 from .types import AVP_VERSION_HEADER, MAGIC
+
+if TYPE_CHECKING:
+    from .metrics import GenerateMetrics, PackMetrics, UnpackMetrics
 
 logger = logging.getLogger(__name__)
 
