@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-"""GSM8K 2-agent benchmark: Researcher → Solver handoff.
+"""Supervisor (Router) benchmark: dynamic routing on MMLU.
 
-Tests the most common real-world pattern (simple delegation) on the same
-dataset as the 4-agent benchmark for direct comparison.
+Topology: Router --> select 1 of 4 Specialists --> Answer
+
+4 MMLU subjects (one per category):
+- STEM: elementary_mathematics
+- Humanities: high_school_us_history
+- Social: high_school_psychology
+- Logic: formal_logic
 
 Usage:
     # Run all modes
-    python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py --mode all --max_samples 10 --verbose
+    python benchmarks/supervisor/run_supervisor.py --mode all --max_samples 8 --verbose
 
-    # Direct single-agent baseline only
-    python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py --mode direct --verbose
+    # Direct baseline only
+    python benchmarks/supervisor/run_supervisor.py --mode direct --verbose
 
     # Latent vs text comparison
-    python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py --mode both --verbose
+    python benchmarks/supervisor/run_supervisor.py --mode both --verbose
 """
 
 import argparse
 import os
+import random
 import sys
 
 # Fix Windows console encoding
@@ -30,9 +36,17 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
+SUBJECTS = [
+    "elementary_mathematics",
+    "high_school_us_history",
+    "high_school_psychology",
+    "formal_logic",
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="GSM8K 2-agent benchmark: Researcher → Solver handoff"
+        description="Supervisor (Router) benchmark on MMLU"
     )
     parser.add_argument(
         "--mode",
@@ -45,9 +59,9 @@ def parse_args() -> argparse.Namespace:
         help="HuggingFace model ID (default: Qwen/Qwen2.5-1.5B-Instruct)",
     )
     parser.add_argument("--device", type=str, default=None, help="Device: cpu/mps/cuda")
-    parser.add_argument("--max_samples", type=int, default=10, help="Number of samples (default: 10)")
-    parser.add_argument("--latent_steps", type=int, default=10, help="Latent steps for Researcher (default: 10)")
-    parser.add_argument("--max_new_tokens", type=int, default=512, help="Max tokens for generation (default: 512)")
+    parser.add_argument("--max_samples", type=int, default=8, help="Total samples across all subjects (default: 8)")
+    parser.add_argument("--latent_steps", type=int, default=10, help="Latent steps (default: 10)")
+    parser.add_argument("--max_new_tokens", type=int, default=256, help="Max tokens for generation (default: 256)")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default: 0.7)")
     parser.add_argument("--top_p", type=float, default=0.95, help="Top-p sampling (default: 0.95)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
@@ -56,26 +70,43 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_dataset(max_samples: int) -> list:
-    """Load GSM8K test split from HuggingFace datasets."""
+def load_dataset(max_samples: int, seed: int = 42) -> list:
+    """Load MMLU test split, balanced across 4 subjects."""
     from datasets import load_dataset as hf_load_dataset
 
-    print(f"Loading GSM8K test split (first {max_samples} samples)...")
-    ds = hf_load_dataset("openai/gsm8k", "main", split="test")
+    per_subject = max(1, max_samples // len(SUBJECTS))
     samples = []
-    for i, item in enumerate(ds):
-        if i >= max_samples:
-            break
-        samples.append({
-            "question": item["question"],
-            "answer": item["answer"],
-        })
-    print(f"Loaded {len(samples)} samples.")
+
+    for subject in SUBJECTS:
+        print(f"Loading MMLU subject: {subject}...")
+        ds = hf_load_dataset("cais/mmlu", subject, split="test")
+
+        subject_samples = []
+        for item in ds:
+            subject_samples.append({
+                "question": item["question"],
+                "choices": item["choices"],
+                "answer": item["answer"],
+                "subject": subject,
+            })
+
+        # Shuffle and take per_subject samples
+        rng = random.Random(seed)
+        rng.shuffle(subject_samples)
+        samples.extend(subject_samples[:per_subject])
+
+    # Shuffle the combined dataset
+    rng = random.Random(seed)
+    rng.shuffle(samples)
+
+    # Trim to max_samples
+    samples = samples[:max_samples]
+    print(f"Loaded {len(samples)} samples across {len(SUBJECTS)} subjects.")
     return samples
 
 
 def run_benchmark(config: dict) -> dict:
-    """Run GSM8K 2-agent benchmark. Returns results dict."""
+    """Run Supervisor (MMLU) benchmark. Returns results dict."""
     from benchmarks.shared.model_utils import auto_device, load_model, set_seed
 
     seed = config.get("seed", 42)
@@ -84,9 +115,9 @@ def run_benchmark(config: dict) -> dict:
     device = auto_device(config.get("device"))
     mode = config.get("mode", "all")
     model_name = config.get("model_name", "Qwen/Qwen2.5-1.5B-Instruct")
-    max_samples = config.get("max_samples", 10)
+    max_samples = config.get("max_samples", 8)
     latent_steps = config.get("latent_steps", 10)
-    max_new_tokens = config.get("max_new_tokens", 512)
+    max_new_tokens = config.get("max_new_tokens", 256)
     temperature = config.get("temperature", 0.7)
     top_p = config.get("top_p", 0.95)
     verbose = config.get("verbose", False)
@@ -107,7 +138,7 @@ def run_benchmark(config: dict) -> dict:
     print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}")
     print()
 
-    dataset = load_dataset(max_samples)
+    dataset = load_dataset(max_samples, seed)
     model, tokenizer, connector, identity = load_model(model_name, device)
 
     direct_results = None
@@ -115,7 +146,7 @@ def run_benchmark(config: dict) -> dict:
     text_results = None
 
     if run_direct:
-        from benchmarks.gsm8k_2agent.pipeline_direct import run_direct_benchmark
+        from benchmarks.supervisor.pipeline_direct import run_direct_benchmark
 
         print("\n" + "=" * 50)
         print("Running DIRECT (single-agent) baseline...")
@@ -129,10 +160,10 @@ def run_benchmark(config: dict) -> dict:
         )
 
     if run_text:
-        from benchmarks.gsm8k_2agent.pipeline_text import run_text_benchmark
+        from benchmarks.supervisor.pipeline_text import run_text_benchmark
 
         print("\n" + "=" * 50)
-        print("Running TEXT (2-agent chain) pipeline...")
+        print("Running TEXT (Router + Specialist) pipeline...")
         print("=" * 50)
         set_seed(seed)
 
@@ -143,10 +174,10 @@ def run_benchmark(config: dict) -> dict:
         )
 
     if run_latent:
-        from benchmarks.gsm8k_2agent.pipeline_latent import run_latent_benchmark
+        from benchmarks.supervisor.pipeline_latent import run_latent_benchmark
 
         print("\n" + "=" * 50)
-        print("Running LATENT (AVP 2-agent chain) pipeline...")
+        print("Running LATENT (AVP Router + Specialist) pipeline...")
         print("=" * 50)
         set_seed(seed)
 
@@ -159,7 +190,8 @@ def run_benchmark(config: dict) -> dict:
         )
 
     # Print summary
-    from benchmarks.shared.evaluate_common import print_summary, compute_accuracy
+    from benchmarks.supervisor.evaluate import compute_accuracy, print_routing_summary
+    from benchmarks.shared.evaluate_common import print_summary
 
     modes = []
     if direct_results is not None:
@@ -170,11 +202,17 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Text", 13, text_results))
 
     print_summary(
-        benchmark_name="GSM8K 2-Agent",
+        benchmark_name="Supervisor (MMLU)",
         modes=modes,
         text_results=text_results,
         direct_results=direct_results,
     )
+
+    # Print routing-specific summaries
+    for label, _, res in modes:
+        if res and res is not direct_results:
+            print(f"\n--- {label} Mode ---")
+            print_routing_summary(res)
 
     # Save results
     from benchmarks.shared.results import save_results
@@ -184,11 +222,12 @@ def run_benchmark(config: dict) -> dict:
 
     output_data = {
         "config": {
-            "benchmark": "gsm8k_2agent",
+            "benchmark": "supervisor",
             "model_name": model_name,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
+            "subjects": SUBJECTS,
             "latent_steps": latent_steps,
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
@@ -212,7 +251,7 @@ def run_benchmark(config: dict) -> dict:
             "samples": text_results,
         }
 
-    save_results(output_data, output_dir, "gsm8k_2agent", model_name, mode, max_samples)
+    save_results(output_data, output_dir, "supervisor", model_name, mode, max_samples)
 
     return output_data
 

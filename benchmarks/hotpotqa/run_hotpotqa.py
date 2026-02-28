@@ -196,33 +196,45 @@ def print_hotpotqa_summary(
     return output
 
 
-def main() -> None:
-    args = parse_args()
-
+def run_benchmark(config: dict) -> dict:
+    """Run HotpotQA benchmark. Returns results dict."""
     from benchmarks.shared.model_utils import auto_device, load_model, set_seed
 
-    set_seed(args.seed)
+    seed = config.get("seed", 42)
+    set_seed(seed)
 
-    device = auto_device(args.device)
-    run_direct = args.mode in ("direct", "all")
-    run_latent = args.mode in ("latent", "both", "all")
-    run_text = args.mode in ("text", "both", "all")
+    device = auto_device(config.get("device"))
+    mode = config.get("mode", "all")
+    model_name = config.get("model_name", "Qwen/Qwen2.5-1.5B-Instruct")
+    max_samples = config.get("max_samples", 10)
+    num_agents = config.get("num_agents", 2)
+    latent_steps = config.get("latent_steps", 10)
+    max_new_tokens = config.get("max_new_tokens", 256)
+    max_context_tokens = config.get("max_context_tokens", 1500)
+    temperature = config.get("temperature", 0.7)
+    top_p = config.get("top_p", 0.95)
+    verbose = config.get("verbose", False)
+    output_dir = config.get("output_dir")
+
+    run_direct = mode in ("direct", "all")
+    run_latent = mode in ("latent", "both", "all")
+    run_text = mode in ("text", "both", "all")
 
     print(f"Device: {device}")
-    print(f"Mode: {args.mode}")
-    print(f"Model: {args.model_name}")
-    print(f"Samples: {args.max_samples}")
-    print(f"Agents: {args.num_agents}")
-    print(f"Latent steps: {args.latent_steps}")
-    print(f"Max new tokens: {args.max_new_tokens}")
-    print(f"Max context tokens: {args.max_context_tokens}")
-    print(f"Temperature: {args.temperature}")
-    print(f"Seed: {args.seed}")
+    print(f"Mode: {mode}")
+    print(f"Model: {model_name}")
+    print(f"Samples: {max_samples}")
+    print(f"Agents: {num_agents}")
+    print(f"Latent steps: {latent_steps}")
+    print(f"Max new tokens: {max_new_tokens}")
+    print(f"Max context tokens: {max_context_tokens}")
+    print(f"Temperature: {temperature}")
+    print(f"Seed: {seed}")
     print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}")
     print()
 
-    dataset = load_dataset(args.max_samples, args.max_context_tokens)
-    model, tokenizer, connector, identity = load_model(args.model_name, device)
+    dataset = load_dataset(max_samples, max_context_tokens)
+    model, tokenizer, connector, identity = load_model(model_name, device)
 
     direct_results = None
     latent_results = None
@@ -234,46 +246,46 @@ def main() -> None:
         print("\n" + "=" * 50)
         print("Running DIRECT (single-agent) baseline...")
         print("=" * 50)
-        set_seed(args.seed)
+        set_seed(seed)
 
         direct_results = run_direct_benchmark(
             model=model, tokenizer=tokenizer, device=device, dataset=dataset,
-            max_new_tokens=args.max_new_tokens, temperature=args.temperature,
-            top_p=args.top_p, verbose=args.verbose,
+            max_new_tokens=max_new_tokens, temperature=temperature,
+            top_p=top_p, verbose=verbose,
         )
 
     if run_text:
         from benchmarks.hotpotqa.pipeline_text import run_text_benchmark
 
         print("\n" + "=" * 50)
-        agent_label = f"{args.num_agents}-agent"
+        agent_label = f"{num_agents}-agent"
         print(f"Running TEXT ({agent_label} chain) pipeline...")
         print("=" * 50)
-        set_seed(args.seed)
+        set_seed(seed)
 
         text_results = run_text_benchmark(
             model=model, tokenizer=tokenizer, device=device, dataset=dataset,
-            num_agents=args.num_agents,
-            max_new_tokens=args.max_new_tokens, temperature=args.temperature,
-            top_p=args.top_p, verbose=args.verbose,
+            num_agents=num_agents,
+            max_new_tokens=max_new_tokens, temperature=temperature,
+            top_p=top_p, verbose=verbose,
         )
 
     if run_latent:
         from benchmarks.hotpotqa.pipeline_latent import run_latent_benchmark
 
         print("\n" + "=" * 50)
-        agent_label = f"{args.num_agents}-agent"
+        agent_label = f"{num_agents}-agent"
         print(f"Running LATENT (AVP {agent_label} chain) pipeline...")
         print("=" * 50)
-        set_seed(args.seed)
+        set_seed(seed)
 
         latent_results = run_latent_benchmark(
             connector=connector, model=model, tokenizer=tokenizer,
             device=device, identity=identity, dataset=dataset,
-            model_name=args.model_name, num_agents=args.num_agents,
-            latent_steps=args.latent_steps,
-            max_new_tokens=args.max_new_tokens, temperature=args.temperature,
-            top_p=args.top_p, verbose=args.verbose,
+            model_name=model_name, num_agents=num_agents,
+            latent_steps=latent_steps,
+            max_new_tokens=max_new_tokens, temperature=temperature,
+            top_p=top_p, verbose=verbose,
         )
 
     # Print summary
@@ -291,24 +303,23 @@ def main() -> None:
     from benchmarks.hotpotqa.evaluate import compute_accuracy
     from benchmarks.shared.results import save_results
 
-    output_dir = args.output_dir
     if output_dir is None:
         output_dir = os.path.join(os.path.dirname(os.path.dirname(_SCRIPT_DIR)), "benchmarks", "results")
 
     output_data = {
         "config": {
             "benchmark": "hotpotqa",
-            "model_name": args.model_name,
+            "model_name": model_name,
             "device": device,
-            "mode": args.mode,
-            "max_samples": args.max_samples,
-            "num_agents": args.num_agents,
-            "latent_steps": args.latent_steps,
-            "max_new_tokens": args.max_new_tokens,
-            "max_context_tokens": args.max_context_tokens,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "seed": args.seed,
+            "mode": mode,
+            "max_samples": max_samples,
+            "num_agents": num_agents,
+            "latent_steps": latent_steps,
+            "max_new_tokens": max_new_tokens,
+            "max_context_tokens": max_context_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "seed": seed,
         },
     }
     if direct_results is not None:
@@ -327,7 +338,14 @@ def main() -> None:
             "samples": text_results,
         }
 
-    save_results(output_data, output_dir, "hotpotqa", args.model_name, args.mode, args.max_samples)
+    save_results(output_data, output_dir, "hotpotqa", model_name, mode, max_samples)
+
+    return output_data
+
+
+def main() -> None:
+    args = parse_args()
+    run_benchmark(vars(args))
 
 
 if __name__ == "__main__":

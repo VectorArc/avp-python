@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""GSM8K 2-agent benchmark: Researcher → Solver handoff.
+"""Debate benchmark: multi-round deliberation on StrategyQA.
 
-Tests the most common real-world pattern (simple delegation) on the same
-dataset as the 4-agent benchmark for direct comparison.
+Topology: 3 agents x N rounds --> majority vote
+
+Three agents (Analyst, Skeptic, Synthesizer) debate yes/no questions
+across multiple rounds. Token savings compound per round since text
+mode must re-process the growing transcript.
 
 Usage:
     # Run all modes
-    python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py --mode all --max_samples 10 --verbose
+    python benchmarks/debate/run_debate.py --mode all --max_samples 5 --verbose
 
-    # Direct single-agent baseline only
-    python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py --mode direct --verbose
+    # Direct baseline only
+    python benchmarks/debate/run_debate.py --mode direct --verbose
 
-    # Latent vs text comparison
-    python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py --mode both --verbose
+    # Latent vs text with custom rounds
+    python benchmarks/debate/run_debate.py --mode both --num_rounds 2 --verbose
 """
 
 import argparse
@@ -32,7 +35,7 @@ if _PROJECT_ROOT not in sys.path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="GSM8K 2-agent benchmark: Researcher → Solver handoff"
+        description="Debate benchmark on StrategyQA"
     )
     parser.add_argument(
         "--mode",
@@ -45,9 +48,11 @@ def parse_args() -> argparse.Namespace:
         help="HuggingFace model ID (default: Qwen/Qwen2.5-1.5B-Instruct)",
     )
     parser.add_argument("--device", type=str, default=None, help="Device: cpu/mps/cuda")
-    parser.add_argument("--max_samples", type=int, default=10, help="Number of samples (default: 10)")
-    parser.add_argument("--latent_steps", type=int, default=10, help="Latent steps for Researcher (default: 10)")
-    parser.add_argument("--max_new_tokens", type=int, default=512, help="Max tokens for generation (default: 512)")
+    parser.add_argument("--max_samples", type=int, default=5, help="Number of samples (default: 5)")
+    parser.add_argument("--num_rounds", type=int, default=3, help="Number of debate rounds (default: 3)")
+    parser.add_argument("--num_agents", type=int, default=3, choices=[2, 3], help="Number of agents (default: 3)")
+    parser.add_argument("--latent_steps", type=int, default=10, help="Latent steps (default: 10)")
+    parser.add_argument("--max_new_tokens", type=int, default=128, help="Max tokens per agent per round (default: 128)")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default: 0.7)")
     parser.add_argument("--top_p", type=float, default=0.95, help="Top-p sampling (default: 0.95)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
@@ -57,25 +62,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_dataset(max_samples: int) -> list:
-    """Load GSM8K test split from HuggingFace datasets."""
+    """Load StrategyQA dataset from HuggingFace."""
     from datasets import load_dataset as hf_load_dataset
 
-    print(f"Loading GSM8K test split (first {max_samples} samples)...")
-    ds = hf_load_dataset("openai/gsm8k", "main", split="test")
+    print(f"Loading StrategyQA (first {max_samples} samples)...")
+    ds = hf_load_dataset("ChilleD/StrategyQA", split="test")
     samples = []
     for i, item in enumerate(ds):
         if i >= max_samples:
             break
         samples.append({
             "question": item["question"],
-            "answer": item["answer"],
+            "answer": item["answer"],  # Boolean
         })
     print(f"Loaded {len(samples)} samples.")
     return samples
 
 
 def run_benchmark(config: dict) -> dict:
-    """Run GSM8K 2-agent benchmark. Returns results dict."""
+    """Run Debate (StrategyQA) benchmark. Returns results dict."""
     from benchmarks.shared.model_utils import auto_device, load_model, set_seed
 
     seed = config.get("seed", 42)
@@ -84,9 +89,11 @@ def run_benchmark(config: dict) -> dict:
     device = auto_device(config.get("device"))
     mode = config.get("mode", "all")
     model_name = config.get("model_name", "Qwen/Qwen2.5-1.5B-Instruct")
-    max_samples = config.get("max_samples", 10)
+    max_samples = config.get("max_samples", 5)
+    num_rounds = config.get("num_rounds", 3)
+    num_agents = config.get("num_agents", 3)
     latent_steps = config.get("latent_steps", 10)
-    max_new_tokens = config.get("max_new_tokens", 512)
+    max_new_tokens = config.get("max_new_tokens", 128)
     temperature = config.get("temperature", 0.7)
     top_p = config.get("top_p", 0.95)
     verbose = config.get("verbose", False)
@@ -100,7 +107,8 @@ def run_benchmark(config: dict) -> dict:
     print(f"Mode: {mode}")
     print(f"Model: {model_name}")
     print(f"Samples: {max_samples}")
-    print(f"Latent steps: {latent_steps}")
+    print(f"Rounds: {num_rounds}")
+    print(f"Agents: {num_agents}")
     print(f"Max new tokens: {max_new_tokens}")
     print(f"Temperature: {temperature}")
     print(f"Seed: {seed}")
@@ -115,7 +123,7 @@ def run_benchmark(config: dict) -> dict:
     text_results = None
 
     if run_direct:
-        from benchmarks.gsm8k_2agent.pipeline_direct import run_direct_benchmark
+        from benchmarks.debate.pipeline_direct import run_direct_benchmark
 
         print("\n" + "=" * 50)
         print("Running DIRECT (single-agent) baseline...")
@@ -129,37 +137,41 @@ def run_benchmark(config: dict) -> dict:
         )
 
     if run_text:
-        from benchmarks.gsm8k_2agent.pipeline_text import run_text_benchmark
+        from benchmarks.debate.pipeline_text import run_text_benchmark
 
         print("\n" + "=" * 50)
-        print("Running TEXT (2-agent chain) pipeline...")
+        print(f"Running TEXT ({num_agents}-agent x {num_rounds}-round debate)...")
         print("=" * 50)
         set_seed(seed)
 
         text_results = run_text_benchmark(
             model=model, tokenizer=tokenizer, device=device, dataset=dataset,
+            num_rounds=num_rounds, num_agents=num_agents,
             max_new_tokens=max_new_tokens, temperature=temperature,
             top_p=top_p, verbose=verbose,
         )
 
     if run_latent:
-        from benchmarks.gsm8k_2agent.pipeline_latent import run_latent_benchmark
+        from benchmarks.debate.pipeline_latent import run_latent_benchmark
 
         print("\n" + "=" * 50)
-        print("Running LATENT (AVP 2-agent chain) pipeline...")
+        print(f"Running LATENT (AVP {num_agents}-agent x {num_rounds}-round debate)...")
         print("=" * 50)
         set_seed(seed)
 
         latent_results = run_latent_benchmark(
             connector=connector, model=model, tokenizer=tokenizer,
             device=device, identity=identity, dataset=dataset,
-            model_name=model_name, latent_steps=latent_steps,
+            model_name=model_name,
+            num_rounds=num_rounds, num_agents=num_agents,
+            latent_steps=latent_steps,
             max_new_tokens=max_new_tokens, temperature=temperature,
             top_p=top_p, verbose=verbose,
         )
 
     # Print summary
-    from benchmarks.shared.evaluate_common import print_summary, compute_accuracy
+    from benchmarks.debate.evaluate import compute_accuracy, print_debate_summary
+    from benchmarks.shared.evaluate_common import print_summary
 
     modes = []
     if direct_results is not None:
@@ -170,11 +182,17 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Text", 13, text_results))
 
     print_summary(
-        benchmark_name="GSM8K 2-Agent",
+        benchmark_name=f"Debate (StrategyQA, {num_rounds} rounds)",
         modes=modes,
         text_results=text_results,
         direct_results=direct_results,
     )
+
+    # Print debate-specific summaries
+    for label, _, res in modes:
+        if res and res is not direct_results:
+            print(f"\n--- {label} Mode ---")
+            print_debate_summary(res, num_rounds)
 
     # Save results
     from benchmarks.shared.results import save_results
@@ -184,11 +202,13 @@ def run_benchmark(config: dict) -> dict:
 
     output_data = {
         "config": {
-            "benchmark": "gsm8k_2agent",
+            "benchmark": "debate",
             "model_name": model_name,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
+            "num_rounds": num_rounds,
+            "num_agents": num_agents,
             "latent_steps": latent_steps,
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
@@ -212,7 +232,7 @@ def run_benchmark(config: dict) -> dict:
             "samples": text_results,
         }
 
-    save_results(output_data, output_dir, "gsm8k_2agent", model_name, mode, max_samples)
+    save_results(output_data, output_dir, "debate", model_name, mode, max_samples)
 
     return output_data
 

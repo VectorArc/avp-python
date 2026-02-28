@@ -190,33 +190,46 @@ def load_model(model_name: str, device: str):
     return model, tokenizer, connector, identity
 
 
-def main() -> None:
-    args = parse_args()
-    set_seed(args.seed)
+def run_benchmark(config: dict) -> dict:
+    """Run GSM8K 4-agent benchmark. Returns results dict."""
+    seed = config.get("seed", 42)
+    set_seed(seed)
 
-    device = auto_device(args.device)
-    run_direct = args.mode in ("direct", "all")
-    run_latent = args.mode in ("latent", "both", "all")
-    run_text = args.mode in ("text", "both", "all")
-    run_hybrid = args.mode in ("hybrid", "all")
+    device = auto_device(config.get("device"))
+    mode = config.get("mode", "all")
+    model_name = config.get("model_name", "Qwen/Qwen2.5-1.5B-Instruct")
+    max_samples = config.get("max_samples", 10)
+    latent_steps = config.get("latent_steps", 10)
+    kv_mode = config.get("kv_mode", "full")
+    max_new_tokens = config.get("max_new_tokens", 512)
+    summary_max_tokens = config.get("summary_max_tokens", 128)
+    temperature = config.get("temperature", 0.7)
+    top_p = config.get("top_p", 0.95)
+    verbose = config.get("verbose", False)
+    output_dir = config.get("output_dir")
+
+    run_direct = mode in ("direct", "all")
+    run_latent = mode in ("latent", "both", "all")
+    run_text = mode in ("text", "both", "all")
+    run_hybrid = mode in ("hybrid", "all")
 
     print(f"Device: {device}")
-    print(f"Mode: {args.mode}")
-    print(f"Model: {args.model_name}")
-    print(f"Samples: {args.max_samples}")
-    print(f"Latent steps: {args.latent_steps}")
-    print(f"KV mode: {args.kv_mode}")
-    print(f"Max new tokens: {args.max_new_tokens}")
-    print(f"Temperature: {args.temperature}")
-    print(f"Seed: {args.seed}")
+    print(f"Mode: {mode}")
+    print(f"Model: {model_name}")
+    print(f"Samples: {max_samples}")
+    print(f"Latent steps: {latent_steps}")
+    print(f"KV mode: {kv_mode}")
+    print(f"Max new tokens: {max_new_tokens}")
+    print(f"Temperature: {temperature}")
+    print(f"Seed: {seed}")
     print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, hybrid={run_hybrid}")
     print()
 
     # Load dataset
-    dataset = load_dataset(args.max_samples)
+    dataset = load_dataset(max_samples)
 
     # Load model
-    model, tokenizer, connector, identity = load_model(args.model_name, device)
+    model, tokenizer, connector, identity = load_model(model_name, device)
 
     direct_results = None
     latent_results = None
@@ -230,17 +243,17 @@ def main() -> None:
         print("\n" + "=" * 50)
         print("Running DIRECT (single-agent) baseline...")
         print("=" * 50)
-        set_seed(args.seed)
+        set_seed(seed)
 
         direct_results = run_direct_benchmark(
             model=model,
             tokenizer=tokenizer,
             device=device,
             dataset=dataset,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            verbose=args.verbose,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            verbose=verbose,
         )
 
     # Run text pipeline
@@ -250,17 +263,17 @@ def main() -> None:
         print("\n" + "=" * 50)
         print("Running TEXT (4-agent chain) pipeline...")
         print("=" * 50)
-        set_seed(args.seed)
+        set_seed(seed)
 
         text_results = run_text_benchmark(
             model=model,
             tokenizer=tokenizer,
             device=device,
             dataset=dataset,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            verbose=args.verbose,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            verbose=verbose,
         )
 
     # Run latent pipeline
@@ -270,7 +283,7 @@ def main() -> None:
         print("\n" + "=" * 50)
         print("Running LATENT (AVP 4-agent chain) pipeline...")
         print("=" * 50)
-        set_seed(args.seed)
+        set_seed(seed)
 
         latent_results = run_latent_benchmark(
             connector=connector,
@@ -279,13 +292,13 @@ def main() -> None:
             device=device,
             identity=identity,
             dataset=dataset,
-            model_name=args.model_name,
-            latent_steps=args.latent_steps,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            kv_mode=args.kv_mode,
-            verbose=args.verbose,
+            model_name=model_name,
+            latent_steps=latent_steps,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            kv_mode=kv_mode,
+            verbose=verbose,
         )
 
     # Run hybrid pipeline
@@ -295,7 +308,7 @@ def main() -> None:
         print("\n" + "=" * 50)
         print("Running HYBRID (AVP latent+text 4-agent chain) pipeline...")
         print("=" * 50)
-        set_seed(args.seed)
+        set_seed(seed)
 
         hybrid_results = run_hybrid_benchmark(
             connector=connector,
@@ -304,13 +317,13 @@ def main() -> None:
             device=device,
             identity=identity,
             dataset=dataset,
-            model_name=args.model_name,
-            latent_steps=args.latent_steps,
-            max_new_tokens=args.max_new_tokens,
-            summary_max_tokens=args.summary_max_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            verbose=args.verbose,
+            model_name=model_name,
+            latent_steps=latent_steps,
+            max_new_tokens=max_new_tokens,
+            summary_max_tokens=summary_max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            verbose=verbose,
         )
 
     # Print comprehensive summary
@@ -324,7 +337,6 @@ def main() -> None:
     )
 
     # Save results
-    output_dir = args.output_dir
     if output_dir is None:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         output_dir = os.path.join(os.path.dirname(script_dir), "results")
@@ -333,23 +345,23 @@ def main() -> None:
 
     # Timestamped filename so runs don't overwrite each other
     from datetime import datetime
-    model_short = args.model_name.split("/")[-1].lower()
+    model_short = model_name.split("/")[-1].lower()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"gsm8k_{model_short}_{args.mode}_n{args.max_samples}_{timestamp}.json"
+    filename = f"gsm8k_{model_short}_{mode}_n{max_samples}_{timestamp}.json"
     output_path = os.path.join(output_dir, filename)
 
     output_data = {
         "config": {
-            "model_name": args.model_name,
+            "model_name": model_name,
             "device": device,
-            "mode": args.mode,
-            "max_samples": args.max_samples,
-            "latent_steps": args.latent_steps,
-            "kv_mode": args.kv_mode,
-            "max_new_tokens": args.max_new_tokens,
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "seed": args.seed,
+            "mode": mode,
+            "max_samples": max_samples,
+            "latent_steps": latent_steps,
+            "kv_mode": kv_mode,
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "seed": seed,
             "timestamp": timestamp,
         },
     }
@@ -383,6 +395,13 @@ def main() -> None:
     with open(latest_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2, default=str)
     print(f"Latest copy: {latest_path}")
+
+    return output_data
+
+
+def main() -> None:
+    args = parse_args()
+    run_benchmark(vars(args))
 
 
 if __name__ == "__main__":
