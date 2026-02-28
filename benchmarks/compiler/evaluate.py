@@ -44,8 +44,9 @@ def normalize_math_answer(ans: Optional[str]) -> Optional[str]:
     text_match = re.search(r"\\text\{([^}]*)\}", ans)
     if text_match:
         ans = text_match.group(1).strip()
-    # Remove LaTeX spacing commands
-    for cmd in [r"\,", r"\;", r"\:", r"\!", r"\ ", r"\quad", r"\qquad"]:
+    # Remove LaTeX spacing and sizing commands
+    for cmd in [r"\,", r"\;", r"\:", r"\!", r"\ ", r"\quad", r"\qquad",
+                r"\left", r"\right", r"\big", r"\Big", r"\bigg", r"\Bigg"]:
         ans = ans.replace(cmd, "")
     # Remove trailing .0
     if ans.endswith(".0"):
@@ -53,8 +54,8 @@ def normalize_math_answer(ans: Optional[str]) -> Optional[str]:
     # Remove trailing period
     if ans.endswith("."):
         ans = ans[:-1]
-    # Normalize whitespace
-    ans = " ".join(ans.split())
+    # Remove all whitespace (math notation is whitespace-insensitive)
+    ans = re.sub(r"\s+", "", ans)
     return ans
 
 
