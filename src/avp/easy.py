@@ -261,6 +261,129 @@ def pack(
 
 
 # ---------------------------------------------------------------------------
+# generate()
+# ---------------------------------------------------------------------------
+
+
+def generate(
+    content: str,
+    *,
+    model: str,
+    think_steps: int = 20,
+    store: Optional[Any] = None,
+    store_key: Optional[str] = None,
+    prior_key: Optional[str] = None,
+    max_new_tokens: int = 512,
+    temperature: float = 0.7,
+    collect_metrics: bool = False,
+) -> Union[str, Tuple[str, "GenerateMetrics"]]:
+    """Think about a prompt, optionally store/retrieve context, and generate text.
+
+    Combines pack() + ContextStore + unpack() into a single call.  This is
+    the pattern every agent framework integration needs::
+
+        # Before (7 lines):
+        packed = avp.pack(prompt, model=M, think_steps=20, context=prior)
+        store.store("researcher", packed)
+        text = avp.unpack(packed, model=M, max_new_tokens=256)
+
+        # After (1 line):
+        text = avp.generate(prompt, model=M, store=store,
+                            store_key="researcher")
+
+    Without a store, it still collapses the pack→unpack dance::
+
+        text = avp.generate(prompt, model=M)
+
+    Args:
+        content: The prompt text.
+        model: HuggingFace model name/path (required — generate always
+            needs a model).
+        think_steps: Number of latent thinking steps.  Defaults to 20
+            (the recommended value).  Set to 0 for text-only generation
+            without latent context.
+        store: A ``ContextStore`` instance for automatic context management.
+            Required if *store_key* or *prior_key* is set.
+        store_key: If set, the packed context is stored under this key
+            after thinking (requires *store*).
+        prior_key: If set, retrieve prior context from *store* under this
+            key and pass it as input context (requires *store*).
+        max_new_tokens: Max tokens for generation.
+        temperature: Sampling temperature.
+        collect_metrics: If True, return ``(str, GenerateMetrics)`` tuple.
+
+    Returns:
+        Generated text response.
+        If collect_metrics=True, returns (str, GenerateMetrics).
+    """
+    t_start = _time.perf_counter()
+
+    if not isinstance(content, str):
+        raise TypeError(f"generate() content must be str, got {type(content).__name__}")
+    if (store_key is not None or prior_key is not None) and store is None:
+        raise ValueError("store_key/prior_key require store= (pass a ContextStore)")
+
+    # Retrieve prior context from store
+    prior_context: Optional[PackedMessage] = None
+    if prior_key is not None and store is not None:
+        prior_context = store.get(prior_key)
+
+    # Pack (think)
+    t_think = _time.perf_counter()
+    packed = pack(
+        content,
+        model=model,
+        context=prior_context,
+        think_steps=think_steps,
+    )
+    think_duration = _time.perf_counter() - t_think
+
+    # Store
+    stored = False
+    if store_key is not None and store is not None:
+        store.store(store_key, packed)
+        stored = True
+
+    # Generate text
+    connector = _get_or_create_connector(model)
+    avp_context = packed.context
+
+    t_gen = _time.perf_counter()
+    text = connector.generate(
+        content,
+        context=avp_context,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+    )
+    generate_duration = _time.perf_counter() - t_gen
+
+    logger.debug(
+        "generate() model=%s think_steps=%d stored=%s prior=%s",
+        model, think_steps, store_key, prior_key,
+    )
+    logger.info(
+        "generate() think=%.3fs generate=%.3fs total=%.3fs",
+        think_duration, generate_duration, _time.perf_counter() - t_start,
+    )
+
+    if collect_metrics:
+        from .metrics import GenerateMetrics
+
+        metrics = GenerateMetrics(
+            model=model,
+            think_steps=think_steps,
+            has_prior_context=prior_context is not None,
+            stored=stored,
+            duration_s=_time.perf_counter() - t_start,
+            think_duration_s=think_duration,
+            generate_duration_s=generate_duration,
+        )
+        return text, metrics
+
+    return text
+
+
+# ---------------------------------------------------------------------------
 # unpack()
 # ---------------------------------------------------------------------------
 

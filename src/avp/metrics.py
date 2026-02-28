@@ -59,6 +59,32 @@ class UnpackMetrics:
 
 
 @dataclass
+class GenerateMetrics:
+    """Metrics collected during a generate() call."""
+
+    model: Optional[str] = None
+    """Model name used for generation."""
+
+    think_steps: int = 0
+    """Number of latent thinking steps requested."""
+
+    has_prior_context: bool = False
+    """Whether prior context was retrieved from the store."""
+
+    stored: bool = False
+    """Whether the packed result was stored in a ContextStore."""
+
+    duration_s: float = 0.0
+    """Total wall-clock time for generate() in seconds."""
+
+    think_duration_s: float = 0.0
+    """Time spent in pack() (identity + think)."""
+
+    generate_duration_s: float = 0.0
+    """Time spent in connector.generate()."""
+
+
+@dataclass
 class HandshakeMetrics:
     """Metrics from a handshake resolve() call."""
 

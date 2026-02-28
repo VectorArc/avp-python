@@ -20,7 +20,7 @@ For direct connector access (advanced):
 """
 
 # --- Easy API (start here) ---
-from .easy import PackedMessage, pack, unpack
+from .easy import PackedMessage, generate, pack, unpack
 from .context_store import ContextStore
 
 # --- Protocol layer ---
@@ -99,7 +99,7 @@ _CONNECTOR_NAMES = {"AVPContext", "HuggingFaceConnector", "VLLMConnector"}
 _EASY_NAMES = {"clear_cache"}
 
 # Metrics classes — lazy-loaded to avoid unconditional import
-_METRICS_NAMES = {"PackMetrics", "UnpackMetrics", "HandshakeMetrics"}
+_METRICS_NAMES = {"PackMetrics", "UnpackMetrics", "GenerateMetrics", "HandshakeMetrics"}
 
 
 def __getattr__(name: str):
@@ -131,12 +131,14 @@ __all__ = [
     # Easy API (start here)
     "pack",
     "unpack",
+    "generate",
     "PackedMessage",
     "clear_cache",
     "ContextStore",
     # Observability (lazy — stdlib only)
     "PackMetrics",
     "UnpackMetrics",
+    "GenerateMetrics",
     "HandshakeMetrics",
     # Connectors (lazy — requires torch/transformers/vllm)
     "HuggingFaceConnector",
