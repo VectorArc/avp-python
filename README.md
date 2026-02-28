@@ -1,11 +1,16 @@
 # Agent Vector Protocol (AVP) — KV-Cache Transfer for Multi-Agent LLMs
 
+[![PyPI](https://img.shields.io/pypi/v/avp.svg)](https://pypi.org/project/avp/)
 [![CI](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml/badge.svg)](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.2-blue.svg)](https://github.com/VectorArc/avp-spec)
 
-**Transfer KV-cache between LLM agents instead of regenerating text. Same multi-agent pipeline, 73-78% fewer tokens, 2-4x faster.**
+**Transfer KV-cache between LLM agents instead of regenerating text. Same multi-agent pipeline, 57-78% fewer tokens, 2-4x faster.**
+
+```bash
+pip install avp
+```
 
 ## Who This Is For
 
@@ -74,15 +79,14 @@ answer = avp.unpack(msg, model="Qwen/Qwen2.5-1.5B-Instruct")
 
 | Metric | Value |
 |--------|-------|
-| Token savings vs text chains | **57-78%** across 4 benchmarks |
-| Speed improvement | **2-4.3x** faster |
-| HotpotQA: latent beats text AND direct | **35% EM / 0.54 F1** (vs 30% / 20%) |
-| Models validated | Qwen2.5, DeepSeek-R1, Llama 3.2 |
+| Token savings vs text chains | **57-78%** across 4 benchmarks, 3 model families |
+| Speed improvement | **2-4x** faster (model-dependent) |
+| Models validated | Qwen2.5 (1.5B, 7B), DeepSeek-R1 (1.5B), Llama 3.2 (3B) |
 | Tests | 288 passing (276 unit + 12 integration) |
 
-> **Accuracy varies by model.** Latent beats text on Llama 3.2-3B and HotpotQA. On Qwen2.5-1.5B, accuracy is comparable. Fan-out patterns favor text. See [full results](docs/BENCHMARKS.md).
+> **Accuracy varies by model and sample size.** Latent beats text on Llama 3.2-3B and HotpotQA. On Qwen2.5-1.5B, accuracy is comparable. Fan-out patterns favor text. Token savings and speed ratios are stable across runs. See [full results](docs/BENCHMARKS.md).
 
-## How Text Chains Waste Compute
+## How It Works
 
 ```mermaid
 graph LR
@@ -100,17 +104,15 @@ graph LR
     style avp fill:#f3fff3,stroke:#4a4,stroke-width:2px
 ```
 
-Every multi-agent framework today — LangChain, CrewAI, AutoGen, OpenAI Swarm — copies text between agents. Each agent re-tokenizes and re-processes everything prior agents already computed. Our benchmarks show **47-53% of all tokens in text chains are redundant re-processing**.
+Every multi-agent framework today — LangChain, CrewAI, AutoGen, OpenAI Swarm — copies text between agents. Each agent re-tokenizes and re-processes everything prior agents already computed. Our benchmarks show **47-53% of all tokens in text chains are redundant re-processing**. (See [Works With](#works-with) for integration examples.)
 
 AVP eliminates this by transferring the KV-cache (the computed attention states) directly. The receiving agent reads prior reasoning from attention states instead of re-computing it from text.
 
-## How It Works
-
-AVP defines a binary format, handshake, and codec — not the transport. It works alongside any agent protocol (LangChain, CrewAI, AutoGen, or custom).
+AVP defines a binary format, handshake, and codec — not the transport. It works alongside any agent framework or protocol.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  Your Orchestrator (LangChain / CrewAI / AutoGen / custom)   │
+│  Your Orchestrator (LangGraph / CrewAI / PydanticAI / any)    │
 │                                                              │
 │  Agent A                          Agent B                    │
 │    │                                ▲                        │
@@ -135,14 +137,14 @@ AVP defines a binary format, handshake, and codec — not the transport. It work
 | Mode | When | What Happens |
 |------|------|--------------|
 | **Latent** | Same model | KV-cache + hidden state transfer, zero re-processing |
-| **Cross-model** | Same family (e.g. Qwen2.5-1.5B ↔ 0.5B) | Vocabulary-mediated projection (Rosetta Stone v2), no training needed |
+| **Cross-model** | Same family (e.g. Qwen2.5-1.5B ↔ 0.5B) | Vocabulary-mediated projection, zero training needed |
 | **JSON fallback** | Incompatible models | Standard text, auto-negotiated |
 
 **Transport-agnostic:** HTTP/2 (reference), gRPC, A2A, MCP, WebSockets, shared memory. AVP handles the latent communication layer — not discovery, routing, or orchestration.
 
-## Advanced: Direct Connector API
+## Connector API
 
-For full control over model loading, device placement, and context serialization, use connectors directly:
+For full control over model loading, device placement, and context serialization:
 
 **High-level API (5 lines):**
 
@@ -165,7 +167,8 @@ answer = connector.generate("Now compute the final answer.", context=context)
 wire_bytes = context.to_bytes(session_id="s1", source_agent_id="agent-a")
 
 # Process B: restore and generate
-from avp import AVPContext
+from avp import AVPContext, HuggingFaceConnector
+connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
 restored = AVPContext.from_bytes(wire_bytes, device="cuda")
 answer = connector.generate("Solve it.", context=restored)
 ```
@@ -244,35 +247,37 @@ The `AVPKVConnectorV1Dynamic` plugin saves/loads KV-cache between vLLM instances
 
 All errors inherit from `AVPError`. Key types: `IncompatibleModelsError`, `HandshakeError`, `DecodeError`, `ShapeMismatchError`, `RealignmentError`, `SessionExpiredError`, `EngineNotAvailableError`, `FallbackRequested`.
 
-## Features
+## Roadmap
 
-**Protocol**
-- Binary codec with 12-byte header + protobuf metadata
-- KV-cache serialization (DynamicCache, tuple format)
-- Session management with TTL and thread safety
-- zstd compression
-
-**Connectors**
-- HuggingFace Transformers (full hidden state + KV-cache access)
-- vLLM (KVConnectorBase_V1 plugin + SDK wrapper + PagedAttention conversion)
-
-**Cross-Model (Rosetta Stone v2)**
-- Vocabulary-mediated projection for same-family models
-- Two-tier projection validation (cosine similarity + pseudo-perplexity)
-- HYBRID mode (KV-cache + text summary fallback)
-
-**Benchmarks**
-- GSM8K 4-agent chain (3 model families)
-- 2-agent handoff (most common real-world pattern)
-- HotpotQA multi-hop QA (reading comprehension transfer)
-- Fan-out aggregation (parallel specialists)
-
-**Roadmap**
 - CacheGen-style compression (3-4x wire size reduction)
-- SGLang connector
 - Larger model validation (7B+)
 
 ## Works With
+
+### Agent Frameworks
+
+AVP works *with* your orchestration framework, not instead of it. Your framework handles routing, state, and agent lifecycle. AVP handles the communication primitive between agents.
+
+The integration pattern is the same across all six tested frameworks:
+
+```python
+# Agent A's output → AVP → Agent B's input
+packed = avp.pack(agent_a_output, model="Qwen/Qwen2.5-7B-Instruct")
+agent_b_input = str(packed)  # works as plain text in any framework
+```
+
+| Framework | Layer 0/1 Friction | Integration Point |
+|-----------|-------------------|-------------------|
+| **PydanticAI** | Zero — plain strings | `FunctionModel` callback |
+| **LangGraph** | Low — wrap in `AIMessage` | Graph node function |
+| **CrewAI** | Zero — plain strings | `BaseLLM.call()` override |
+| **LlamaIndex** | Zero — plain strings | `CustomLLM.complete()` override |
+| **OpenAI Agents SDK** | Low — custom `Model` class | `Model.get_response()` override |
+| **Google ADK** | Low — async generator | `BaseLlm.generate_content_async()` override |
+
+> **Layer 2 (latent transfer)** works in all six but requires a side-channel `dict` for KV-cache context — no framework natively supports binary tensor data between agents.
+
+### Infrastructure & Protocols
 
 - **[vLLM](https://github.com/vllm-project/vllm)** — KVConnectorBase_V1 plugin for production serving
 - **[HuggingFace Transformers](https://github.com/huggingface/transformers)** — Full hidden state and KV-cache access
@@ -295,7 +300,7 @@ All errors inherit from `AVPError`. Key types: `IncompatibleModelsError`, `Hands
 
 - **[AVP Specification](https://github.com/VectorArc/avp-spec)** — Binary format, handshake, transport, security, test vectors
 - **[Benchmark Results](docs/BENCHMARKS.md)** — Full results across 4 benchmarks and 3 model families
-- **[Examples](examples/)** — Agent demo, mixed-model demo, quickstart
+- **[Examples](examples/)** — Quickstart, agent demo, mixed-model demo, pack/unpack
 - **[Contributing](CONTRIBUTING.md)** — Dev setup, tests, code style
 
 ## Research Foundation
