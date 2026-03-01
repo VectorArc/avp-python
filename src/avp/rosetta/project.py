@@ -83,6 +83,14 @@ def vocabulary_mediated_projection(
     w_src = source_lm_head_weight.detach().to(device=h.device, dtype=torch.float32)
     w_tgt = target_embed_weight.detach().to(device=h.device, dtype=torch.float32)
 
+    # Align vocab dimensions — models in the same family may pad embedding
+    # tables differently (e.g. for tensor parallelism). Truncate to the
+    # shared prefix which contains all real token embeddings.
+    shared_vocab = min(w_src.shape[0], w_tgt.shape[0])
+    if w_src.shape[0] != w_tgt.shape[0]:
+        w_src = w_src[:shared_vocab]
+        w_tgt = w_tgt[:shared_vocab]
+
     # hidden @ W_src^T → logits [..., vocab_size]
     logits = torch.matmul(h, w_src.T)
 
