@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.2-blue.svg)](https://github.com/VectorArc/avp-spec)
 
-**Transfer KV-cache between LLM agents instead of regenerating text. Same multi-agent pipeline, 57-78% fewer tokens, 2-4x faster.**
+**Transfer KV-cache between LLM agents instead of regenerating text. Same multi-agent pipeline, 51-78% fewer tokens, 1.5-5x faster. Cross-model projection with zero training.**
 
 ```bash
 pip install avp
@@ -79,12 +79,13 @@ answer = avp.unpack(msg, model="Qwen/Qwen2.5-1.5B-Instruct")
 
 | Metric | Value |
 |--------|-------|
-| Token savings vs text chains | **57-78%** across 4 benchmarks, 3 model families |
-| Speed improvement | **2-4x** faster (model-dependent) |
-| Models validated | Qwen2.5 (1.5B, 7B), DeepSeek-R1 (1.5B), Llama 3.2 (3B) |
-| Tests | 288 passing (276 unit + 12 integration) |
+| Token savings vs text chains | **51-78%** across 4 benchmarks, 5 models |
+| Speed improvement | **1.5-5x** faster (model and task dependent) |
+| Cross-model (zero training) | **72%** GSM8K accuracy, Qwen 7B to Llama 3B, **6 KB** wire |
+| Models validated | Qwen2.5 (1.5B, 7B), DeepSeek-R1 (1.5B), Llama 3.2 (1B, 3B) |
+| Hardware | A100 (cloud), RTX 3070 Ti (local) |
 
-> **Accuracy varies by model and sample size.** Latent beats text on Llama 3.2-3B and HotpotQA. On Qwen2.5-1.5B, accuracy is comparable. Fan-out patterns favor text. Token savings and speed ratios are stable across runs. See [full results](docs/BENCHMARKS.md).
+> **Same-model:** Latent matches direct accuracy on Qwen 7B (85%) and beats text by 10pp. **Cross-model:** Zero-training vocabulary projection hits solver ceiling on structured tasks (math: 72%), but fails on comprehension (HotpotQA: 8%). See [full results](docs/BENCHMARKS.md).
 
 ## How It Works
 
@@ -137,8 +138,8 @@ AVP defines a binary format, handshake, and codec — not the transport. It work
 | Mode | When | What Happens |
 |------|------|--------------|
 | **Latent** | Same model | KV-cache + hidden state transfer, zero re-processing |
-| **Cross-model** | Same family (e.g. Qwen2.5-1.5B ↔ 0.5B) | Vocabulary-mediated projection, zero training needed |
-| **JSON fallback** | Incompatible models | Standard text, auto-negotiated |
+| **Cross-model** | Same or different family (e.g. Qwen 7B to Llama 3B) | Vocabulary-mediated projection, zero training needed |
+| **JSON fallback** | No compatible projection path | Standard text, auto-negotiated |
 
 **Transport-agnostic:** HTTP/2 (reference), gRPC, A2A, MCP, WebSockets, shared memory. AVP handles the latent communication layer — not discovery, routing, or orchestration.
 
@@ -238,8 +239,9 @@ The `AVPKVConnectorV1Dynamic` plugin saves/loads KV-cache between vLLM instances
 
 | Import | What It Does |
 |--------|-------------|
-| `calibrate` | Build a projection map (`AVPMap`) between two models for cross-model transfer. |
-| `vocabulary_mediated_projection` | Project hidden states from source model to target model using shared vocabulary as a bridge. |
+| `calibrate` | Build a projection map (`AVPMap`) between two models for cross-model transfer. Auto-detects same-family (vocab mediated) vs cross-family (vocab overlap). |
+| `vocabulary_mediated_projection` | Project hidden states via shared vocabulary (same tokenizer). |
+| `vocab_overlap_projection` | Project hidden states via overlapping BPE tokens (different tokenizers). |
 | `validate_projection` | Quality gate: cosine similarity (fast) + pseudo-perplexity (thorough). Returns LATENT/HYBRID/JSON recommendation. |
 | `save_map` / `load_map` / `find_map` | Persist and retrieve `.avp-map` files for reuse. |
 
@@ -249,8 +251,10 @@ All errors inherit from `AVPError`. Key types: `IncompatibleModelsError`, `Hands
 
 ## Roadmap
 
-- CacheGen-style compression (3-4x wire size reduction)
-- Larger model validation (7B+)
+- Multi-embedding cross-model transfer (addressing single-embedding bottleneck on comprehension tasks)
+- Compact hidden state mode (same-model, ~60x smaller wire than full KV-cache)
+- CacheGen-style compression (3-4x KV-cache wire size reduction)
+- vLLM serving throughput benchmarks
 
 ## Works With
 
@@ -293,13 +297,13 @@ agent_b_input = str(packed)  # works as plain text in any framework
 | **Latent transfer** | Sending KV-cache or hidden states (the "latent" internal representations) instead of converting to text and back. Avoids the lossy text bottleneck. |
 | **Realignment** | Normalizing hidden states before injecting them into another model instance, so they match the expected input distribution. Required because hidden state magnitudes can drift. |
 | **Tied weights** | When a model reuses the same weight matrix for both input embeddings and output projection (common in smaller models like Qwen <=3B, Llama 3.2 <=3B). Requires a special softmax-based projection instead of simple normalization. |
-| **Vocabulary-mediated projection** | Cross-model transfer technique: convert source hidden states to token probabilities using the source model's output head, then reconstruct target-compatible representations using the target model's input embeddings. Works for same-family models that share a tokenizer. |
+| **Vocabulary-mediated projection** | Cross-model transfer technique: convert source hidden states to token probabilities using the source model's output head, then reconstruct target-compatible representations using the target model's input embeddings. Works across families — when tokenizers differ, AVP projects through overlapping vocabulary tokens (~85% overlap for Qwen/Llama). |
 | **PagedAttention** | vLLM's memory management for KV-cache — stores cache in non-contiguous pages. AVP's `page_convert` module handles conversion between paged and contiguous formats. |
 
 ## Documentation
 
 - **[AVP Specification](https://github.com/VectorArc/avp-spec)** — Binary format, handshake, transport, security, test vectors
-- **[Benchmark Results](docs/BENCHMARKS.md)** — Full results across 4 benchmarks and 3 model families
+- **[Benchmark Results](docs/BENCHMARKS.md)** — Full results: 4 benchmarks, 5 models, same-model + cross-model
 - **[Examples](examples/)** — Quickstart, agent demo, mixed-model demo, pack/unpack
 - **[Contributing](CONTRIBUTING.md)** — Dev setup, tests, code style
 
