@@ -229,5 +229,10 @@ def run_rosetta_benchmark(
             print(f"  => {status} (pred={result['prediction']}, gold={result['gold']}, "
                   f"time={result['wall_time']:.1f}s, "
                   f"projection={result['projection_overhead_ms']:.1f}ms)")
+        else:
+            correct = sum(1 for r in results if r["correct"])
+            print(f"  [Rosetta] {i + 1}/{len(dataset)} "
+                  f"({correct}/{i + 1} correct, {result['wall_time']:.1f}s)",
+                  flush=True)
 
     return results
