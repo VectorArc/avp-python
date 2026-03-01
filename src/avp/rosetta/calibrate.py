@@ -19,6 +19,7 @@ class AVPMap:
     The ``w_map`` field holds different data depending on the method:
       - RIDGE / PROCRUSTES: projection matrix of shape [D_src, D_tgt].
       - VOCAB_MEDIATED: target model's input embedding weights [vocab_size, D_tgt].
+      - VOCAB_OVERLAP: target embeddings for shared tokens [N_shared, D_tgt].
     """
 
     source_model_id: str
@@ -33,6 +34,11 @@ class AVPMap:
     method: Union[ProjectionMethod, str]  # ProjectionMethod enum (str accepted for compat)
     anchor_count: int
     validation_score: float
+    # Vocab-overlap fields (cross-family projection)
+    src_indices: Optional[Any] = None   # LongTensor [N_shared] — source token IDs
+    tgt_indices: Optional[Any] = None   # LongTensor [N_shared] — target token IDs
+    overlap_count: int = 0
+    overlap_ratio: float = 0.0
 
     def __post_init__(self) -> None:
         if isinstance(self.method, str):
@@ -194,6 +200,38 @@ def _have_shared_vocab(source_tokenizer: Any, target_tokenizer: Any) -> bool:
     return src_vocab == tgt_vocab
 
 
+def _compute_vocab_overlap(
+    source_tokenizer: Any,
+    target_tokenizer: Any,
+    min_overlap: int = 100,
+) -> Any:
+    """Find tokens shared between two tokenizers.
+
+    Returns (src_indices, tgt_indices, shared_tokens) sorted by token string,
+    or None if overlap count is below min_overlap.
+    """
+    torch = _require_torch()
+
+    if not (hasattr(source_tokenizer, "get_vocab") and hasattr(target_tokenizer, "get_vocab")):
+        return None
+
+    src_vocab = source_tokenizer.get_vocab()  # {token_str: id}
+    tgt_vocab = target_tokenizer.get_vocab()
+
+    shared_tokens = sorted(set(src_vocab.keys()) & set(tgt_vocab.keys()))
+    if len(shared_tokens) < min_overlap:
+        return None
+
+    src_ids = [src_vocab[t] for t in shared_tokens]
+    tgt_ids = [tgt_vocab[t] for t in shared_tokens]
+
+    return (
+        torch.tensor(src_ids, dtype=torch.long),
+        torch.tensor(tgt_ids, dtype=torch.long),
+        shared_tokens,
+    )
+
+
 def calibrate(
     source_model: Any,
     target_model: Any,
@@ -250,6 +288,69 @@ def calibrate(
     shared_vocab = _have_shared_vocab(source_tokenizer, target_tokenizer)
     if resolved is None and shared_vocab:
         resolved = ProjectionMethod.VOCAB_MEDIATED
+
+    # Check for partial vocabulary overlap → vocab-overlap projection
+    overlap_result = None
+    if resolved is None and not shared_vocab:
+        overlap_result = _compute_vocab_overlap(source_tokenizer, target_tokenizer)
+        if overlap_result is not None:
+            resolved = ProjectionMethod.VOCAB_OVERLAP
+    if resolved == ProjectionMethod.VOCAB_OVERLAP:
+        if overlap_result is None:
+            # Explicit method="vocab_overlap" — compute now
+            overlap_result = _compute_vocab_overlap(source_tokenizer, target_tokenizer)
+        if overlap_result is None:
+            raise ValueError(
+                "vocab_overlap method requires tokenizers with sufficient "
+                "vocabulary overlap (>= 100 shared tokens)."
+            )
+        src_idx_tensor, tgt_idx_tensor, shared_tokens = overlap_result
+        src_vocab_size = len(source_tokenizer.get_vocab())
+        tgt_vocab_size = len(target_tokenizer.get_vocab())
+        overlap_ratio = len(shared_tokens) / min(src_vocab_size, tgt_vocab_size)
+
+        # Pre-index target embeddings for shared tokens
+        tgt_input_embeds = target_model.get_input_embeddings()
+        if tgt_input_embeds is None or not hasattr(tgt_input_embeds, "weight"):
+            raise RealignmentError(
+                "Cannot get target input embeddings for vocab-overlap projection."
+            )
+        tgt_embed_full = tgt_input_embeds.weight.detach().to(torch.float32)
+        w_map = tgt_embed_full[tgt_idx_tensor].cpu()  # [N_shared, D_tgt]
+
+        target_norm = compute_target_norm(target_model, device=device)
+        src_dim = source_model.config.hidden_size
+        tgt_dim = target_model.config.hidden_size
+        if src_dim is None or src_dim == 0:
+            src_dim = getattr(source_model.config, "n_embd", 0)
+        if tgt_dim is None or tgt_dim == 0:
+            tgt_dim = getattr(target_model.config, "n_embd", 0)
+
+        print(
+            f"[AVP] Vocab overlap: {len(shared_tokens)} shared tokens "
+            f"({overlap_ratio:.1%} of smaller vocab), "
+            f"src_vocab={src_vocab_size}, tgt_vocab={tgt_vocab_size}"
+        )
+
+        return AVPMap(
+            source_model_id=src_identity.model_id,
+            source_hash=src_hash,
+            source_dim=src_dim,
+            target_model_id=tgt_identity.model_id,
+            target_hash=tgt_hash,
+            target_dim=tgt_dim,
+            w_map=w_map,
+            bias=None,
+            target_norm=target_norm.cpu(),
+            method=ProjectionMethod.VOCAB_OVERLAP,
+            anchor_count=0,
+            validation_score=overlap_ratio,
+            src_indices=src_idx_tensor,
+            tgt_indices=tgt_idx_tensor,
+            overlap_count=len(shared_tokens),
+            overlap_ratio=overlap_ratio,
+        )
+
     if resolved == ProjectionMethod.VOCAB_MEDIATED:
         if not shared_vocab:
             raise ValueError(

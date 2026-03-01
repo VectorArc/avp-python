@@ -588,9 +588,11 @@ class HuggingFaceConnector(EngineConnector):
     ) -> Any:
         """Project source hidden state to target embedding space via Rosetta Stone.
 
-        Supports two methods:
+        Supports three method families:
         - vocab_mediated: Uses shared vocabulary as bridge (zero learned params).
           source lm_head -> softmax -> target input embeddings.
+        - vocab_overlap: Cross-family variant — projects through overlapping
+          tokens between different tokenizers.
         - ridge/procrustes: Uses learned linear map (W_map).
 
         Args:
@@ -616,6 +618,22 @@ class HuggingFaceConnector(EngineConnector):
                 hidden_state,
                 source_lm_head_weight=source_lm_head.weight,
                 target_embed_weight=avp_map.w_map,  # target input embeddings
+            )
+        elif avp_map.method == ProjectionMethod.VOCAB_OVERLAP:
+            from ..rosetta.project import vocab_overlap_projection
+            source_lm_head = self.model.get_output_embeddings()
+            if source_lm_head is None:
+                source_lm_head = getattr(self.model, "lm_head", None)
+            if source_lm_head is None or not hasattr(source_lm_head, "weight"):
+                raise RealignmentError(
+                    "Cannot get source output embeddings (lm_head) for "
+                    "vocab-overlap projection."
+                )
+            return vocab_overlap_projection(
+                hidden_state,
+                source_lm_head_weight=source_lm_head.weight,
+                shared_target_embed_weight=avp_map.w_map,
+                src_indices=avp_map.src_indices,
             )
         else:
             from ..rosetta.project import apply_cross_model_projection

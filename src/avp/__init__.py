@@ -79,6 +79,7 @@ _ROSETTA_NAMES = {
     "calibrate",
     "apply_cross_model_projection",
     "vocabulary_mediated_projection",
+    "vocab_overlap_projection",
     "save_map",
     "load_map",
     "find_map",

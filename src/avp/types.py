@@ -58,6 +58,7 @@ class ProjectionMethod(enum.Enum):
     RIDGE = "ridge"
     PROCRUSTES = "procrustes"
     VOCAB_MEDIATED = "vocab_mediated"
+    VOCAB_OVERLAP = "vocab_overlap"
 
 
 class DataType(enum.IntEnum):

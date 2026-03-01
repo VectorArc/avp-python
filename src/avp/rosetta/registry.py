@@ -51,6 +51,10 @@ def save_map(avp_map: AVPMap, map_dir: Optional[Path] = None) -> Path:
         "method": avp_map.method.value,  # serialize enum as string
         "anchor_count": avp_map.anchor_count,
         "validation_score": avp_map.validation_score,
+        "src_indices": avp_map.src_indices.cpu() if avp_map.src_indices is not None else None,
+        "tgt_indices": avp_map.tgt_indices.cpu() if avp_map.tgt_indices is not None else None,
+        "overlap_count": avp_map.overlap_count,
+        "overlap_ratio": avp_map.overlap_ratio,
     }
     torch.save(data, path)
     return path
@@ -93,6 +97,10 @@ def load_map(
         method=data["method"],
         anchor_count=data["anchor_count"],
         validation_score=data["validation_score"],
+        src_indices=data.get("src_indices"),
+        tgt_indices=data.get("tgt_indices"),
+        overlap_count=data.get("overlap_count", 0),
+        overlap_ratio=data.get("overlap_ratio", 0.0),
     )
 
 

@@ -223,6 +223,17 @@ def _apply_projection(
             source_lm_head_weight=source_lm_head.weight,
             target_embed_weight=avp_map.w_map,
         )
+    elif avp_map.method == ProjectionMethod.VOCAB_OVERLAP:
+        from .project import vocab_overlap_projection
+        source_lm_head = source_model.get_output_embeddings()
+        if source_lm_head is None:
+            source_lm_head = getattr(source_model, "lm_head", None)
+        return vocab_overlap_projection(
+            hidden_states,
+            source_lm_head_weight=source_lm_head.weight,
+            shared_target_embed_weight=avp_map.w_map,
+            src_indices=avp_map.src_indices,
+        )
     else:
         from .project import apply_cross_model_projection
         return apply_cross_model_projection(
@@ -278,7 +289,7 @@ def validate_projection(
     # Vocab-mediated projection goes through lm_head → softmax, which predicts
     # the next token. Cosine similarity must compare projected[i] to the
     # embedding of token_ids[i+1], not token_ids[i].
-    is_next_token = (avp_map.method == ProjectionMethod.VOCAB_MEDIATED)
+    is_next_token = avp_map.method in (ProjectionMethod.VOCAB_MEDIATED, ProjectionMethod.VOCAB_OVERLAP)
 
     # Project and compute cosine similarity
     all_cos_sims = []

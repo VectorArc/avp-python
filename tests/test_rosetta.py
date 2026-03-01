@@ -22,6 +22,23 @@ class VocabMockTokenizer(MockTokenizer):
         return {f"token_{i}": i for i in range(self.vocab_size)}
 
 
+class CrossFamilyMockTokenizer(MockTokenizer):
+    """Mock tokenizer with partial vocab overlap with VocabMockTokenizer.
+
+    First half of tokens share names with VocabMockTokenizer (token_0..token_N/2-1).
+    Second half use different names (alt_token_N/2..alt_token_N-1).
+    """
+
+    def get_vocab(self):
+        vocab = {}
+        for i in range(self.vocab_size):
+            if i < self.vocab_size // 2:
+                vocab[f"token_{i}"] = i
+            else:
+                vocab[f"alt_token_{i}"] = i
+        return vocab
+
+
 # ---------------------------------------------------------------------------
 # Fixtures: tiny models with different architectures / dims
 # ---------------------------------------------------------------------------
@@ -1152,3 +1169,190 @@ class TestValidation:
         two = torch.tensor([50, 60])
         ppl_two = _compute_pseudo_perplexity(model, projected, two, "cpu")
         assert math.isfinite(ppl_two) and ppl_two > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Vocabulary overlap (cross-family projection)
+# ---------------------------------------------------------------------------
+
+@requires_torch
+@requires_transformers
+class TestVocabOverlap:
+    """Tests for _compute_vocab_overlap() and vocab_overlap_projection()."""
+
+    def test_compute_vocab_overlap_basic(self):
+        """_compute_vocab_overlap returns correct indices and lengths."""
+        from avp.rosetta.calibrate import _compute_vocab_overlap
+
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = CrossFamilyMockTokenizer(vocab_size=256)
+
+        result = _compute_vocab_overlap(src_tok, tgt_tok)
+        assert result is not None
+        src_indices, tgt_indices, shared_tokens = result
+
+        # CrossFamilyMockTokenizer shares first half: token_0..token_127
+        assert len(shared_tokens) == 128
+        assert src_indices.shape == (128,)
+        assert tgt_indices.shape == (128,)
+        # Both tokenizers assign the same IDs to shared tokens
+        assert torch.equal(src_indices, tgt_indices)
+
+    def test_compute_vocab_overlap_below_threshold(self):
+        """Returns None when overlap < min_overlap."""
+        from avp.rosetta.calibrate import _compute_vocab_overlap
+
+        # With vocab_size=8, overlap is 4 tokens — below default min_overlap=100
+        src_tok = VocabMockTokenizer(vocab_size=8)
+        tgt_tok = CrossFamilyMockTokenizer(vocab_size=8)
+
+        result = _compute_vocab_overlap(src_tok, tgt_tok, min_overlap=100)
+        assert result is None
+
+        # But succeeds with lower threshold
+        result = _compute_vocab_overlap(src_tok, tgt_tok, min_overlap=2)
+        assert result is not None
+
+    def test_vocab_overlap_projection_shape(self):
+        """vocab_overlap_projection produces correct output shape."""
+        from avp.rosetta.project import vocab_overlap_projection
+
+        D_src, D_tgt, N_shared, V_src = 64, 128, 100, 256
+        hidden = torch.randn(2, D_src)
+        w_src = torch.randn(V_src, D_src)       # source lm_head
+        w_tgt = torch.randn(N_shared, D_tgt)    # shared target embeddings
+        src_indices = torch.randperm(V_src)[:N_shared]
+
+        result = vocab_overlap_projection(hidden, w_src, w_tgt, src_indices)
+        assert result.shape == (2, D_tgt)
+
+    def test_vocab_overlap_projection_preserves_dtype(self):
+        """float16 in → float16 out."""
+        from avp.rosetta.project import vocab_overlap_projection
+
+        D_src, D_tgt, N_shared, V_src = 64, 128, 100, 256
+        hidden = torch.randn(2, D_src, dtype=torch.float16)
+        w_src = torch.randn(V_src, D_src, dtype=torch.float16)
+        w_tgt = torch.randn(N_shared, D_tgt, dtype=torch.float16)
+        src_indices = torch.randperm(V_src)[:N_shared]
+
+        result = vocab_overlap_projection(hidden, w_src, w_tgt, src_indices)
+        assert result.dtype == torch.float16
+
+    def test_vocab_overlap_full_overlap_equals_vocab_mediated(self):
+        """When overlap is 100%, result must match vocabulary_mediated_projection."""
+        from avp.rosetta.project import vocab_overlap_projection, vocabulary_mediated_projection
+
+        D_src, D_tgt, V = 64, 128, 256
+        torch.manual_seed(123)
+        hidden = torch.randn(3, D_src)
+        w_src = torch.randn(V, D_src)
+        w_tgt = torch.randn(V, D_tgt)
+        # Full overlap: all indices in order
+        src_indices = torch.arange(V)
+
+        result_overlap = vocab_overlap_projection(hidden, w_src, w_tgt, src_indices)
+        result_mediated = vocabulary_mediated_projection(hidden, w_src, w_tgt)
+
+        assert torch.allclose(result_overlap, result_mediated, atol=1e-5)
+
+    def test_calibrate_auto_detects_vocab_overlap(self, tiny_gpt2_64, tiny_gpt2_128):
+        """calibrate() with cross-family tokenizers returns VOCAB_OVERLAP."""
+        from avp.rosetta.calibrate import calibrate
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = CrossFamilyMockTokenizer(vocab_size=256)
+
+        avp_map = calibrate(src_model, tgt_model, src_tok, tgt_tok, device="cpu")
+
+        assert avp_map.method == ProjectionMethod.VOCAB_OVERLAP
+
+    def test_calibrate_vocab_overlap_w_map_shape(self, tiny_gpt2_64, tiny_gpt2_128):
+        """w_map is [N_shared, D_tgt] for VOCAB_OVERLAP."""
+        from avp.rosetta.calibrate import calibrate
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = CrossFamilyMockTokenizer(vocab_size=256)
+
+        avp_map = calibrate(src_model, tgt_model, src_tok, tgt_tok, device="cpu")
+
+        # 128 shared tokens, target dim=128
+        assert avp_map.w_map.shape == (128, 128)
+        assert avp_map.overlap_count == 128
+        assert 0.0 < avp_map.overlap_ratio <= 1.0
+
+    def test_calibrate_vocab_overlap_stores_indices(self, tiny_gpt2_64, tiny_gpt2_128):
+        """src_indices and tgt_indices have shape [N_shared]."""
+        from avp.rosetta.calibrate import calibrate
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = CrossFamilyMockTokenizer(vocab_size=256)
+
+        avp_map = calibrate(src_model, tgt_model, src_tok, tgt_tok, device="cpu")
+
+        assert avp_map.src_indices is not None
+        assert avp_map.tgt_indices is not None
+        assert avp_map.src_indices.shape == (128,)
+        assert avp_map.tgt_indices.shape == (128,)
+
+    def test_registry_save_load_vocab_overlap(self, tiny_gpt2_64, tiny_gpt2_128, tmp_path):
+        """Registry roundtrip preserves vocab-overlap fields."""
+        from avp.rosetta.calibrate import calibrate
+        from avp.rosetta.registry import save_map, load_map
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = CrossFamilyMockTokenizer(vocab_size=256)
+
+        avp_map = calibrate(src_model, tgt_model, src_tok, tgt_tok, device="cpu")
+        save_map(avp_map, map_dir=tmp_path)
+
+        loaded = load_map(avp_map.source_hash, avp_map.target_hash, map_dir=tmp_path)
+        assert loaded is not None
+        assert loaded.method == ProjectionMethod.VOCAB_OVERLAP
+        assert loaded.overlap_count == avp_map.overlap_count
+        assert loaded.overlap_ratio == pytest.approx(avp_map.overlap_ratio)
+        assert torch.equal(loaded.src_indices, avp_map.src_indices)
+        assert torch.equal(loaded.tgt_indices, avp_map.tgt_indices)
+        assert loaded.w_map.shape == avp_map.w_map.shape
+
+    def test_registry_load_backward_compat(self, tmp_path):
+        """Old .pt files without overlap fields load with defaults."""
+        from avp.rosetta.calibrate import AVPMap
+        from avp.rosetta.registry import save_map, load_map
+
+        # Create a map without overlap fields (simulating old format)
+        old_map = AVPMap(
+            source_model_id="src", source_hash="a" * 64, source_dim=64,
+            target_model_id="tgt", target_hash="b" * 64, target_dim=128,
+            w_map=torch.randn(64, 128),
+            bias=None,
+            target_norm=torch.tensor(5.0),
+            method="ridge",
+            anchor_count=50,
+            validation_score=0.85,
+        )
+
+        # Save with current code (includes overlap fields as None/0)
+        path = save_map(old_map, map_dir=tmp_path)
+
+        # Manually strip overlap fields to simulate old file
+        data = torch.load(path, weights_only=True)
+        for key in ("src_indices", "tgt_indices", "overlap_count", "overlap_ratio"):
+            data.pop(key, None)
+        torch.save(data, path)
+
+        # Load should succeed with defaults
+        loaded = load_map("a" * 64, "b" * 64, map_dir=tmp_path)
+        assert loaded is not None
+        assert loaded.src_indices is None
+        assert loaded.tgt_indices is None
+        assert loaded.overlap_count == 0
+        assert loaded.overlap_ratio == 0.0

@@ -50,6 +50,56 @@ def apply_cross_model_projection(
     return projected.to(original_dtype)
 
 
+def vocab_overlap_projection(
+    hidden_state: Any,
+    source_lm_head_weight: Any,
+    shared_target_embed_weight: Any,
+    src_indices: Any,
+    temperature: float = 1.0,
+) -> Any:
+    """Project hidden states across models via overlapping vocabulary tokens.
+
+    Cross-family variant of vocabulary_mediated_projection(). Instead of
+    requiring identical tokenizers, finds shared tokens between different
+    tokenizers and projects through only the overlapping portion:
+      1. hidden @ W_src.T → full logits [vocab_size_src]
+      2. full_logits[..., src_indices] → shared logits [N_shared]
+      3. softmax(shared_logits/T) → renormalized probabilities
+      4. probs @ W_tgt_shared → target embedding [D_tgt]
+
+    Args:
+        hidden_state: Tensor of shape [..., D_src].
+        source_lm_head_weight: Source model's output head [vocab_size_src, D_src].
+        shared_target_embed_weight: Target embeddings for shared tokens [N_shared, D_tgt].
+        src_indices: LongTensor [N_shared] — source token IDs for shared tokens.
+        temperature: Softmax temperature. Lower = sharper (closer to argmax).
+
+    Returns:
+        Projected tensor of shape [..., D_tgt].
+    """
+    torch = _require_torch()
+
+    original_dtype = hidden_state.dtype
+    h = hidden_state.to(torch.float32)
+    w_src = source_lm_head_weight.detach().to(device=h.device, dtype=torch.float32)
+    w_tgt = shared_target_embed_weight.detach().to(device=h.device, dtype=torch.float32)
+    idx = src_indices.to(device=h.device)
+
+    # hidden @ W_src^T → full logits [..., vocab_size_src]
+    full_logits = torch.matmul(h, w_src.T)
+
+    # Extract shared token logits [..., N_shared]
+    shared_logits = full_logits[..., idx]
+
+    # Renormalized softmax over shared tokens
+    probs = torch.softmax(shared_logits / temperature, dim=-1)
+
+    # probs @ W_tgt_shared → target embedding [..., D_tgt]
+    projected = torch.matmul(probs, w_tgt)
+
+    return projected.to(original_dtype)
+
+
 def vocabulary_mediated_projection(
     hidden_state: Any,
     source_lm_head_weight: Any,
