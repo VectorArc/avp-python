@@ -1,16 +1,16 @@
 # AVP Benchmark Results: Latent vs Text Multi-Agent Communication
 
-> 73-78% token savings | 2-4x faster | 3 model families | GSM8K 4-agent chain
+> 51-78% token savings | 1.5-5x faster | 4 benchmarks | 5 models | same-model + cross-model
 
 ## TL;DR
 
 AVP transfers KV-cache between agents instead of regenerating text. Same multi-agent pipeline, fewer tokens, less compute.
 
-**Lead result:** On Llama-3.2-3B, latent communication is **2.1x faster** and **5 percentage points more accurate** than text chains, using **74% fewer tokens**. Latent skips redundant re-processing — the KV-cache carries computed context forward, so each agent reads prior reasoning directly from attention states instead of re-tokenizing and re-computing it.
+**Same-model lead result:** On GSM8K with Qwen2.5-7B, latent communication matches direct single-agent accuracy (**85%**) while beating text chains by 10 percentage points, using **51% fewer tokens**. Token savings scale with agent count: 51-57% for 2-agent handoffs, 73-78% for 4-agent chains.
 
-Token savings are consistent across all three model families tested: **73-78%** regardless of architecture, parameter count, or weight tying.
+**Cross-model lead result:** Zero-training vocabulary projection enables latent transfer across model families. Qwen2.5-7B to Llama-3.2-3B achieves **72% accuracy** on GSM8K with a **6 KB wire payload** — the researcher's reasoning compressed into a single embedding vector.
 
-**Caveats up front:** 20 samples per model (not statistically significant for small accuracy differences), consumer GPU (RTX 3070 Ti), small models (1.5B-3B). Larger model and larger sample results are [forthcoming](#upcoming).
+**Where it works and where it doesn't:** Latent transfer excels on structured tasks (math, reasoning). On reading comprehension (HotpotQA), single-embedding cross-model projection drops to 8% — the information bottleneck is too severe for tasks requiring distributed context across many passages.
 
 ---
 
@@ -19,24 +19,18 @@ Token savings are consistent across all three model families tested: **73-78%** 
 In a text-based multi-agent chain, each agent receives the full conversation history as text. Every agent re-tokenizes and re-processes everything prior agents already computed.
 
 ```
-┌──────────┐   text    ┌──────────┐   text    ┌──────────┐   text    ┌──────────┐
-│ Planner  │ ───────→  │  Critic  │ ───────→  │ Refiner  │ ───────→  │  Judger  │
-│          │           │          │           │          │           │          │
-│ prompt:  │           │ prompt:  │           │ prompt:  │           │ prompt:  │
-│  186 tok │           │  545 tok │           │ 1073 tok │           │ 1397 tok │
-│          │           │ (+334    │           │ (+850    │           │ (+1186   │
-│          │           │  wasted) │           │  wasted) │           │  wasted) │
-└──────────┘           └──────────┘           └──────────┘           └──────────┘
++-----------+   text    +-----------+   text    +-----------+   text    +-----------+
+|  Planner  | ---------> |  Critic   | ---------> |  Refiner  | ---------> |  Judger   |
+|           |           |           |           |           |           |           |
+| prompt:   |           | prompt:   |           | prompt:   |           | prompt:   |
+|  186 tok  |           |  545 tok  |           | 1073 tok  |           | 1397 tok  |
+|           |           | (+334     |           | (+850     |           | (+1186    |
+|           |           |  wasted)  |           |  wasted)  |           |  wasted)  |
++-----------+           +-----------+           +-----------+           +-----------+
               Prompt grows at every hop. Context tokens are redundantly re-processed.
 ```
 
-**The "communication tax":** Across our three models, **47-53% of all tokens in text mode are wasted re-processing** — context that was already computed by a prior agent but must be re-tokenized, re-embedded, and re-attended at every subsequent hop.
-
-| Model | Wasted context tokens/sample | % of total text tokens |
-|-------|------------------------------|------------------------|
-| Llama-3.2-3B | 1,987 | 48% |
-| Qwen2.5-1.5B | 1,647 | 47% |
-| DeepSeek-R1-1.5B | 2,668 | 53% |
+**The "communication tax":** Across three models tested, **47-53% of all tokens in text mode are wasted re-processing** — context that was already computed by a prior agent but must be re-tokenized, re-embedded, and re-attended at every subsequent hop.
 
 No multi-agent framework today transfers computed representations between agents. Every framework — LangChain, CrewAI, AutoGen, OpenAI Swarm — copies text.
 
@@ -47,189 +41,240 @@ No multi-agent framework today transfers computed representations between agents
 AVP (Agent Vector Protocol) transfers KV-cache states between agents instead of text. When Agent A finishes reasoning, its attention key-value cache — the computed representation of everything it processed — is serialized and injected into Agent B's context. Agent B reads the prior reasoning directly from attention states, skipping re-tokenization and re-computation.
 
 ```
-Text chain:     Planner generates text → Critic re-tokenizes and re-processes ALL of it
-AVP latent:     Planner generates KV-cache → Critic injects it → reads directly via attention
+Same-model:     Agent A's KV-cache --> inject into Agent B --> reads directly via attention
+Cross-model:    Agent A's hidden state --> project to B's embedding space --> inject into Agent B
+Text baseline:  Agent A generates text --> Agent B re-tokenizes and re-processes ALL of it
 ```
+
+For same-model agents, AVP transfers the full KV-cache (all layers, all positions). For cross-model agents, AVP projects the final hidden state through a vocabulary-mediated bottleneck into the target model's embedding space — zero training required.
 
 AVP defines a binary format, handshake, and codec — not the transport. It works alongside any agent protocol (A2A, MCP, gRPC, WebSockets). See the [full specification](https://github.com/VectorArc/avp-spec).
 
 ---
 
-## Benchmark Setup
+## Benchmark Suite
 
-**Task:** [GSM8K](https://arxiv.org/abs/2110.14168) grade-school math, 20 samples, seed=42
+### Tasks
 
-**Pipeline:** 4-agent chain — Planner (decomposes problem) → Critic (reviews plan) → Refiner (improves solution) → Judger (extracts final answer)
+| Benchmark | Agents | Topology | Dataset | What It Tests |
+|-----------|--------|----------|---------|---------------|
+| **GSM8K 2-Agent** | 2 | Handoff | [GSM8K](https://arxiv.org/abs/2110.14168) (math) | Delegation pattern — most common real-world scenario |
+| **HotpotQA** | 2 | Handoff | [HotpotQA](https://hotpotqa.github.io/) (QA) | Comprehension transfer — can KV-cache carry understanding? |
+| **Fan-Out** | 3 | Fan-out/fan-in | GSM8K (math) | Parallel specialists — non-sequential topology |
+| **GSM8K 4-Agent** | 4 | Chain | GSM8K (math) | Long sequential chain — maximum token savings |
 
-**Models:**
+### Models
 
-| Model | Params | Family | Tied Weights | Architecture |
-|-------|--------|--------|--------------|--------------|
-| meta-llama/Llama-3.2-3B-Instruct | 3.2B | Llama | Yes | LlamaForCausalLM |
-| Qwen/Qwen2.5-1.5B-Instruct | 1.5B | Qwen2 | Yes | Qwen2ForCausalLM |
-| deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B | 1.5B | Qwen2 | No (untied) | Qwen2ForCausalLM |
+| Model | Params | Family | Tied Weights |
+|-------|--------|--------|--------------|
+| Qwen/Qwen2.5-7B-Instruct | 7B | Qwen2 | No (untied) |
+| Qwen/Qwen2.5-1.5B-Instruct | 1.5B | Qwen2 | Yes |
+| meta-llama/Llama-3.2-3B-Instruct | 3.2B | Llama | Yes |
+| meta-llama/Llama-3.2-1B-Instruct | 1B | Llama | Yes |
+| deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B | 1.5B | Qwen2 | No (untied) |
 
-**Hardware:** NVIDIA RTX 3070 Ti Laptop (8GB VRAM), WSL2 Ubuntu, CUDA 12.8, PyTorch 2.9.1
+### Hardware
 
-**Modes compared:**
+- **Cloud (primary):** NVIDIA A100 80GB ([Modal](https://modal.com/))
+- **Local (supplementary):** NVIDIA RTX 3070 Ti Laptop (8GB VRAM), WSL2 Ubuntu, CUDA 12.8
+
+### Communication Modes
 
 | Mode | Description |
 |------|-------------|
 | **Direct** | Single agent, no chain (baseline for model capability) |
-| **Latent** (AVP) | 4-agent chain, KV-cache transfer between agents 1-3, hidden state injection to agent 4 |
-| **Text** | 4-agent chain, each agent generates text, concatenated into next agent's prompt |
-| **Hybrid** | 4-agent chain, KV-cache transfer + text summary at each hop |
+| **Latent** (AVP) | Multi-agent, KV-cache transfer between agents |
+| **Text** | Multi-agent, each agent generates text, concatenated into next prompt |
+| **Rosetta** | Cross-model, hidden state projection between different models |
 
 **Parameters:** `latent_steps=20`, `max_new_tokens=512`, `temperature=0.7`, `top_p=0.95`, `seed=42`
 
 ---
 
-## Results
+## Same-Model Results
 
-### Headline Numbers
+### GSM8K 2-Agent Handoff
 
-| Model | Mode | Accuracy | Time/sample | Tokens/sample | Token Savings vs Text |
-|-------|------|----------|-------------|---------------|-----------------------|
-| **Llama-3.2-3B** | Direct | **75%** (15/20) | 9.5s | 401 | — |
-| | **Latent (AVP)** | **70%** (14/20) | **22.2s** | **1,062** | **74%** |
-| | Text | 65% (13/20) | 46.2s | 4,109 | — |
-| **Qwen2.5-1.5B** | Direct | **50%** (10/20) | 14.4s | 427 | — |
-| | **Latent (AVP)** | 35% (7/20) | **13.4s** | **949** | **73%** |
-| | Text | 40% (8/20) | 50.5s | 3,493 | — |
-| **DeepSeek-R1-1.5B** | Direct | 15% (3/20) | 17.2s | 607 | — |
-| | **Latent (AVP)** | 45% (9/20) | **16.1s** | **1,113** | **78%** |
-| | Text | **70%** (14/20) | 57.4s | 5,039 | — |
+The most common real-world pattern: one agent researches, another solves. Single KV-cache transfer hop.
 
-Hybrid mode omitted from headline — it adds text summaries on top of latent transfer, doubling per-hop time with no accuracy benefit. See [Hybrid Mode](#hybrid-mode) below.
+**A100 cloud, n=50 (Llama) / n=20 (Qwen):**
 
-### What the Numbers Mean
+| Model | Direct | Latent (AVP) | Text | Token Savings vs Text |
+|-------|--------|-------------|------|-----------------------|
+| **Qwen2.5-7B** | **85%** (17/20) | **85%** (17/20) | 75% (15/20) | **51%** |
+| **Llama-3.2-3B** | **76%** (38/50) | **76%** (38/50) | 74% (37/50) | — |
+| Qwen2.5-1.5B | 55% (11/20) | 60% (12/20) | 65% (13/20) | **53%** |
 
-**Token savings are consistent (73-78%) regardless of model.** AVP's efficiency comes from eliminating redundant context re-processing — a structural property of the protocol, not dependent on any particular model's capabilities.
+**Key result:** On Qwen 7B (untied weights), latent matches direct at 85% and beats text by 10 percentage points. The KV-cache carries the researcher's full reasoning with zero accuracy cost.
 
-**Speed is proportional to fewer forward passes.** Latent mode doesn't run the GPU faster — it asks the GPU to do less work. Fewer tokens to process = fewer forward passes = less wall-clock time. Speedup ranges from 2.1x (Llama-3B) to 3.8x (Qwen-1.5B).
+On Llama-3.2-3B (n=50), all three modes converge — direct, latent, and text all within 2pp. Latent's advantage here is purely efficiency: same accuracy, fewer tokens.
 
-**Accuracy varies by model, not by protocol:**
+### HotpotQA Multi-Hop QA
 
-- **Llama-3.2-3B:** Latent (70%) beats text (65%) by 5pp. The strongest model benefits from latent's richer context representation — attention states carry more information than text summaries.
-- **Qwen2.5-1.5B:** Latent (35%) slightly trails text (40%) by 5pp. At 1.5B scale, multi-agent chains don't help — single-agent direct (50%) is best.
-- **DeepSeek-R1-1.5B:** Text (70%) dominates because DeepSeek-R1 uses verbose `<think>` chain-of-thought that exhausts the 512-token budget in direct mode (15%). Multi-agent text chains give each agent its own token budget. Latent (45%) captures intermediate benefit.
+Reading comprehension with 10 supporting paragraphs per question. The Finder agent reads paragraphs and identifies relevant facts; the Answerer synthesizes a final answer. In latent mode, the Answerer receives the Finder's KV-cache — it never sees the source paragraphs in its prompt.
 
-### Per-Hop Token Scaling
+**A100 cloud, n=20:**
 
-The structural advantage of latent communication: prompt size stays **roughly constant** across hops, while text prompts grow with every agent.
+| Model | Direct (EM / F1) | Latent (EM / F1) | Text (EM / F1) | Token Savings |
+|-------|-------------------|-------------------|-----------------|---------------|
+| **Qwen2.5-7B** | 50% / 0.63 | 40% / 0.63 | **50% / 0.72** | **22%** |
+| Qwen2.5-1.5B | 45% / 0.60 | 25% / 0.46 | 35% / 0.52 | **19%** |
 
-**Llama-3.2-3B per-hop prompt tokens (representative sample):**
+Latent F1 matches direct F1 on 7B (0.63 vs 0.63) despite lower exact match — the KV-cache transfers partial understanding even when exact answers differ. Text achieves highest F1 (0.72) because the Answerer can re-read the source paragraphs directly.
 
-| Agent | Text Prompt | Text Context (wasted) | Latent Prompt | Latent Steps |
-|-------|-------------|----------------------|---------------|--------------|
-| Planner | 186 | 0 | 164 | 20 |
-| Critic | 545 | 334 | 207 | 20 |
-| Refiner | 1,073 | 850 | 193 | 20 |
-| Judger | 1,397 | 1,186 | 201 | KV inject |
+Token savings are lower here (19-22%) because context paragraphs are large relative to agent output — the "re-processing tax" is proportionally smaller in 2-agent QA than in multi-agent reasoning chains.
 
-Text prompts grow: 186 → 545 → 1,073 → 1,397. Each agent re-processes all prior output.
-Latent prompts stay flat: 164, 207, 193, 201. Prior context arrives as pre-computed KV-cache.
+### Fan-Out Aggregation
 
-**Projected scaling with longer chains:**
+Two specialists approach a math problem differently (algebraic and arithmetic), then an aggregator combines results. Tests non-sequential topology with sequential KV injection.
 
-| # Agents | Est. Latent Time | Est. Text Time | Speedup |
-|----------|------------------|----------------|---------|
-| 4 | 22s (measured) | 46s (measured) | 2.1x |
-| 8 | ~41s | ~150s | ~3.7x |
-| 16 | ~78s | ~500s | ~6.4x |
+**A100 cloud, n=20:**
 
-Text scales roughly O(n²) — each new agent adds more prefill for all subsequent agents. Latent scales O(n) — each non-final agent adds a fixed cost (~4.6s for Llama-3B). **The more agents in the chain, the bigger the advantage.**
+| Model | Direct | Latent (AVP) | Text | Token Savings |
+|-------|--------|-------------|------|---------------|
+| **Qwen2.5-7B** | 85% (17/20) | 65% (13/20) | **90%** (18/20) | **56%** |
+| Qwen2.5-1.5B | 55% (11/20) | 55% (11/20) | 60% (12/20) | **60%** |
 
-### AVP Overhead Budget
+Fan-out latent drops at 7B (-25pp vs text). Sequential KV injection from two specialists — each approaching the problem differently — overwhelms the aggregator. The aggregator benefits from reading both specialists' explicit reasoning in text. Token savings remain strong (56-60%).
 
-AVP adds two costs that text doesn't have: KV-cache serialization (codec) and wire transfer.
+### GSM8K 4-Agent Chain (Original Benchmark)
 
-| Model | Codec Overhead | % of Latent Time | Wire Bytes/sample | Peak VRAM (Latent) | Peak VRAM (Text) |
-|-------|---------------|-----------------|-------------------|-------------------|-----------------|
-| Llama-3.2-3B | 531ms | 2.4% | 130 MB | 1,755 MB | 105 MB |
-| Qwen2.5-1.5B | 49ms | 0.4% | 29 MB | 1,006 MB | 33 MB |
-| DeepSeek-R1-1.5B | 87ms | 0.5% | 28 MB | 1,890 MB | 35 MB |
+4-agent chain (Planner, Critic, Refiner, Judger) with 3 KV-cache hops. The original benchmark — highest token savings due to cumulative context savings across 4 agents.
 
-**Codec overhead** is the total time spent serializing and deserializing KV-cache across all 3 hops. For both 1.5B models, it's **under 1%** of wall time. For Llama-3B, 2.4% — still negligible relative to the 2.1x speedup.
+**RTX 3070 Ti local, n=20:**
 
-**Wire transfer at datacenter speeds:**
+| Model | Direct | Latent (AVP) | Text | Token Savings | Speedup |
+|-------|--------|-------------|------|---------------|---------|
+| **Llama-3.2-3B** | **75%** (15/20) | **70%** (14/20) | 65% (13/20) | **74%** | **2.1x** |
+| Qwen2.5-1.5B | **50%** (10/20) | 35% (7/20) | 40% (8/20) | **73%** | **3.8x** |
+| DeepSeek-R1-1.5B | 15% (3/20) | 45% (9/20) | **70%** (14/20) | **78%** | **3.6x** |
 
-| Bandwidth | 1.5B models (28-29 MB) | 3B model (130 MB) |
-|-----------|------------------------|-------------------|
-| Shared memory | <1ms | <1ms |
-| 10 Gbps (datacenter) | ~23ms | ~104ms |
-| 1 Gbps (datacenter) | ~230ms | ~1.0s |
-| 100 Mbps (internet) | ~2.3s | ~10.4s |
+On Llama-3.2-3B: latent (70%) beats text (65%) by 5pp while being 2.1x faster with 74% token savings.
 
-At datacenter speeds (1-10 Gbps), wire transfer is under 5% of wall time. **At internet speeds (100 Mbps), wire transfer adds seconds per sample — AVP latent is a datacenter/same-machine technology.**
+DeepSeek-R1-1.5B is an outlier — verbose `<think>` chain-of-thought exhausts the 512-token budget in direct mode (15%). Multi-agent text chains help dramatically (70%) by giving each agent its own token budget. Latent captures intermediate benefit (45%).
 
-**VRAM:** Latent uses 17-54x more peak VRAM than text because it holds the full KV-cache across all hops. For 1.5B-3B models on any modern GPU (8GB+), this isn't a practical constraint. For 7B+ models, VRAM becomes a real consideration.
+### Token Savings Scale with Agent Count
 
----
+Token savings are a structural property of the protocol — eliminating redundant context re-processing — not dependent on model capability.
 
-## Cost Analysis
+| Agent Count | Token Savings | Example |
+|-------------|---------------|---------|
+| 2 agents | 51-57% | GSM8K 2-agent handoff |
+| 3 agents | 56-62% | Fan-out aggregation |
+| 4 agents | 73-78% | GSM8K 4-agent chain |
 
-Projected per-query costs using measured wall times and cloud GPU rental rates (Feb 2026). Costs assume similar throughput characteristics across GPUs — actual costs on faster GPUs (A100, H100) would be lower per query due to higher compute throughput.
+Text prompts grow **O(n^2)** — each new agent re-processes all prior output. Latent prompts stay **O(n)** — prior context arrives as pre-computed KV-cache. The more agents in the chain, the bigger the advantage.
 
-**Per-query cost (self-hosted GPU):**
+### AVP Overhead (A100)
 
-| Model | Mode | RTX 4090 ($0.34/hr) | A100 80GB ($1.39/hr) | H100 SXM ($2.69/hr) |
-|-------|------|---------------------|----------------------|----------------------|
-| Llama-3.2-3B | Latent | $0.0021 | $0.0086 | $0.0166 |
-| | Text | $0.0044 | $0.0178 | $0.0345 |
-| | **Savings** | **52%** | **52%** | **52%** |
-| Qwen2.5-1.5B | Latent | $0.0013 | $0.0052 | $0.0100 |
-| | Text | $0.0048 | $0.0195 | $0.0377 |
-| | **Savings** | **73%** | **73%** | **73%** |
-| DeepSeek-R1-1.5B | Latent | $0.0015 | $0.0062 | $0.0120 |
-| | Text | $0.0054 | $0.0222 | $0.0429 |
-| | **Savings** | **72%** | **72%** | **72%** |
+| Benchmark | Model | Codec Overhead | Wire Size | Peak VRAM (Latent) |
+|-----------|-------|---------------|-----------|-------------------|
+| GSM8K 2-Agent | 7B | 37ms | 8.5 MB | 295 MB |
+| GSM8K 2-Agent | 1.5B | 12ms | 4.2 MB | 943 MB |
+| HotpotQA | 7B | 237ms | 76 MB | 944 MB |
+| Fan-out | 7B | 248ms | 24.7 MB | 300 MB |
 
-Savings percentages are constant across GPUs — they're determined by the time ratio between latent and text modes.
+Codec overhead is **under 1% of wall time** for all configurations. Wire size scales with model hidden dimensions and sequence length. At datacenter bandwidth (1-10 Gbps), wire transfer adds under 5% to wall time.
 
-**Monthly projection at 100K queries/day (A100 80GB):**
+### Cost Implications
 
-| Model | Latent $/month | Text $/month | Monthly Savings |
-|-------|----------------|--------------|-----------------|
-| Llama-3.2-3B | $25,800 | $53,400 | **$27,600** |
-| Qwen2.5-1.5B | $15,600 | $58,500 | **$42,900** |
-| DeepSeek-R1-1.5B | $18,600 | $66,600 | **$48,000** |
+Cost savings are proportional to time savings — same GPU, less compute time. In the 4-agent chain (highest savings): latent is 2-4x faster than text, which translates directly to 50-75% cost reduction per query. At scale (100K queries/day on A100 at $1.39/hr), this is **$25,000-48,000/month** in compute savings depending on model.
+
+For 2-agent handoffs (most common pattern): ~50% cost reduction. The savings compound as agent count increases.
 
 ---
 
-## Hybrid Mode
+## Cross-Model Results (Rosetta Stone)
 
-Hybrid generates text summaries (~128 tokens, ~4-6s/hop) on top of latent KV-cache transfer. This doubles per-hop time with no accuracy benefit:
+### How It Works
 
-| Model | Latent Accuracy | Hybrid Accuracy | Latent Time | Hybrid Time |
-|-------|-----------------|-----------------|-------------|-------------|
-| Llama-3.2-3B | 70% | 65% | 22.2s | 36.6s |
-| Qwen2.5-1.5B | 35% | 30% | 13.4s | 30.9s |
-| DeepSeek-R1-1.5B | 45% | 45% | 16.1s | 27.4s |
+When agents run different models, the KV-cache can't transfer directly — different architectures have different dimensions and layer structures. Instead, AVP projects the source model's final hidden state into the target model's embedding space:
 
-Hybrid's value is **observability** (you can inspect what each agent communicated as text) and **graceful degradation** (text fallback if KV-cache is corrupted). It's a safety net, not a performance mode.
+```
+Source hidden state  -->  logits over vocabulary  (h @ W_src.T)
+                     -->  softmax probabilities
+                     -->  weighted average of target embeddings  (probs @ W_tgt)
+                     -->  inject into target model
+```
+
+**Same-family** (e.g., Qwen 7B to Qwen 1.5B): Models share a tokenizer, so the full vocabulary is used for projection.
+
+**Cross-family** (e.g., Qwen 7B to Llama 3B): Models have different tokenizers, but BPE tokenizers share many tokens (ASCII characters, common English words, punctuation). AVP identifies overlapping tokens (~85% for Qwen/Llama), renormalizes the probability distribution over just the shared tokens, and projects through the overlapping portion.
+
+Both methods require **zero training** — the projection uses only the models' existing embedding weight matrices.
+
+### GSM8K Cross-Model Results (A100, n=50)
+
+| Source --> Target | Projection | Accuracy | 95% CI | Wire Size |
+|-------------------|------------|----------|--------|-----------|
+| Qwen 7B --> Llama 3B | vocab overlap | **72%** (36/50) | [58%-83%] | 6 KB |
+| Llama 3B --> Qwen 7B | vocab overlap | **88%** (44/50) | [76%-94%] | 7 KB |
+| Qwen 7B --> Qwen 1.5B | vocab mediated | **62%** (31/50) | [48%-74%] | 6 KB |
+| Llama 3B --> Qwen 1.5B | vocab overlap | **60%** (30/50) | [46%-72%] | 3 KB |
+| Qwen 7B --> Llama 1B | vocab overlap | **40%** (20/50) | [28%-54%] | 4 KB |
+
+### Solver Capability Is the Dominant Variable
+
+Rosetta accuracy tracks the target model's own capability ceiling, not the source model's:
+
+| Target Model | Own Direct Accuracy | Best Rosetta | Penalty |
+|--------------|---------------------|--------------|---------|
+| Qwen 7B | 85% | 88% | none |
+| Llama 3B | 76% | 72% | -4pp |
+| Qwen 1.5B | 55% | 62% | none |
+| Llama 1B | ~50% | 40% | -10pp |
+
+The projection is not the bottleneck — the target model's inherent capability is. A 7B researcher doesn't make a 1B solver smarter; but it doesn't degrade the solver either (except on the weakest model).
+
+**Researcher quality barely matters.** Same target, different source: Qwen 7B to Qwen 1.5B = 62%, Llama 3B to Qwen 1.5B = 60%. The 7B's extra reasoning capability doesn't meaningfully help the 1.5B solver — the bottleneck is on the receiving end.
+
+### Task Sensitivity: Where Cross-Model Works and Fails
+
+The single-embedding projection was tested across three task types (A100, n=50, Qwen 7B to Llama 3B):
+
+| Benchmark | Rosetta Accuracy | Same-Model 7B Latent | Gap |
+|-----------|-----------------|---------------------|-----|
+| **GSM8K 2-Agent** | **72%** | 85% | -13pp |
+| **Fan-Out** | **56%** | 65% | -9pp |
+| **HotpotQA** | **8% EM** / 0.21 F1 | 40% EM / 0.63 F1 | catastrophic |
+
+Task complexity determines projection viability:
+
+- **Structured math** (GSM8K): The question is short and structured. A single embedding encodes "approach this as a rate problem" effectively. **72%.**
+- **Multi-specialist math** (fan-out): Two specialists' reasoning compressed to one vector. Partial signal loss, but math structure is forgiving. **56%.**
+- **Reading comprehension** (HotpotQA): The Finder reads 10 paragraphs (1000-2000 tokens) and must transfer that comprehension through a single 3072-dimensional vector. The information bottleneck is too severe. **8%.**
+
+The HotpotQA result demonstrates a fundamental limitation of single-embedding projection: distributed comprehension across many token positions cannot be compressed into one vector. Multi-embedding transfer (sending the last N hidden states) would address this.
+
+### Wire Size Comparison
+
+| Transfer Mode | Wire Size | Use Case |
+|--------------|-----------|----------|
+| Same-model KV-cache | 4-76 MB | Full-fidelity, same model/architecture |
+| Cross-model Rosetta | 3-7 KB | Cross-model/cross-family, structured tasks |
+| Text (JSON) | 1-5 KB | Universal fallback, any model combination |
+
+Cross-model Rosetta achieves near-solver-ceiling accuracy on math tasks with wire size comparable to text — but carries latent reasoning instead of surface tokens.
 
 ---
 
-## Limitations and Caveats
+## Limitations
 
-1. **Sample size (N=20).** Not statistically significant for small accuracy differences (5pp). The token savings (73-78%) and speed ratios (2-4x) are robust across all samples, but accuracy comparisons between modes need larger N to be conclusive.
+1. **Sample sizes.** Same-model cloud results use n=20-50. Cross-model results use n=50. Accuracy differences of 5-10pp are within sampling noise at these sizes. Token savings percentages (structural property) are robust; accuracy comparisons need n=200+ to be conclusive.
 
-2. **Small models only (1.5B-3B).** Latent communication may behave differently on 7B+ models where attention heads have more capacity. Larger model benchmarks are [planned](#upcoming).
+2. **Small models (1B-7B).** Latent transfer may behave differently on 13B+ models where attention heads have more capacity and can better utilize injected KV states.
 
-3. **Consumer GPU.** RTX 3070 Ti Laptop (8GB VRAM). Throughput characteristics differ from datacenter GPUs (A100, H100). Token savings percentages should hold, but absolute times and cost projections are approximate.
+3. **Single-embedding bottleneck.** Cross-model projection currently transfers one hidden state vector per hop. This works for structured tasks (math: 72%) but fails for comprehension (HotpotQA: 8%). Multi-embedding transfer (sending N hidden states) is planned.
 
-4. **Same-model constraint.** Latent mode requires the same model on all agents. Cross-model communication via vocabulary-mediated projection is implemented for same-family models (e.g., Qwen2.5-1.5B ↔ 0.5B) but not benchmarked here. Different-family models fall back to JSON.
+4. **Fan-out accuracy gap.** Sequential KV injection from multiple specialists loses signal at 7B scale (-25pp vs text). The aggregator benefits from reading each specialist's explicit reasoning rather than merged KV states.
 
-5. **Accuracy trade-offs are model-dependent.** Latent beats text on Llama-3B (+5pp), ties on DeepSeek-1.5B, and loses on Qwen-1.5B (-5pp). AVP doesn't make models smarter — it makes multi-agent communication cheaper. Whether the richer latent representation helps or hurts depends on the model's ability to utilize injected KV states.
+5. **Self-hosted only.** AVP requires direct KV-cache access. Cloud APIs (OpenAI, Anthropic, Google) don't expose KV-cache internals. AVP is for self-hosted deployments — vLLM, HuggingFace Transformers, or custom inference.
 
-6. **Bandwidth requirements.** 28-130 MB per sample (3 hops, fp32). Practical only at datacenter bandwidth (>=1 Gbps). Compression (fp16, int8, CacheGen-style) would reduce wire size 2-8x but is not yet implemented.
+6. **VRAM footprint.** Same-model latent uses up to ~1 GB peak for 1.5B-3B models. Cross-model rosetta requires both models in memory simultaneously (~10 GB for 7B + 3B).
 
-7. **VRAM footprint.** Latent uses 1-1.9 GB peak for 1.5B-3B models (vs 33-105 MB for text). Scales with model size — estimated ~4 GB for 7B (fp16), ~32 GB for 70B (fp16). Quantization would help.
+7. **Bandwidth requirements.** Same-model KV-cache transfer: 4-76 MB per sample. Practical only at datacenter bandwidth (>=1 Gbps). Cross-model projection: 3-7 KB — works anywhere.
 
-8. **Self-hosted only.** AVP requires direct KV-cache access. Cloud APIs (OpenAI, Anthropic, Google) don't expose this. AVP is for self-hosted deployments — vLLM, HuggingFace Transformers, or custom serving.
-
-9. **Temperature sampling variance.** With temperature=0.7, individual sample results vary between runs. Aggregate metrics (token savings, speed ratios) are stable; per-sample accuracy is noisy.
+8. **Temperature sampling variance.** With temperature=0.7, individual sample results vary between runs. Aggregate metrics (token savings, speed ratios) are stable; per-sample accuracy is noisy.
 
 ---
 
@@ -243,50 +288,63 @@ git clone https://github.com/VectorArc/avp-python.git
 cd avp-python
 pip install -e ".[latent]"
 pip install datasets
+```
 
-# Llama-3.2-3B (best story — latent faster AND more accurate)
+### Same-Model Benchmarks
+
+```bash
+# GSM8K 2-Agent — most realistic pattern, strongest latent result
+python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py \
+    --model_name Qwen/Qwen2.5-7B-Instruct \
+    --mode all --max_samples 20 --latent_steps 20 --seed 42
+
+# HotpotQA — reading comprehension, latent transfers understanding
+python benchmarks/hotpotqa/run_hotpotqa.py \
+    --model_name Qwen/Qwen2.5-7B-Instruct \
+    --mode all --max_samples 20 --latent_steps 20 --seed 42
+
+# Fan-out aggregation — non-sequential topology
+python benchmarks/fanout/run_fanout.py \
+    --model_name Qwen/Qwen2.5-7B-Instruct \
+    --mode all --max_samples 20 --latent_steps 20 --seed 42
+
+# Original 4-agent chain — highest token savings
 python benchmarks/gsm8k/run_gsm8k.py \
     --model_name meta-llama/Llama-3.2-3B-Instruct \
     --mode all --max_samples 20 --latent_steps 20 --seed 42
+```
 
-# Qwen2.5-1.5B (fastest latent, highest token savings ratio)
-python benchmarks/gsm8k/run_gsm8k.py \
-    --model_name Qwen/Qwen2.5-1.5B-Instruct \
-    --mode all --max_samples 20 --latent_steps 20 --seed 42
+### Cross-Model Benchmarks
 
-# DeepSeek-R1-1.5B (interesting CoT behavior)
-python benchmarks/gsm8k/run_gsm8k.py \
-    --model_name deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
-    --mode all --max_samples 20 --latent_steps 20 --seed 42
+```bash
+# Qwen 7B --> Llama 3B (cross-family, requires both models in memory)
+python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py \
+    --model_name Qwen/Qwen2.5-7B-Instruct \
+    --model_b meta-llama/Llama-3.2-3B-Instruct \
+    --mode rosetta --max_samples 20 --latent_steps 20 --seed 42
+
+# Same-family cross-size (Qwen 7B --> Qwen 1.5B)
+python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py \
+    --model_name Qwen/Qwen2.5-7B-Instruct \
+    --model_b Qwen/Qwen2.5-1.5B-Instruct \
+    --mode rosetta --max_samples 20 --latent_steps 20 --seed 42
 ```
 
 **Notes:**
-- First run downloads the model (~3-6 GB per model) from HuggingFace
-- Each `--mode all` run takes 30-50 minutes on RTX 3070 Ti
-- Results are saved to `benchmarks/results/` as JSON
+- First run downloads models (~3-6 GB each) from HuggingFace
+- Llama models are gated — request access at [meta-llama](https://huggingface.co/meta-llama) and set `HF_TOKEN`
+- Cross-model rosetta requires VRAM for both models simultaneously (~10 GB for 7B + 3B)
+- Each `--mode all` run takes 10-50 minutes depending on model size and GPU
 - Run `--mode latent` or `--mode text` individually for faster iteration
-- See `python benchmarks/gsm8k/run_gsm8k.py --help` for all options
+- Results are saved to `benchmarks/results/` as JSON
 
 ---
 
 ## Upcoming
 
-Results we plan to add to this document:
-
-- **RTX 5090 benchmarks** — datacenter-class consumer GPU, expected ~2x throughput vs 3070 Ti
-- **7B+ model benchmarks** — Qwen2.5-7B (untied weights, full realignment matrix), where latent may close the accuracy gap
-- **Cross-model (Rosetta Stone) benchmarks** — Qwen2.5-1.5B → 0.5B via vocabulary-mediated projection
-- **vLLM serving engine benchmarks** — AVP through vLLM's KVConnectorBase_V1 plugin, measuring serving throughput
-- **Larger sample sizes** — N=100+ for statistically significant accuracy comparisons
-- **Additional tasks** — beyond GSM8K (coding, summarization, multi-hop QA)
+- **Multi-embedding transfer** — Send N hidden states instead of one, addressing the single-embedding bottleneck for comprehension tasks
+- **Compact hidden state mode** — Same-model transfer using hidden states instead of full KV-cache (~60x smaller wire)
+- **Larger sample sizes** — N=200+ for statistically significant accuracy comparisons
+- **vLLM serving engine benchmarks** — AVP through vLLM's KVConnectorBase_V1 plugin
 - **KV-cache compression** — CacheGen-style compression targeting 3-4x wire size reduction
-
----
-
-## Raw Data
-
-Full per-sample results (including per-hop latencies, token counts, and wire bytes) are available in the benchmark result JSON files:
-
-- [`gsm8k_llama-3.2-3b-instruct_all_n20_20260222_121607.json`](../benchmarks/results/gsm8k_llama-3.2-3b-instruct_all_n20_20260222_121607.json)
-- [`gsm8k_qwen2.5-1.5b-instruct_all_n20_20260221_101245.json`](../benchmarks/results/gsm8k_qwen2.5-1.5b-instruct_all_n20_20260221_101245.json)
-- [`gsm8k_deepseek-r1-distill-qwen-1.5b_all_n20_20260222_090430.json`](../benchmarks/results/gsm8k_deepseek-r1-distill-qwen-1.5b_all_n20_20260222_090430.json)
+- **Larger models** — 13B+ to test scaling behavior of both same-model and cross-model transfer
