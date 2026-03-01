@@ -172,3 +172,5 @@ def test_health_endpoint(server):
 def test_create_app_returns_fastapi():
     app = create_app(echo_handler)
     assert hasattr(app, "routes")
+
+

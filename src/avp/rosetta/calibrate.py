@@ -4,12 +4,15 @@ Runs anchor texts through both models, collects last-layer hidden states,
 and fits a linear map via ridge regression or orthogonal Procrustes.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any, List, Optional, Union
 
 from ..errors import RealignmentError
 from ..types import ProjectionMethod
 from .._torch_compat import require_torch as _require_torch
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -200,6 +203,25 @@ def _have_shared_vocab(source_tokenizer: Any, target_tokenizer: Any) -> bool:
     return src_vocab == tgt_vocab
 
 
+def _count_vocab_overlap(
+    source_tokenizer: Any,
+    target_tokenizer: Any,
+    min_overlap: int = 100,
+) -> int:
+    """Count shared tokens between two tokenizers (lightweight, no torch).
+
+    Used by the handshake to quickly decide if vocab overlap is viable
+    without importing torch or building tensors.
+
+    Returns:
+        Number of shared tokens, or 0 if below min_overlap.
+    """
+    if not (hasattr(source_tokenizer, "get_vocab") and hasattr(target_tokenizer, "get_vocab")):
+        return 0
+    count = len(set(source_tokenizer.get_vocab()) & set(target_tokenizer.get_vocab()))
+    return count if count >= min_overlap else 0
+
+
 def _compute_vocab_overlap(
     source_tokenizer: Any,
     target_tokenizer: Any,
@@ -212,16 +234,13 @@ def _compute_vocab_overlap(
     """
     torch = _require_torch()
 
-    if not (hasattr(source_tokenizer, "get_vocab") and hasattr(target_tokenizer, "get_vocab")):
+    if _count_vocab_overlap(source_tokenizer, target_tokenizer, min_overlap) == 0:
         return None
 
-    src_vocab = source_tokenizer.get_vocab()  # {token_str: id}
+    src_vocab = source_tokenizer.get_vocab()
     tgt_vocab = target_tokenizer.get_vocab()
 
-    shared_tokens = sorted(set(src_vocab.keys()) & set(tgt_vocab.keys()))
-    if len(shared_tokens) < min_overlap:
-        return None
-
+    shared_tokens = sorted(set(src_vocab) & set(tgt_vocab))
     src_ids = [src_vocab[t] for t in shared_tokens]
     tgt_ids = [tgt_vocab[t] for t in shared_tokens]
 
@@ -230,6 +249,19 @@ def _compute_vocab_overlap(
         torch.tensor(tgt_ids, dtype=torch.long),
         shared_tokens,
     )
+
+
+def _auto_save_map(avp_map: AVPMap) -> None:
+    """Save an AVPMap to the registry, logging failures as warnings."""
+    from .registry import save_map
+    try:
+        save_map(avp_map)
+        logger.info(
+            "Auto-saved AVPMap to registry: %s → %s",
+            avp_map.source_hash[:16], avp_map.target_hash[:16],
+        )
+    except Exception:
+        logger.warning("Failed to auto-save AVPMap to registry", exc_info=True)
 
 
 def calibrate(
@@ -242,6 +274,7 @@ def calibrate(
     lambda_reg: float = 1e-4,
     validation_split: float = 0.2,
     device: Optional[str] = None,
+    auto_save: bool = True,
 ) -> AVPMap:
     """Calibrate a projection matrix between two models.
 
@@ -259,6 +292,8 @@ def calibrate(
         lambda_reg: Ridge regularization coefficient.
         validation_split: Fraction of anchors held out for validation.
         device: Device for computation. Defaults to source model's device.
+        auto_save: If True, automatically save the AVPMap to the registry
+            (~/.avp/maps/) so subsequent handshakes can discover it. Default True.
 
     Returns:
         AVPMap with the learned or vocabulary-mediated projection.
@@ -332,7 +367,7 @@ def calibrate(
             f"src_vocab={src_vocab_size}, tgt_vocab={tgt_vocab_size}"
         )
 
-        return AVPMap(
+        avp_map = AVPMap(
             source_model_id=src_identity.model_id,
             source_hash=src_hash,
             source_dim=src_dim,
@@ -350,6 +385,9 @@ def calibrate(
             overlap_count=len(shared_tokens),
             overlap_ratio=overlap_ratio,
         )
+        if auto_save:
+            _auto_save_map(avp_map)
+        return avp_map
 
     if resolved == ProjectionMethod.VOCAB_MEDIATED:
         if not shared_vocab:
@@ -374,7 +412,7 @@ def calibrate(
         if tgt_dim is None or tgt_dim == 0:
             tgt_dim = getattr(target_model.config, "n_embd", 0)
 
-        return AVPMap(
+        avp_map = AVPMap(
             source_model_id=src_identity.model_id,
             source_hash=src_hash,
             source_dim=src_dim,
@@ -388,6 +426,9 @@ def calibrate(
             anchor_count=0,
             validation_score=1.0,  # no calibration needed
         )
+        if auto_save:
+            _auto_save_map(avp_map)
+        return avp_map
 
     # --- Learned projection (ridge / procrustes) ---
     if anchor_texts is None:
@@ -477,7 +518,7 @@ def calibrate(
     else:
         validation_score = 0.0
 
-    return AVPMap(
+    avp_map = AVPMap(
         source_model_id=src_identity.model_id,
         source_hash=src_hash,
         source_dim=d_src,
@@ -491,3 +532,6 @@ def calibrate(
         anchor_count=n_train,
         validation_score=validation_score,
     )
+    if auto_save:
+        _auto_save_map(avp_map)
+    return avp_map

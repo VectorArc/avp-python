@@ -1356,3 +1356,63 @@ class TestVocabOverlap:
         assert loaded.tgt_indices is None
         assert loaded.overlap_count == 0
         assert loaded.overlap_ratio == 0.0
+
+
+# ---------------------------------------------------------------------------
+# calibrate() auto-save tests
+# ---------------------------------------------------------------------------
+
+
+@requires_torch
+@requires_transformers
+class TestCalibrateAutoSave:
+    """Tests for calibrate() auto_save parameter."""
+
+    def test_calibrate_auto_saves_to_registry(self, tiny_gpt2_64, tiny_gpt2_128, tmp_path):
+        """calibrate() with auto_save=True writes .avp-map file to registry."""
+        import avp.rosetta.registry as registry
+        from avp.rosetta.calibrate import calibrate
+        from avp.rosetta.registry import find_map
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = VocabMockTokenizer(vocab_size=256)
+
+        old_dir = registry._MAP_DIR
+        try:
+            registry._MAP_DIR = tmp_path
+            avp_map = calibrate(
+                src_model, tgt_model, src_tok, tgt_tok,
+                device="cpu", auto_save=True,
+            )
+            # Verify map file was created
+            found = find_map(avp_map.source_hash, avp_map.target_hash, map_dir=tmp_path)
+            assert found is not None
+            assert found.exists()
+        finally:
+            registry._MAP_DIR = old_dir
+
+    def test_calibrate_auto_save_disabled(self, tiny_gpt2_64, tiny_gpt2_128, tmp_path):
+        """calibrate() with auto_save=False does not write .avp-map file."""
+        import avp.rosetta.registry as registry
+        from avp.rosetta.calibrate import calibrate
+        from avp.rosetta.registry import find_map
+
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = VocabMockTokenizer(vocab_size=256)
+
+        old_dir = registry._MAP_DIR
+        try:
+            registry._MAP_DIR = tmp_path
+            avp_map = calibrate(
+                src_model, tgt_model, src_tok, tgt_tok,
+                device="cpu", auto_save=False,
+            )
+            # Verify no map file was created
+            found = find_map(avp_map.source_hash, avp_map.target_hash, map_dir=tmp_path)
+            assert found is None
+        finally:
+            registry._MAP_DIR = old_dir

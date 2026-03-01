@@ -135,17 +135,23 @@ def extract_model_identity(
     if tokenizer is not None:
         tok_hash = compute_tokenizer_hash(tokenizer)
 
+    # Standard keys with GPT-2 fallbacks (n_embd, n_layer, n_head)
+    hidden_dim = config_dict.get("hidden_size", 0) or config_dict.get("n_embd", 0)
+    num_layers = config_dict.get("num_hidden_layers", 0) or config_dict.get("n_layer", 0)
+    num_heads = config_dict.get("num_attention_heads", 0) or config_dict.get("n_head", 0)
+    num_kv_heads = config_dict.get("num_key_value_heads", num_heads)
+    head_dim = config_dict.get("head_dim", 0) or (
+        hidden_dim // num_heads if num_heads > 0 else 0
+    )
+
     return ModelIdentity(
         model_family=model_family,
         model_id=model_id,
         model_hash=model_hash,
-        hidden_dim=config_dict.get("hidden_size", 0),
-        num_layers=config_dict.get("num_hidden_layers", 0),
-        num_kv_heads=config_dict.get("num_key_value_heads", config_dict.get("num_attention_heads", 0)),
-        head_dim=config_dict.get("head_dim", 0) or (
-            config_dict.get("hidden_size", 0) // config_dict.get("num_attention_heads", 1)
-            if config_dict.get("num_attention_heads", 0) > 0 else 0
-        ),
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
         tokenizer_hash=tok_hash,
     )
 
@@ -154,7 +160,12 @@ class CompatibilityResolver:
     """Resolves communication mode between two agents based on their identities."""
 
     @staticmethod
-    def resolve(local: ModelIdentity, remote: ModelIdentity) -> SessionInfo:
+    def resolve(
+        local: ModelIdentity,
+        remote: ModelIdentity,
+        source_tokenizer: Any = None,
+        target_tokenizer: Any = None,
+    ) -> SessionInfo:
         """Determine communication mode based on model identities.
 
         Resolution rules (in order):
@@ -162,11 +173,16 @@ class CompatibilityResolver:
             2. model_family + hidden_dim + num_layers match → LATENT (structural match)
             3. shared tokenizer_hash → LATENT (vocab-mediated, avp_map_id="vocab:...")
             4. Rosetta Stone .avp-map file exists → LATENT (pre-calibrated)
-            5. Otherwise → JSON
+            5. Vocabulary overlap via tokenizer objects → LATENT (~360ms one-time)
+            6. Otherwise → JSON
 
         Args:
             local: Local agent's model identity.
             remote: Remote agent's model identity.
+            source_tokenizer: Optional source tokenizer object (must have
+                get_vocab()). Enables rule 5 vocabulary overlap discovery.
+            target_tokenizer: Optional target tokenizer object (must have
+                get_vocab()). Enables rule 5 vocabulary overlap discovery.
 
         Returns:
             SessionInfo with session_id and resolved mode.
@@ -216,6 +232,22 @@ class CompatibilityResolver:
                 avp_map_id = map_id(local.model_hash, remote.model_hash)
                 resolution_path = "avp_map_file"
                 logger.debug("Handshake: avp_map_file (id=%s)", avp_map_id)
+
+        # Rule 5: Vocabulary overlap (lightweight count, no torch needed)
+        if (
+            mode == CommunicationMode.JSON
+            and source_tokenizer is not None
+            and target_tokenizer is not None
+        ):
+            from .rosetta.calibrate import _count_vocab_overlap
+            overlap_count = _count_vocab_overlap(source_tokenizer, target_tokenizer)
+            if overlap_count > 0:
+                mode = CommunicationMode.LATENT
+                avp_map_id = f"vocab_overlap:{overlap_count}"
+                resolution_path = "vocab_overlap"
+                logger.debug(
+                    "Handshake: vocab_overlap (%d shared tokens)", overlap_count,
+                )
 
         if resolution_path == "json_fallback":
             logger.debug(
