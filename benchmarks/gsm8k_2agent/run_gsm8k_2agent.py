@@ -13,6 +13,9 @@ Usage:
 
     # Latent vs text comparison
     python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py --mode both --verbose
+
+    # Cross-model rosetta mode
+    python benchmarks/gsm8k_2agent/run_gsm8k_2agent.py --mode rosetta --model_name Qwen/Qwen2.5-1.5B-Instruct --model_b Qwen/Qwen2.5-0.5B-Instruct --verbose
 """
 
 import argparse
@@ -36,13 +39,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "direct", "both", "all"],
+        choices=["latent", "text", "direct", "rosetta", "both", "all"],
         default="all",
         help="Pipeline(s) to run (default: all)",
     )
     parser.add_argument(
         "--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct",
-        help="HuggingFace model ID (default: Qwen/Qwen2.5-1.5B-Instruct)",
+        help="HuggingFace model ID for primary model (default: Qwen/Qwen2.5-1.5B-Instruct)",
+    )
+    parser.add_argument(
+        "--model_b", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+        help="Second model for rosetta mode (default: Qwen/Qwen2.5-0.5B-Instruct)",
     )
     parser.add_argument("--device", type=str, default=None, help="Device: cpu/mps/cuda")
     parser.add_argument("--max_samples", type=int, default=10, help="Number of samples (default: 10)")
@@ -92,19 +99,24 @@ def run_benchmark(config: dict) -> dict:
     verbose = config.get("verbose", False)
     output_dir = config.get("output_dir")
 
+    model_b_name = config.get("model_b", "Qwen/Qwen2.5-0.5B-Instruct")
+
     run_direct = mode in ("direct", "all")
     run_latent = mode in ("latent", "both", "all")
     run_text = mode in ("text", "both", "all")
+    run_rosetta = mode in ("rosetta", "all")
 
     print(f"Device: {device}")
     print(f"Mode: {mode}")
-    print(f"Model: {model_name}")
+    print(f"Model A: {model_name}")
+    if run_rosetta:
+        print(f"Model B: {model_b_name}")
     print(f"Samples: {max_samples}")
     print(f"Latent steps: {latent_steps}")
     print(f"Max new tokens: {max_new_tokens}")
     print(f"Temperature: {temperature}")
     print(f"Seed: {seed}")
-    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}")
+    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, rosetta={run_rosetta}")
     print()
 
     dataset = load_dataset(max_samples)
@@ -113,6 +125,7 @@ def run_benchmark(config: dict) -> dict:
     direct_results = None
     latent_results = None
     text_results = None
+    rosetta_results = None
 
     if run_direct:
         from benchmarks.gsm8k_2agent.pipeline_direct import run_direct_benchmark
@@ -158,6 +171,45 @@ def run_benchmark(config: dict) -> dict:
             top_p=top_p, verbose=verbose,
         )
 
+    if run_rosetta:
+        from benchmarks.gsm8k_2agent.pipeline_rosetta import run_rosetta_benchmark
+        from avp.rosetta.calibrate import calibrate
+
+        print("\n" + "=" * 50)
+        print("Running ROSETTA (cross-model projection) pipeline...")
+        print(f"  Model A (Researcher): {model_name}")
+        print(f"  Model B (Solver):     {model_b_name}")
+        print("=" * 50)
+        set_seed(seed)
+
+        # Load model B (model A is already loaded)
+        model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
+
+        # Calibrate once — instant for same-family vocab-mediated
+        print("Calibrating Rosetta Stone projection...")
+        avp_map = calibrate(
+            source_model=model, target_model=model_b,
+            source_tokenizer=tokenizer, target_tokenizer=tokenizer_b,
+            device=device,
+        )
+        print(f"  Method: {avp_map.method.value}, "
+              f"validation_score: {avp_map.validation_score:.4f}, "
+              f"{avp_map.source_dim}d → {avp_map.target_dim}d")
+
+        rosetta_results = run_rosetta_benchmark(
+            conn_a=connector, model_a=model, tokenizer_a=tokenizer,
+            identity_a=identity, model_b=model_b, tokenizer_b=tokenizer_b,
+            device=device, avp_map=avp_map, dataset=dataset,
+            latent_steps=latent_steps, max_new_tokens=max_new_tokens,
+            temperature=temperature, top_p=top_p, verbose=verbose,
+        )
+
+        # Free model B to reclaim GPU memory
+        del model_b, tokenizer_b, connector_b, identity_b
+        if device == "cuda":
+            import torch
+            torch.cuda.empty_cache()
+
     # Print summary
     from benchmarks.shared.evaluate_common import print_summary, compute_stats, compute_agreement
 
@@ -168,6 +220,8 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Latent (AVP)", 13, latent_results))
     if text_results is not None:
         modes.append(("Text", 13, text_results))
+    if rosetta_results is not None:
+        modes.append(("Rosetta", 13, rosetta_results))
 
     # Compute agreement across available modes
     available = {}
@@ -177,6 +231,8 @@ def run_benchmark(config: dict) -> dict:
         available["text"] = text_results
     if latent_results is not None:
         available["latent"] = latent_results
+    if rosetta_results is not None:
+        available["rosetta"] = rosetta_results
     agreement_data = compute_agreement(available) if len(available) > 1 else None
 
     print_summary(
@@ -196,7 +252,8 @@ def run_benchmark(config: dict) -> dict:
     output_data = {
         "config": {
             "benchmark": "gsm8k_2agent",
-            "model_name": model_name,
+            "model_a": model_name,
+            "model_b": model_b_name if run_rosetta else None,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
@@ -221,6 +278,11 @@ def run_benchmark(config: dict) -> dict:
         output_data["text"] = {
             "summary": compute_stats(text_results),
             "samples": text_results,
+        }
+    if rosetta_results is not None:
+        output_data["rosetta"] = {
+            "summary": compute_stats(rosetta_results),
+            "samples": rosetta_results,
         }
     if agreement_data is not None:
         output_data["agreement"] = agreement_data
