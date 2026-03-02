@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "avp"
 dynamic = ["version"]
-description = "Transfer LLM KV-cache between agents instead of regenerating text — 73-78% fewer tokens, 2-4x faster multi-agent pipelines"
+description = "Multi-agent text handoffs discard KV-cache and attention state. AVP transfers that state directly — 51-78% fewer tokens, 1.5-5x faster."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.9"
