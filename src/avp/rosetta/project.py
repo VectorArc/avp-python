@@ -85,11 +85,12 @@ def vocab_overlap_projection(
     w_tgt = shared_target_embed_weight.detach().to(device=h.device, dtype=torch.float32)
     idx = src_indices.to(device=h.device)
 
-    # hidden @ W_src^T → full logits [..., vocab_size_src]
-    full_logits = torch.matmul(h, w_src.T)
-
-    # Extract shared token logits [..., N_shared]
-    shared_logits = full_logits[..., idx]
+    # Pre-index source weights to shared tokens, then matmul
+    # Equivalent to: (h @ W_src.T)[..., idx], but avoids computing
+    # logits for non-shared tokens (~15% savings at 85% overlap,
+    # more for lower-overlap pairs).
+    w_src_shared = w_src[idx]  # [N_shared, D_src]
+    shared_logits = torch.matmul(h, w_src_shared.T)  # [..., N_shared]
 
     # Renormalized softmax over shared tokens
     probs = torch.softmax(shared_logits / temperature, dim=-1)
