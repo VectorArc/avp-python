@@ -283,11 +283,15 @@ def run_benchmark(config: dict) -> dict:
     run_latent = mode in ("latent", "both", "all")
     run_text = mode in ("text", "both", "all")
     run_rosetta = mode in ("rosetta", "all")
+    run_universal = mode in ("universal",)  # Explicit only — requires trained adapters
+
+    k_tokens = config.get("k_tokens", 64)
+    rollout_steps = config.get("rollout_steps", 256)
 
     print(f"Device: {device}")
     print(f"Mode: {mode}")
     print(f"Model: {model_name}")
-    if run_rosetta and model_b_name:
+    if (run_rosetta or run_universal) and model_b_name:
         print(f"Model B: {model_b_name}")
     print(f"Samples: {max_samples}")
     print(f"Agents: {num_agents}")
@@ -296,7 +300,8 @@ def run_benchmark(config: dict) -> dict:
     print(f"Max context tokens: {max_context_tokens}")
     print(f"Temperature: {temperature}")
     print(f"Seed: {seed}")
-    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, rosetta={run_rosetta}")
+    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, "
+          f"rosetta={run_rosetta}, universal={run_universal}")
     print()
 
     dataset = load_dataset(max_samples, max_context_tokens)
@@ -306,6 +311,7 @@ def run_benchmark(config: dict) -> dict:
     latent_results = None
     text_results = None
     rosetta_results = None
+    universal_results = None
 
     if run_direct:
         from benchmarks.hotpotqa.pipeline_direct import run_direct_benchmark
@@ -393,6 +399,53 @@ def run_benchmark(config: dict) -> dict:
             import torch
             torch.cuda.empty_cache()
 
+    if run_universal:
+        from benchmarks.hotpotqa.pipeline_universal import run_universal_benchmark
+        from avp.universal.adapter_registry import load_adapter
+
+        if not model_b_name:
+            print("ERROR: --model_b is required for universal mode.")
+        else:
+            print("\n" + "=" * 50)
+            print("Running UNIVERSAL (learned cross-model) pipeline...")
+            print(f"  Model A (Finder):    {model_name}")
+            print(f"  Model B (Answerer):  {model_b_name}")
+            print("=" * 50)
+            set_seed(seed)
+
+            model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
+
+            hash_a = connector._model_hash
+            hash_b = connector_b._model_hash
+            adapter_a = load_adapter(hash_a, device=device)
+            adapter_b = load_adapter(hash_b, device=device)
+
+            if adapter_a is None or adapter_b is None:
+                missing = []
+                if adapter_a is None:
+                    missing.append(f"model A ({model_name}, hash={hash_a[:16]})")
+                if adapter_b is None:
+                    missing.append(f"model B ({model_b_name}, hash={hash_b[:16]})")
+                print(f"ERROR: No trained universal adapter found for {', '.join(missing)}.")
+                print("Train adapters first: python universal/train.py --model <model_id> --steps 400")
+            else:
+                print(f"  Adapter A: {adapter_a.model_id} (d={adapter_a.d_source})")
+                print(f"  Adapter B: {adapter_b.model_id} (d={adapter_b.d_source})")
+
+                universal_results = run_universal_benchmark(
+                    conn_a=connector, model_a=model, tokenizer_a=tokenizer,
+                    identity_a=identity, model_b=model_b, tokenizer_b=tokenizer_b,
+                    device=device, adapter_a=adapter_a, adapter_b=adapter_b,
+                    dataset=dataset, rollout_steps=rollout_steps, k_tokens=k_tokens,
+                    max_new_tokens=max_new_tokens, temperature=temperature,
+                    top_p=top_p, verbose=verbose,
+                )
+
+            del model_b, tokenizer_b, connector_b, identity_b
+            if device == "cuda":
+                import torch
+                torch.cuda.empty_cache()
+
     # Print summary
     from benchmarks.shared.evaluate_common import compute_agreement
 
@@ -405,6 +458,8 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Text", 13, text_results))
     if rosetta_results is not None:
         modes.append(("Rosetta", 13, rosetta_results))
+    if universal_results is not None:
+        modes.append(("Universal", 13, universal_results))
 
     # Compute agreement across available modes
     available = {}
@@ -416,6 +471,8 @@ def run_benchmark(config: dict) -> dict:
         available["latent"] = latent_results
     if rosetta_results is not None:
         available["rosetta"] = rosetta_results
+    if universal_results is not None:
+        available["universal"] = universal_results
     agreement_data = compute_agreement(available) if len(available) > 1 else None
 
     print_hotpotqa_summary(
@@ -434,7 +491,7 @@ def run_benchmark(config: dict) -> dict:
         "config": {
             "benchmark": "hotpotqa",
             "model_a": model_name,
-            "model_b": model_b_name if run_rosetta else None,
+            "model_b": model_b_name if (run_rosetta or run_universal) else None,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
@@ -466,6 +523,11 @@ def run_benchmark(config: dict) -> dict:
         output_data["rosetta"] = {
             "summary": compute_accuracy(rosetta_results),
             "samples": rosetta_results,
+        }
+    if universal_results is not None:
+        output_data["universal"] = {
+            "summary": compute_accuracy(universal_results),
+            "samples": universal_results,
         }
     if agreement_data is not None:
         output_data["agreement"] = agreement_data
