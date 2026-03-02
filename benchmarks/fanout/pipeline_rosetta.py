@@ -151,6 +151,7 @@ def run_rosetta_pipeline(
             torch.cuda.empty_cache()
 
         # --- Aggregator on model B ---
+        inject_t0 = time.perf_counter()
         embed_input = rosetta_embeds.to(device).to(model_b.dtype)
         embed_mask = torch.ones(
             (1, embed_input.shape[1]), dtype=torch.long, device=device,
@@ -163,6 +164,7 @@ def run_rosetta_pipeline(
                 return_dict=True,
             )
         past_kv_b = prime_out.past_key_values
+        injection_ms = (time.perf_counter() - inject_t0) * 1000
 
         messages = build_latent_prompt(AGGREGATOR.role, question)
         prompt_text = render_prompt(tokenizer_b, messages)
@@ -224,6 +226,7 @@ def run_rosetta_pipeline(
         "tokens_per_sec": tokens_per_sec,
         "peak_memory_mb": mem["peak_memory_mb"],
         "projection_overhead_ms": projection_ms,
+        "injection_overhead_ms": injection_ms,
         "projection_wire_bytes": wire_bytes,
         "num_transfer_states": num_transfer_states,
         "parallel_speedup_potential": parallel_speedup_potential,
