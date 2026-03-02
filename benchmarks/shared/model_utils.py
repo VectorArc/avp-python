@@ -59,13 +59,3 @@ def load_model(model_name: str, device: str):
           f"kv_heads={identity.num_kv_heads}")
 
     return model, tokenizer, connector, identity
-
-
-def load_model_pair(model_a_name: str, model_b_name: str, device: str):
-    """Load two models for cross-model benchmarks.
-
-    Returns (model_a, tok_a, conn_a, id_a, model_b, tok_b, conn_b, id_b).
-    """
-    model_a, tok_a, conn_a, id_a = load_model(model_a_name, device)
-    model_b, tok_b, conn_b, id_b = load_model(model_b_name, device)
-    return model_a, tok_a, conn_a, id_a, model_b, tok_b, conn_b, id_b

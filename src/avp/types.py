@@ -70,14 +70,7 @@ class DataType(enum.IntEnum):
     INT8 = 3
 
 
-# Mapping between DataType enum and numpy/string representations
-_DTYPE_TO_NP = {
-    DataType.FLOAT32: np.float32,
-    DataType.FLOAT16: np.float16,
-    DataType.INT8: np.int8,
-    # BFLOAT16 has no numpy equivalent; handled via torch
-}
-
+# Mapping between DataType enum and string representations
 _DTYPE_TO_STR = {
     DataType.FLOAT32: "float32",
     DataType.FLOAT16: "float16",

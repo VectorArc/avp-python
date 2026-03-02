@@ -361,10 +361,11 @@ def calibrate(
         if tgt_dim is None or tgt_dim == 0:
             tgt_dim = getattr(target_model.config, "n_embd", 0)
 
-        print(
-            f"[AVP] Vocab overlap: {len(shared_tokens)} shared tokens "
-            f"({overlap_ratio:.1%} of smaller vocab), "
-            f"src_vocab={src_vocab_size}, tgt_vocab={tgt_vocab_size}"
+        logger.info(
+            "Vocab overlap: %d shared tokens (%.1f%% of smaller vocab), "
+            "src_vocab=%d, tgt_vocab=%d",
+            len(shared_tokens), overlap_ratio * 100,
+            src_vocab_size, tgt_vocab_size,
         )
 
         avp_map = AVPMap(

@@ -15,7 +15,7 @@ from typing import Any, List, Optional
 
 from .._torch_compat import require_torch as _require_torch
 from ..types import CommunicationMode, ProjectionMethod
-from .calibrate import AVPMap
+from .calibrate import AVPMap, _have_shared_vocab
 
 # Five test sentences — one from each category in DEFAULT_ANCHORS.
 VALIDATION_TEXTS: List[str] = [
@@ -45,13 +45,6 @@ class ValidationResult:
     perplexity: Optional[float]                # None if shared tokenizer not available
     recommended_mode: CommunicationMode
     detail: str                                # Human-readable explanation
-
-
-def _have_shared_vocab(source_tokenizer: Any, target_tokenizer: Any) -> bool:
-    """Check if two tokenizers share the same vocabulary."""
-    if not (hasattr(source_tokenizer, "get_vocab") and hasattr(target_tokenizer, "get_vocab")):
-        return False
-    return source_tokenizer.get_vocab() == target_tokenizer.get_vocab()
 
 
 def _extract_per_token_hidden_states(

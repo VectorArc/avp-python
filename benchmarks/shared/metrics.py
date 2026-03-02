@@ -1,7 +1,6 @@
-"""GPU memory tracking and result dict building for benchmarks."""
+"""GPU memory tracking for benchmarks."""
 
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
 
 import torch
 
@@ -26,30 +25,3 @@ def gpu_memory_tracker(device: str):
             result["peak_memory_mb"] = (
                 torch.cuda.max_memory_allocated() - mem_before
             ) / (1024 * 1024)
-
-
-def build_result_dict(
-    *,
-    question: str,
-    gold: Optional[str],
-    prediction: Optional[str],
-    raw_output: str,
-    correct: bool,
-    wall_time: float,
-    mode: str,
-    peak_memory_mb: Optional[float] = None,
-    **extra,
-) -> Dict[str, Any]:
-    """Build a standard result dict with common fields."""
-    result = {
-        "question": question,
-        "gold": gold,
-        "prediction": prediction,
-        "raw_output": raw_output,
-        "correct": correct,
-        "wall_time": wall_time,
-        "peak_memory_mb": peak_memory_mb,
-        "mode": mode,
-    }
-    result.update(extra)
-    return result
