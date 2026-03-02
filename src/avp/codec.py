@@ -22,6 +22,7 @@ from .types import (
     FLAG_HAS_MAP,
     FLAG_HYBRID,
     FLAG_KV_CACHE,
+    FLAG_URT,
     HEADER_SIZE,
     MAGIC,
     PROTOCOL_VERSION,
@@ -95,6 +96,8 @@ def encode(
         flags |= FLAG_HAS_MAP
     if metadata.payload_type == PayloadType.KV_CACHE:
         flags |= FLAG_KV_CACHE
+    if metadata.payload_type == PayloadType.URT:
+        flags |= FLAG_URT
 
     # Pack header
     header = struct.pack(
@@ -231,6 +234,34 @@ def encode_kv_cache(
     """Encode serialized KV-cache bytes into an AVP message."""
     metadata.payload_type = PayloadType.KV_CACHE
     return encode(kv_bytes, metadata, compression)
+
+
+def encode_urt(
+    payload: bytes,
+    metadata: AVPMetadata,
+    k_tokens: int,
+    d_universal: int,
+    adapter_version: int = 1,
+    compression: CompressionLevel = CompressionLevel.NONE,
+) -> bytes:
+    """Encode Universal Representation Tokens into an AVP message.
+
+    Args:
+        payload: Raw tensor bytes of universal tokens [K+2, D_universal].
+        metadata: AVPMetadata (payload_type will be set to URT).
+        k_tokens: Number of semantic tokens (K, excluding special tokens).
+        d_universal: Universal space dimension.
+        adapter_version: Adapter format version.
+        compression: Compression level for the payload.
+
+    Returns:
+        Raw bytes of the AVP message.
+    """
+    metadata.payload_type = PayloadType.URT
+    metadata.extra["k_tokens"] = str(k_tokens)
+    metadata.extra["d_universal"] = str(d_universal)
+    metadata.extra["adapter_version"] = str(adapter_version)
+    return encode(payload, metadata, compression)
 
 
 def encode_hybrid(

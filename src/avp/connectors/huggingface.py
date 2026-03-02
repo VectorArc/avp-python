@@ -516,6 +516,10 @@ class HuggingFaceConnector(EngineConnector):
         """
         import torch
 
+        # Auto-detect universal context: decode to KV-cache first
+        if context is not None and context.is_universal:
+            context = self.decode_universal(context)
+
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)
         input_ids, attention_mask = _tokenize_prompt(
@@ -569,6 +573,170 @@ class HuggingFaceConnector(EngineConnector):
 
         generated_ids = outputs.sequences[0, prompt_len:]
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+
+    # --- Universal representation ---
+
+    def encode_universal(
+        self,
+        prompt: Union[str, List[Dict[str, str]]],
+        steps: int = 256,
+        config: Optional[Any] = None,
+    ) -> AVPContext:
+        """Encode prompt into universal representation tokens.
+
+        Runs latent rollout steps to collect hidden states, then encodes
+        them through the universal encoder into K+2 universal tokens.
+
+        Args:
+            prompt: A string (wrapped as user message) or list of chat messages.
+            steps: Number of latent rollout steps for hidden state collection.
+            config: Optional UniversalConfig. Uses adapter's config if available.
+
+        Returns:
+            AVPContext with is_universal=True, containing universal tokens.
+
+        Raises:
+            RealignmentError: If no universal adapter is found for this model.
+        """
+        import torch
+        from ..universal import UniversalAdapter, UniversalConfig, UniversalEncoder
+        from ..universal.adapter_registry import load_adapter
+
+        adapter = load_adapter(self._model_hash, device=self.device)
+        if adapter is None:
+            raise RealignmentError(
+                f"No universal adapter found for model hash {self._model_hash[:16]}. "
+                "Train one first with universal/train.py."
+            )
+
+        cfg = config or adapter.config
+
+        messages = _to_messages(prompt)
+        prompt_text = _render_prompt(self.tokenizer, messages)
+        input_ids, attention_mask = _tokenize_prompt(
+            self.tokenizer, prompt_text, self.device
+        )
+
+        # Collect hidden states from latent rollout
+        _, hidden_states = self.generate_latent_steps(
+            input_ids, latent_steps=steps, attention_mask=attention_mask,
+            collect_hidden_states=True,
+        )
+        # hidden_states: [1 + steps, D] — squeeze batch dim if present
+
+        # Build encoder and load weights
+        if not hasattr(self, "_universal_encoder") or self._universal_encoder is None:
+            encoder = UniversalEncoder.create(adapter.d_source, cfg)
+            encoder.load_state_dict(adapter.encoder_state_dict)
+            encoder = encoder.to(self.device)
+            encoder.eval()
+            self._universal_encoder = encoder
+
+        # Encode: [T, D_src] → [K+2, D_universal]
+        with torch.no_grad():
+            universal_tokens = self._universal_encoder(hidden_states)
+
+        # Apply affine_out if present
+        if adapter.affine_out is not None:
+            W = adapter.affine_out["W"].to(universal_tokens.device, universal_tokens.dtype)
+            b = adapter.affine_out["b"].to(universal_tokens.device, universal_tokens.dtype)
+            universal_tokens = universal_tokens @ W.T + b
+
+        return AVPContext(
+            past_key_values=None,
+            model_hash=self._model_hash,
+            num_steps=steps,
+            seq_len=0,
+            model_family=self._identity.model_family,
+            hidden_dim=self._identity.hidden_dim,
+            num_layers=self._identity.num_layers,
+            universal_tokens=universal_tokens,
+            k_tokens=cfg.k_tokens,
+            d_universal=cfg.d_universal,
+            is_universal=True,
+        )
+
+    def decode_universal(self, context: AVPContext) -> AVPContext:
+        """Decode universal tokens into a KV-cache via KV-cache priming.
+
+        Loads the decoder adapter for this (target) model, decodes universal
+        tokens to target embedding space, then runs them through the model
+        to build a primed KV-cache.
+
+        Args:
+            context: AVPContext with is_universal=True.
+
+        Returns:
+            Standard AVPContext with past_key_values (DynamicCache) ready
+            for generation.
+
+        Raises:
+            RealignmentError: If no universal adapter is found for this model.
+        """
+        import torch
+        from ..universal import UniversalDecoder
+        from ..universal.adapter_registry import load_adapter
+
+        adapter = load_adapter(self._model_hash, device=self.device)
+        if adapter is None:
+            raise RealignmentError(
+                f"No universal adapter found for model hash {self._model_hash[:16]}. "
+                "Train one first with universal/train.py."
+            )
+
+        universal_tokens = context.universal_tokens
+        if universal_tokens is None:
+            raise ValueError("Context has is_universal=True but universal_tokens is None")
+
+        universal_tokens = universal_tokens.to(self.device)
+
+        # Apply affine_in if present
+        if adapter.affine_in is not None:
+            W = adapter.affine_in["W"].to(universal_tokens.device, universal_tokens.dtype)
+            b = adapter.affine_in["b"].to(universal_tokens.device, universal_tokens.dtype)
+            universal_tokens = universal_tokens @ W.T + b
+
+        # Build decoder and load weights
+        if not hasattr(self, "_universal_decoder") or self._universal_decoder is None:
+            decoder = UniversalDecoder.create(adapter.d_source, adapter.config)
+            decoder.load_state_dict(adapter.decoder_state_dict)
+            decoder = decoder.to(self.device)
+            decoder.eval()
+            self._universal_decoder = decoder
+
+        # Decode: [K+2, D_universal] → ([K, D_target], gate)
+        with torch.no_grad():
+            decoded, gate = self._universal_decoder(
+                universal_tokens, target_norm=adapter.target_norm,
+            )
+
+        # KV-cache priming: run decoded embeddings through model
+        if decoded.dim() == 2:
+            decoded = decoded.unsqueeze(0)  # [1, K, D_target]
+
+        embed_input = decoded.to(self.model.dtype) * gate
+        embed_mask = torch.ones(
+            (1, embed_input.shape[1]), dtype=torch.long, device=self.device,
+        )
+
+        with torch.no_grad():
+            prime_out = self.model(
+                inputs_embeds=embed_input,
+                attention_mask=embed_mask,
+                use_cache=True,
+                return_dict=True,
+            )
+
+        return AVPContext(
+            past_key_values=prime_out.past_key_values,
+            model_hash=self._model_hash,
+            num_steps=context.num_steps,
+            seq_len=embed_input.shape[1],
+            model_family=self._identity.model_family,
+            hidden_dim=self._identity.hidden_dim,
+            num_layers=self._identity.num_layers,
+            gate_value=gate,
+        )
 
     def validate_cross_model(
         self,

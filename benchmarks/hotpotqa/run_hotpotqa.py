@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "direct", "rosetta", "both", "all"],
+        choices=["latent", "text", "direct", "rosetta", "universal", "both", "all"],
         default="all",
         help="Pipeline(s) to run (default: all)",
     )
@@ -60,6 +60,10 @@ def parse_args() -> argparse.Namespace:
                         help="Softmax temperature for cross-model projection (default: 1.0)")
     parser.add_argument("--num_transfer_states", type=int, default=1,
                         help="Number of hidden states to transfer in rosetta mode (default: 1)")
+    parser.add_argument("--k_tokens", type=int, default=64,
+                        help="Number of universal tokens for universal mode (default: 64)")
+    parser.add_argument("--rollout_steps", type=int, default=256,
+                        help="Latent rollout steps for universal mode (default: 256)")
     return parser.parse_args()
 
 

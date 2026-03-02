@@ -175,6 +175,8 @@ def pack(
     model: Optional[str] = None,
     context: Optional[PackedMessage] = None,
     think_steps: int = 0,
+    universal: bool = False,
+    rollout_steps: int = 256,
     collect_metrics: bool = False,
 ) -> Union[PackedMessage, Tuple[PackedMessage, "PackMetrics"]]:
     """Pack a text message for transfer between agents.
@@ -185,6 +187,8 @@ def pack(
         msg = avp.pack("Hello", model="Qwen/Qwen2.5-7B")    # Layer 1: + identity
         msg = avp.pack("Hello", model="Qwen/...",            # Layer 2: + latent
                         think_steps=20)
+        msg = avp.pack("Hello", model="Qwen/...",            # Layer 2: + universal
+                        universal=True)
 
         # With metrics:
         msg, metrics = avp.pack("Hello", collect_metrics=True)
@@ -193,10 +197,15 @@ def pack(
         content: The text to send.
         model: HuggingFace model name/path (self-hosted, local weights).
             Layer 1 downloads only the config (~1 KB) for identity.
-            Layer 2 (think_steps > 0) loads the full model (cached after first call).
+            Layer 2 (think_steps > 0 or universal=True) loads the full model.
         context: A previous PackedMessage whose latent context should be reused.
         think_steps: Number of latent thinking steps. 0 = no latent (Layer 0/1).
             20 is the recommended value (accuracy plateaus beyond this).
+            Ignored when universal=True.
+        universal: If True, encode into universal representation tokens
+            instead of same-model KV-cache. Requires a trained adapter.
+        rollout_steps: Number of latent rollout steps for universal encoding.
+            Only used when universal=True. Default: 256.
         collect_metrics: If True, return ``(PackedMessage, PackMetrics)`` tuple.
 
     Returns:
@@ -209,6 +218,8 @@ def pack(
         raise TypeError(f"pack() content must be str, got {type(content).__name__}")
     if think_steps > 0 and model is None:
         raise ValueError("think_steps requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
+    if universal and model is None:
+        raise ValueError("universal=True requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
 
     identity = None
     avp_context = None
@@ -220,7 +231,16 @@ def pack(
         identity = _get_local_identity(model)
         identity_duration = _time.perf_counter() - t_id
 
-        if think_steps > 0:
+        if universal:
+            connector = _get_or_create_connector(model)
+            t_think = _time.perf_counter()
+            avp_context = connector.encode_universal(content, steps=rollout_steps)
+            think_duration = _time.perf_counter() - t_think
+            logger.info(
+                "pack() universal encoding: rollout_steps=%d duration=%.3fs",
+                rollout_steps, think_duration,
+            )
+        elif think_steps > 0:
             connector = _get_or_create_connector(model)
             prior_context = context.context if context is not None else None
             t_think = _time.perf_counter()
@@ -233,10 +253,10 @@ def pack(
                 think_steps, think_duration,
             )
 
-    layer = 0 if model is None else (2 if think_steps > 0 else 1)
+    layer = 0 if model is None else (2 if (think_steps > 0 or universal) else 1)
     logger.debug(
-        "pack() layer=%d model=%s think_steps=%d",
-        layer, model, think_steps,
+        "pack() layer=%d model=%s think_steps=%d universal=%s",
+        layer, model, think_steps, universal,
     )
 
     result = PackedMessage(
