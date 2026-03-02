@@ -1,6 +1,6 @@
 # AVP Benchmark Results: Latent vs Text Multi-Agent Communication
 
-> 51-78% token savings | 1.5-5x faster | 4 benchmarks | 5 models | same-model + cross-model
+> 51-78% token savings | 1.5-5x faster | 7 benchmarks | 5 models | same-model + cross-model
 
 ## TL;DR
 
