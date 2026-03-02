@@ -714,7 +714,9 @@ class HuggingFaceConnector(EngineConnector):
         if decoded.dim() == 2:
             decoded = decoded.unsqueeze(0)  # [1, K, D_target]
 
-        embed_input = decoded.to(self.model.dtype) * gate
+        # Don't scale by gate — training doesn't use gate multiplication
+        # (gate collapse kills encoder gradients). Gate is returned as metadata.
+        embed_input = decoded.to(self.model.dtype)
         embed_mask = torch.ones(
             (1, embed_input.shape[1]), dtype=torch.long, device=self.device,
         )
