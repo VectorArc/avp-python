@@ -35,6 +35,7 @@ def run_rosetta_pipeline(
     temperature: float = 0.7,
     top_p: float = 0.95,
     verbose: bool = False,
+    projection_temperature: float = 1.0,
 ) -> Dict:
     """Run the 2-agent cross-model pipeline on a single GSM8K problem.
 
@@ -82,7 +83,9 @@ def run_rosetta_pipeline(
         last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
 
         # Project to target model space
-        projected = conn_a.project_hidden_for_cross_model(last_hidden, avp_map)
+        projected = conn_a.project_hidden_for_cross_model(
+            last_hidden, avp_map, temperature=projection_temperature,
+        )
         rosetta_embeds = projected.unsqueeze(1)  # [1, 1, D_tgt]
         projection_ms = (time.perf_counter() - proj_t0) * 1000
 
@@ -204,6 +207,7 @@ def run_rosetta_benchmark(
     temperature: float = 0.7,
     top_p: float = 0.95,
     verbose: bool = False,
+    projection_temperature: float = 1.0,
 ) -> List[Dict]:
     """Run rosetta-mode pipeline on a list of GSM8K samples."""
     results = []
@@ -221,6 +225,7 @@ def run_rosetta_benchmark(
             temperature=temperature,
             top_p=top_p,
             verbose=verbose,
+            projection_temperature=projection_temperature,
         )
         results.append(result)
 

@@ -56,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_b", type=str, default="", help="Second model for rosetta mode")
     parser.add_argument("--verbose", action="store_true", help="Print per-sample details")
     parser.add_argument("--output_dir", type=str, default=None, help="Results directory")
+    parser.add_argument("--projection_temperature", type=float, default=1.0,
+                        help="Softmax temperature for cross-model projection (default: 1.0)")
     return parser.parse_args()
 
 
@@ -266,6 +268,7 @@ def run_benchmark(config: dict) -> dict:
     top_p = config.get("top_p", 0.95)
     verbose = config.get("verbose", False)
     output_dir = config.get("output_dir")
+    projection_temperature = config.get("projection_temperature", 1.0)
 
     model_b_name = config.get("model_b", "")
 
@@ -374,6 +377,7 @@ def run_benchmark(config: dict) -> dict:
             device=device, avp_map=avp_map, dataset=dataset,
             latent_steps=latent_steps, max_new_tokens=max_new_tokens,
             temperature=temperature, top_p=top_p, verbose=verbose,
+            projection_temperature=projection_temperature,
         )
 
         del model_b, tokenizer_b, connector_b, identity_b
