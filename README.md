@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.2-blue.svg)](https://github.com/VectorArc/avp-spec)
 
-**Transfer KV-cache between LLM agents instead of regenerating text. Same multi-agent pipeline, 51-78% fewer tokens, 1.5-5x faster. Cross-model projection with zero training.**
+**Multi-agent text handoffs discard KV-cache, embeddings, and attention state the previous agent already computed. AVP transfers that state directly — 51-78% fewer tokens, 1.5-5x faster, across models and families.**
 
 ```bash
 pip install avp
