@@ -63,7 +63,8 @@ wire = msg.to_bytes()   # send over any transport
 
 ```python
 msg = avp.pack("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
-# msg.identity contains model family, dimensions, hash
+# msg.identity contains model_id; with `transformers` installed,
+# also includes model family, dimensions, and hash
 # Receiving agent can check compatibility before GPU work
 ```
 
@@ -154,11 +155,13 @@ from avp import HuggingFaceConnector
 
 connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
 
-# Agent A: latent reasoning (no text output, builds KV-cache)
-context = connector.think("Analyze this math problem: 24 * 17 + 3", steps=20)
+prompt = "Analyze this math problem: 24 * 17 + 3"
 
-# Agent B: generate with Agent A's context
-answer = connector.generate("Now compute the final answer.", context=context)
+# Agent A: latent reasoning (no text output, builds KV-cache)
+context = connector.think(prompt, steps=20)
+
+# Agent B: generate with Agent A's context (same prompt — KV-cache continues from it)
+answer = connector.generate(prompt, context=context)
 ```
 
 **Cross-process transfer:**
@@ -171,7 +174,7 @@ wire_bytes = context.to_bytes(session_id="s1", source_agent_id="agent-a")
 from avp import AVPContext, HuggingFaceConnector
 connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
 restored = AVPContext.from_bytes(wire_bytes, device="cuda")
-answer = connector.generate("Solve it.", context=restored)
+answer = connector.generate(prompt, context=restored)
 ```
 
 **Check model compatibility:**
@@ -179,6 +182,7 @@ answer = connector.generate("Solve it.", context=restored)
 ```python
 from avp import extract_model_identity, CompatibilityResolver
 
+# Pass loaded HuggingFace model objects (not strings)
 local = extract_model_identity(model_a)
 remote = extract_model_identity(model_b)
 session = CompatibilityResolver.resolve(local, remote)
@@ -214,6 +218,7 @@ The `AVPKVConnectorV1Dynamic` plugin saves/loads KV-cache between vLLM instances
 |--------|-------------|
 | `pack(content, *, model=, think_steps=)` | Pack text for transfer. Layer 0: JSON. Layer 1: + model identity. Layer 2: + latent context. Returns `PackedMessage`. |
 | `unpack(data, *, model=)` | Unpack any AVP format to text. With `model=`, generates a response using latent context. |
+| `generate(prompt, *, model=, context=)` | Generate text with optional latent context. Shortcut for connector setup + generation. |
 | `PackedMessage` | Result of `pack()`. `str(msg)` for text, `msg.to_bytes()` for wire format, `.identity` for model info, `.context` for latent data. |
 
 ### Connector API (advanced)
@@ -223,6 +228,7 @@ The `AVPKVConnectorV1Dynamic` plugin saves/loads KV-cache between vLLM instances
 | `HuggingFaceConnector` | Main connector. `think()` builds KV-cache (returns `AVPContext`), `generate()` produces text. `from_pretrained()` for easy setup. |
 | `VLLMConnector` | Production connector. `generate()` returns text. Latent transfer happens at engine level via KV connector plugin. |
 | `AVPContext` | Wraps KV-cache + model metadata. Pass between `think()` and `generate()`, or serialize with `to_bytes()` / `from_bytes()` for cross-process transfer. |
+| `ContextStore` | In-memory store for sharing `AVPContext` objects between agents by session ID. Thread-safe. |
 
 ### Protocol Layer
 
@@ -251,8 +257,8 @@ All errors inherit from `AVPError`. Key types: `IncompatibleModelsError`, `Hands
 
 ## Roadmap
 
-- Multi-embedding cross-model transfer (addressing single-embedding bottleneck on comprehension tasks)
 - Compact hidden state mode (same-model, ~60x smaller wire than full KV-cache)
+- Bidirectional latent communication (A→B + B→A latent, not just one-way)
 - CacheGen-style compression (3-4x KV-cache wire size reduction)
 - vLLM serving throughput benchmarks
 
