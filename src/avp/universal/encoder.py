@@ -63,8 +63,6 @@ def _build_encoder(d_source: int, config: UniversalConfig):
             self.config = config
             self.d_source = d_source
             d = config.d_universal
-            k_total = config.k_tokens + 2  # K semantic + 1 global + 1 style
-
             # Input projection
             self.input_projection = nn.Linear(d_source, d)
 

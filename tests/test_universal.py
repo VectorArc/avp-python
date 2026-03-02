@@ -6,14 +6,13 @@ context serialization, adapter registry, handshake resolution, and
 full pipeline without needing real models.
 """
 
-import math
 import shutil
 import tempfile
 from pathlib import Path
 
 import pytest
 import torch
-from conftest import MockTokenizer, requires_torch, requires_transformers
+from conftest import requires_torch, requires_transformers
 
 from avp.types import CommunicationMode, PayloadType
 from avp.universal.config import UniversalConfig

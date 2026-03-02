@@ -1,7 +1,7 @@
 """AVPContext — wraps a KV-cache with metadata for the high-level API."""
 
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -90,7 +90,6 @@ class AVPContext:
 
         if self.is_universal:
             from .utils import embedding_to_bytes
-            import numpy as np
 
             # Serialize universal tokens tensor
             tokens_np = self.universal_tokens.detach().float().cpu().numpy()

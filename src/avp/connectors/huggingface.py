@@ -599,7 +599,7 @@ class HuggingFaceConnector(EngineConnector):
             RealignmentError: If no universal adapter is found for this model.
         """
         import torch
-        from ..universal import UniversalAdapter, UniversalConfig, UniversalEncoder
+        from ..universal import UniversalEncoder
         from ..universal.adapter_registry import load_adapter
 
         adapter = load_adapter(self._model_hash, device=self.device)
