@@ -4,7 +4,7 @@ Projects hidden states from a source model's latent space to a target model's
 embedding space using a learned linear map (W_map).
 """
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple, Union
 
 from .._torch_compat import require_torch as _require_torch
 
@@ -56,7 +56,8 @@ def vocab_overlap_projection(
     shared_target_embed_weight: Any,
     src_indices: Any,
     temperature: float = 1.0,
-) -> Any:
+    return_metrics: bool = False,
+) -> Union[Any, Tuple[Any, Dict[str, Any]]]:
     """Project hidden states across models via overlapping vocabulary tokens.
 
     Cross-family variant of vocabulary_mediated_projection(). Instead of
@@ -73,9 +74,12 @@ def vocab_overlap_projection(
         shared_target_embed_weight: Target embeddings for shared tokens [N_shared, D_tgt].
         src_indices: LongTensor [N_shared] — source token IDs for shared tokens.
         temperature: Softmax temperature. Lower = sharper (closer to argmax).
+        return_metrics: If True, return (projected, metrics_dict) with entropy
+            and max_prob of the softmax distribution.
 
     Returns:
-        Projected tensor of shape [..., D_tgt].
+        Projected tensor of shape [..., D_tgt]. If return_metrics=True,
+        returns (projected, {"entropy": ..., "max_prob": ...}).
     """
     torch = _require_torch()
 
@@ -95,9 +99,17 @@ def vocab_overlap_projection(
     # Renormalized softmax over shared tokens
     probs = torch.softmax(shared_logits / temperature, dim=-1)
 
+    if return_metrics:
+        log_probs = torch.log(probs.clamp_min(1e-12))
+        entropy = -(probs * log_probs).sum(dim=-1)
+        max_prob = probs.max(dim=-1).values
+
     # probs @ W_tgt_shared → target embedding [..., D_tgt]
     projected = torch.matmul(probs, w_tgt)
 
+    if return_metrics:
+        metrics = {"entropy": entropy, "max_prob": max_prob}
+        return projected.to(original_dtype), metrics
     return projected.to(original_dtype)
 
 
@@ -106,7 +118,8 @@ def vocabulary_mediated_projection(
     source_lm_head_weight: Any,
     target_embed_weight: Any,
     temperature: float = 1.0,
-) -> Any:
+    return_metrics: bool = False,
+) -> Union[Any, Tuple[Any, Dict[str, Any]]]:
     """Project hidden states across models via shared vocabulary.
 
     Cross-model version of project_to_embedding_space() in realign.py.
@@ -123,9 +136,12 @@ def vocabulary_mediated_projection(
         source_lm_head_weight: Source model's output head [vocab_size, D_src].
         target_embed_weight: Target model's input embeddings [vocab_size, D_tgt].
         temperature: Softmax temperature. Lower = sharper (closer to argmax).
+        return_metrics: If True, return (projected, metrics_dict) with entropy
+            and max_prob of the softmax distribution.
 
     Returns:
-        Projected tensor of shape [..., D_tgt].
+        Projected tensor of shape [..., D_tgt]. If return_metrics=True,
+        returns (projected, {"entropy": ..., "max_prob": ...}).
     """
     torch = _require_torch()
 
@@ -148,7 +164,15 @@ def vocabulary_mediated_projection(
     # softmax → probability distribution over shared vocabulary
     probs = torch.softmax(logits / temperature, dim=-1)
 
+    if return_metrics:
+        log_probs = torch.log(probs.clamp_min(1e-12))
+        entropy = -(probs * log_probs).sum(dim=-1)
+        max_prob = probs.max(dim=-1).values
+
     # probs @ W_tgt → target embedding [..., D_tgt]
     projected = torch.matmul(probs, w_tgt)
 
+    if return_metrics:
+        metrics = {"entropy": entropy, "max_prob": max_prob}
+        return projected.to(original_dtype), metrics
     return projected.to(original_dtype)

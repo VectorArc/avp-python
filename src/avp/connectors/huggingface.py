@@ -602,6 +602,7 @@ class HuggingFaceConnector(EngineConnector):
 
     def project_hidden_for_cross_model(
         self, hidden_state: Any, avp_map: Any, temperature: float = 1.0,
+        return_metrics: bool = False,
     ) -> Any:
         """Project source hidden state to target embedding space via Rosetta Stone.
 
@@ -642,6 +643,7 @@ class HuggingFaceConnector(EngineConnector):
                 source_lm_head_weight=source_lm_head.weight,
                 target_embed_weight=avp_map.w_map,  # target input embeddings
                 temperature=temperature,
+                return_metrics=return_metrics,
             )
         elif avp_map.method == ProjectionMethod.VOCAB_OVERLAP:
             from ..rosetta.project import vocab_overlap_projection
@@ -659,9 +661,13 @@ class HuggingFaceConnector(EngineConnector):
                 shared_target_embed_weight=avp_map.w_map,
                 src_indices=avp_map.src_indices,
                 temperature=temperature,
+                return_metrics=return_metrics,
             )
         else:
             from ..rosetta.project import apply_cross_model_projection
-            return apply_cross_model_projection(
+            projected = apply_cross_model_projection(
                 hidden_state, avp_map.w_map, avp_map.target_norm, avp_map.bias
             )
+            if return_metrics:
+                return projected, {}
+            return projected

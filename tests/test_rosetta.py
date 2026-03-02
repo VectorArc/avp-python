@@ -583,6 +583,60 @@ class TestVocabMediatedProjection:
         result = vocabulary_mediated_projection(hidden, source_lm_head, target_embed)
         assert result.dtype == torch.float16
 
+    def test_vocab_mediated_return_metrics(self):
+        """return_metrics=True returns (projected, metrics_dict) with entropy and max_prob."""
+        from avp.rosetta.project import vocabulary_mediated_projection
+
+        hidden = torch.randn(2, 64)
+        source_lm_head = torch.randn(256, 64)
+        target_embed = torch.randn(256, 128)
+
+        result = vocabulary_mediated_projection(
+            hidden, source_lm_head, target_embed, return_metrics=True,
+        )
+        assert isinstance(result, tuple) and len(result) == 2
+        projected, metrics = result
+        assert projected.shape == (2, 128)
+        assert "entropy" in metrics and "max_prob" in metrics
+        assert metrics["entropy"].shape == (2,)
+        assert (metrics["entropy"] >= 0).all()
+        assert (metrics["max_prob"] >= 0).all() and (metrics["max_prob"] <= 1).all()
+
+    def test_vocab_mediated_return_metrics_false_unchanged(self):
+        """Default return_metrics=False returns just the tensor."""
+        from avp.rosetta.project import vocabulary_mediated_projection
+
+        hidden = torch.randn(2, 64)
+        source_lm_head = torch.randn(256, 64)
+        target_embed = torch.randn(256, 128)
+
+        result = vocabulary_mediated_projection(hidden, source_lm_head, target_embed)
+        assert isinstance(result, torch.Tensor)
+        assert result.shape == (2, 128)
+
+    def test_entropy_peaked_vs_flat(self):
+        """Peaked hidden state (matching a specific token) should have lower entropy."""
+        from avp.rosetta.project import vocabulary_mediated_projection
+
+        torch.manual_seed(42)
+        source_lm_head = torch.randn(256, 64)
+        target_embed = torch.randn(256, 128)
+
+        # Peaked: hidden = one of the lm_head rows (model "knows" it's token 42)
+        peaked_hidden = source_lm_head[42].unsqueeze(0)
+        _, peaked_metrics = vocabulary_mediated_projection(
+            peaked_hidden, source_lm_head, target_embed, return_metrics=True,
+        )
+
+        # Flat: hidden = zeros (uninformative)
+        flat_hidden = torch.zeros(1, 64)
+        _, flat_metrics = vocabulary_mediated_projection(
+            flat_hidden, source_lm_head, target_embed, return_metrics=True,
+        )
+
+        assert peaked_metrics["entropy"].item() < flat_metrics["entropy"].item()
+        assert peaked_metrics["max_prob"].item() > flat_metrics["max_prob"].item()
+
 
 # ---------------------------------------------------------------------------
 # Tests: tokenizer hash
@@ -1255,6 +1309,27 @@ class TestVocabOverlap:
         result_mediated = vocabulary_mediated_projection(hidden, w_src, w_tgt)
 
         assert torch.allclose(result_overlap, result_mediated, atol=1e-5)
+
+    def test_vocab_overlap_return_metrics(self):
+        """return_metrics=True returns (projected, metrics_dict) with entropy and max_prob."""
+        from avp.rosetta.project import vocab_overlap_projection
+
+        D_src, D_tgt, N_shared, V_src = 64, 128, 100, 256
+        hidden = torch.randn(2, D_src)
+        w_src = torch.randn(V_src, D_src)
+        w_tgt = torch.randn(N_shared, D_tgt)
+        src_indices = torch.randperm(V_src)[:N_shared]
+
+        result = vocab_overlap_projection(
+            hidden, w_src, w_tgt, src_indices, return_metrics=True,
+        )
+        assert isinstance(result, tuple) and len(result) == 2
+        projected, metrics = result
+        assert projected.shape == (2, D_tgt)
+        assert "entropy" in metrics and "max_prob" in metrics
+        assert metrics["entropy"].shape == (2,)
+        assert (metrics["entropy"] >= 0).all()
+        assert (metrics["max_prob"] >= 0).all() and (metrics["max_prob"] <= 1).all()
 
     def test_calibrate_auto_detects_vocab_overlap(self, tiny_gpt2_64, tiny_gpt2_128):
         """calibrate() with cross-family tokenizers returns VOCAB_OVERLAP."""

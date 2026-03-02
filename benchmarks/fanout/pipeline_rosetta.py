@@ -113,8 +113,9 @@ def run_rosetta_pipeline(
             # Select last N from concatenated sequence
             selected = combined[-num_transfer_states:]
 
-            projected = conn_a.project_hidden_for_cross_model(
+            projected, proj_metrics = conn_a.project_hidden_for_cross_model(
                 selected, avp_map, temperature=projection_temperature,
+                return_metrics=True,
             )
             rosetta_embeds = projected.unsqueeze(0)  # [1, N, D_tgt]
         else:
@@ -132,8 +133,9 @@ def run_rosetta_pipeline(
                 )
             last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
 
-            projected = conn_a.project_hidden_for_cross_model(
+            projected, proj_metrics = conn_a.project_hidden_for_cross_model(
                 last_hidden, avp_map, temperature=projection_temperature,
+                return_metrics=True,
             )
             rosetta_embeds = projected.unsqueeze(1)  # [1, 1, D_tgt]
 
@@ -229,6 +231,8 @@ def run_rosetta_pipeline(
         "injection_overhead_ms": injection_ms,
         "projection_wire_bytes": wire_bytes,
         "num_transfer_states": num_transfer_states,
+        "projection_entropy": float(proj_metrics["entropy"].mean()) if "entropy" in proj_metrics else None,
+        "projection_max_prob": float(proj_metrics["max_prob"].mean()) if "max_prob" in proj_metrics else None,
         "parallel_speedup_potential": parallel_speedup_potential,
         "agents": agent_traces,
         "mode": "rosetta",
