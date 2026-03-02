@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=str, default=None, help="Results directory")
     parser.add_argument("--projection_temperature", type=float, default=1.0,
                         help="Softmax temperature for cross-model projection (default: 1.0)")
+    parser.add_argument("--num_transfer_states", type=int, default=1,
+                        help="Number of hidden states to transfer in rosetta mode (default: 1)")
     return parser.parse_args()
 
 
@@ -269,6 +271,7 @@ def run_benchmark(config: dict) -> dict:
     verbose = config.get("verbose", False)
     output_dir = config.get("output_dir")
     projection_temperature = config.get("projection_temperature", 1.0)
+    num_transfer_states = config.get("num_transfer_states", 1)
 
     model_b_name = config.get("model_b", "")
 
@@ -378,6 +381,7 @@ def run_benchmark(config: dict) -> dict:
             latent_steps=latent_steps, max_new_tokens=max_new_tokens,
             temperature=temperature, top_p=top_p, verbose=verbose,
             projection_temperature=projection_temperature,
+            num_transfer_states=num_transfer_states,
         )
 
         del model_b, tokenizer_b, connector_b, identity_b

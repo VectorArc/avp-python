@@ -304,6 +304,7 @@ class HuggingFaceConnector(EngineConnector):
         latent_steps: int,
         attention_mask: Optional[Any] = None,
         past_key_values: Optional[Any] = None,
+        collect_hidden_states: bool = False,
     ) -> Any:
         """Run the LatentMAS latent generation loop.
 
@@ -325,9 +326,13 @@ class HuggingFaceConnector(EngineConnector):
             latent_steps: Number of latent thinking steps.
             attention_mask: Optional attention mask.
             past_key_values: Optional prior KV-cache.
+            collect_hidden_states: If True, collect raw hidden states (before
+                realignment) at each step and return them alongside the KV-cache.
 
         Returns:
-            Updated past_key_values after all latent steps.
+            If collect_hidden_states is False: updated past_key_values.
+            If collect_hidden_states is True: tuple of (past_key_values,
+                hidden_states tensor of shape [1 + latent_steps, D]).
         """
         import torch
 
@@ -363,6 +368,10 @@ class HuggingFaceConnector(EngineConnector):
 
         past = outputs.past_key_values
         last_hidden = outputs.hidden_states[-1][:, -1, :]  # [B, D]
+
+        collected_hidden = []
+        if collect_hidden_states:
+            collected_hidden.append(last_hidden.clone())
 
         # Determine realignment strategy
         do_realign = self.needs_realignment()
@@ -408,6 +417,14 @@ class HuggingFaceConnector(EngineConnector):
 
             past = outputs.past_key_values
             last_hidden = outputs.hidden_states[-1][:, -1, :]
+
+            if collect_hidden_states:
+                collected_hidden.append(last_hidden.clone())
+
+        if collect_hidden_states:
+            # Each element is [B, D] where B=1 in practice.
+            # cat along dim=0 gives [1 + latent_steps, D] for B=1.
+            return past, torch.cat(collected_hidden, dim=0)
 
         return past
 

@@ -39,11 +39,15 @@ def run_rosetta_pipeline(
     top_p: float = 0.95,
     verbose: bool = False,
     projection_temperature: float = 1.0,
+    num_transfer_states: int = 1,
 ) -> Dict:
     """Run fan-out cross-model pipeline on a single GSM8K problem.
 
     Both specialists run on model A (sequential KV injection).
-    Aggregator runs on model B (inject projected embedding).
+    Aggregator runs on model B (inject projected embedding(s)).
+
+    When num_transfer_states > 1, collects hidden states from all specialists'
+    latent steps and projects the last N from the concatenated sequence.
     """
     with gpu_memory_tracker(device) as mem:
         t0 = time.perf_counter()
@@ -53,6 +57,7 @@ def run_rosetta_pipeline(
         total_output_tokens = 0
         specialist_times: List[float] = []
         past_kv = None
+        all_hidden_states = []
 
         # --- Specialists on model A (sequential KV injection) ---
         for specialist in SPECIALISTS:
@@ -65,12 +70,22 @@ def run_rosetta_pipeline(
             total_prompt_tokens += prompt_tokens
             total_latent_steps += latent_steps
 
-            past_kv = conn_a.generate_latent_steps(
-                input_ids,
-                latent_steps=latent_steps,
-                attention_mask=attention_mask,
-                past_key_values=past_kv,
-            )
+            if num_transfer_states > 1:
+                past_kv, hidden_states = conn_a.generate_latent_steps(
+                    input_ids,
+                    latent_steps=latent_steps,
+                    attention_mask=attention_mask,
+                    past_key_values=past_kv,
+                    collect_hidden_states=True,
+                )
+                all_hidden_states.append(hidden_states)
+            else:
+                past_kv = conn_a.generate_latent_steps(
+                    input_ids,
+                    latent_steps=latent_steps,
+                    attention_mask=attention_mask,
+                    past_key_values=past_kv,
+                )
 
             agent_time_ms = (time.perf_counter() - agent_t0) * 1000
             specialist_times.append(agent_time_ms)
@@ -89,26 +104,39 @@ def run_rosetta_pipeline(
                 print(f"  [{specialist.name}] latent steps={latent_steps}, "
                       f"KV seq_len={kv_len}, time={agent_time_ms:.0f}ms")
 
-        # --- Extract last hidden state and project ---
+        # --- Extract hidden state(s) and project ---
         proj_t0 = time.perf_counter()
-        past_len = get_past_length(past_kv)
-        dummy_mask = torch.ones((1, past_len + 1), dtype=torch.long, device=device)
-        eos_id = tokenizer_a.eos_token_id or 0
-        dummy_ids = torch.tensor([[eos_id]], device=device)
-        with torch.no_grad():
-            out = model_a(
-                input_ids=dummy_ids,
-                attention_mask=dummy_mask,
-                past_key_values=past_kv,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-        last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
 
-        projected = conn_a.project_hidden_for_cross_model(
-            last_hidden, avp_map, temperature=projection_temperature,
-        )
-        rosetta_embeds = projected.unsqueeze(1)  # [1, 1, D_tgt]
+        if num_transfer_states > 1:
+            # Concatenate hidden states from all specialists → [total_steps, D]
+            combined = torch.cat(all_hidden_states, dim=0)
+            # Select last N from concatenated sequence
+            selected = combined[-num_transfer_states:]
+
+            projected = conn_a.project_hidden_for_cross_model(
+                selected, avp_map, temperature=projection_temperature,
+            )
+            rosetta_embeds = projected.unsqueeze(0)  # [1, N, D_tgt]
+        else:
+            past_len = get_past_length(past_kv)
+            dummy_mask = torch.ones((1, past_len + 1), dtype=torch.long, device=device)
+            eos_id = tokenizer_a.eos_token_id or 0
+            dummy_ids = torch.tensor([[eos_id]], device=device)
+            with torch.no_grad():
+                out = model_a(
+                    input_ids=dummy_ids,
+                    attention_mask=dummy_mask,
+                    past_key_values=past_kv,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+            last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
+
+            projected = conn_a.project_hidden_for_cross_model(
+                last_hidden, avp_map, temperature=projection_temperature,
+            )
+            rosetta_embeds = projected.unsqueeze(1)  # [1, 1, D_tgt]
+
         projection_ms = (time.perf_counter() - proj_t0) * 1000
 
         wire_bytes = rosetta_embeds.nelement() * rosetta_embeds.element_size()
@@ -118,7 +146,7 @@ def run_rosetta_pipeline(
                   f"shape={list(rosetta_embeds.shape)}, wire={wire_bytes:,} bytes")
 
         # Free model A state
-        del past_kv, out
+        del past_kv
         if device == "cuda":
             torch.cuda.empty_cache()
 
@@ -197,6 +225,7 @@ def run_rosetta_pipeline(
         "peak_memory_mb": mem["peak_memory_mb"],
         "projection_overhead_ms": projection_ms,
         "projection_wire_bytes": wire_bytes,
+        "num_transfer_states": num_transfer_states,
         "parallel_speedup_potential": parallel_speedup_potential,
         "agents": agent_traces,
         "mode": "rosetta",
@@ -219,6 +248,7 @@ def run_rosetta_benchmark(
     top_p: float = 0.95,
     verbose: bool = False,
     projection_temperature: float = 1.0,
+    num_transfer_states: int = 1,
 ) -> List[Dict]:
     """Run rosetta-mode pipeline on GSM8K samples."""
     results = []
@@ -237,6 +267,7 @@ def run_rosetta_benchmark(
             top_p=top_p,
             verbose=verbose,
             projection_temperature=projection_temperature,
+            num_transfer_states=num_transfer_states,
         )
         results.append(result)
 

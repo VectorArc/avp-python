@@ -36,8 +36,13 @@ def run_rosetta_pipeline(
     top_p: float = 0.95,
     verbose: bool = False,
     projection_temperature: float = 1.0,
+    num_transfer_states: int = 1,
 ) -> Dict:
-    """Run the 2-agent cross-model pipeline on a single HotpotQA problem."""
+    """Run the 2-agent cross-model pipeline on a single HotpotQA problem.
+
+    When num_transfer_states > 1, collects hidden states from all latent steps
+    and projects the last N as multi-embedding transfer.
+    """
     paragraphs_text = format_paragraphs(paragraphs)
 
     with gpu_memory_tracker(device) as mem:
@@ -60,31 +65,50 @@ def run_rosetta_pipeline(
         total_prompt_tokens += prompt_tokens
         total_latent_steps += latent_steps
 
-        past_kv = conn_a.generate_latent_steps(
-            input_ids, latent_steps=latent_steps, attention_mask=attention_mask,
-        )
-
-        # Extract last hidden state from source model
-        proj_t0 = time.perf_counter()
-        past_len = get_past_length(past_kv)
-        dummy_mask = torch.ones((1, past_len + 1), dtype=torch.long, device=device)
-        eos_id = tokenizer_a.eos_token_id or 0
-        dummy_ids = torch.tensor([[eos_id]], device=device)
-        with torch.no_grad():
-            out = model_a(
-                input_ids=dummy_ids,
-                attention_mask=dummy_mask,
-                past_key_values=past_kv,
-                output_hidden_states=True,
-                return_dict=True,
+        if num_transfer_states > 1:
+            # Multi-embedding: collect hidden states from all latent steps
+            past_kv, hidden_states = conn_a.generate_latent_steps(
+                input_ids, latent_steps=latent_steps, attention_mask=attention_mask,
+                collect_hidden_states=True,
             )
-        last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
 
-        # Project to target model space
-        projected = conn_a.project_hidden_for_cross_model(
-            last_hidden, avp_map, temperature=projection_temperature,
-        )
-        rosetta_embeds = projected.unsqueeze(1)  # [1, 1, D_tgt]
+            # Select last N hidden states → [N, D_src]
+            proj_t0 = time.perf_counter()
+            selected = hidden_states[-num_transfer_states:]
+
+            # Project batch to target space → [N, D_tgt]
+            projected = conn_a.project_hidden_for_cross_model(
+                selected, avp_map, temperature=projection_temperature,
+            )
+            rosetta_embeds = projected.unsqueeze(0)  # [1, N, D_tgt]
+        else:
+            # Original single-embedding path
+            past_kv = conn_a.generate_latent_steps(
+                input_ids, latent_steps=latent_steps, attention_mask=attention_mask,
+            )
+
+            # Extract last hidden state via dummy forward pass
+            proj_t0 = time.perf_counter()
+            past_len = get_past_length(past_kv)
+            dummy_mask = torch.ones((1, past_len + 1), dtype=torch.long, device=device)
+            eos_id = tokenizer_a.eos_token_id or 0
+            dummy_ids = torch.tensor([[eos_id]], device=device)
+            with torch.no_grad():
+                out = model_a(
+                    input_ids=dummy_ids,
+                    attention_mask=dummy_mask,
+                    past_key_values=past_kv,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+            last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
+
+            # Project to target model space
+            projected = conn_a.project_hidden_for_cross_model(
+                last_hidden, avp_map, temperature=projection_temperature,
+            )
+            rosetta_embeds = projected.unsqueeze(1)  # [1, 1, D_tgt]
+
         projection_ms = (time.perf_counter() - proj_t0) * 1000
 
         wire_bytes = rosetta_embeds.nelement() * rosetta_embeds.element_size()
@@ -108,7 +132,7 @@ def run_rosetta_pipeline(
                   f"wire={wire_bytes:,} bytes")
 
         # Free model A KV-cache
-        del past_kv, out
+        del past_kv
         if device == "cuda":
             torch.cuda.empty_cache()
 
@@ -185,6 +209,7 @@ def run_rosetta_pipeline(
         "peak_memory_mb": mem["peak_memory_mb"],
         "projection_overhead_ms": projection_ms,
         "projection_wire_bytes": wire_bytes,
+        "num_transfer_states": num_transfer_states,
         "agents": agent_traces,
         "mode": "rosetta",
     }
@@ -206,6 +231,7 @@ def run_rosetta_benchmark(
     top_p: float = 0.95,
     verbose: bool = False,
     projection_temperature: float = 1.0,
+    num_transfer_states: int = 1,
 ) -> List[Dict]:
     """Run rosetta-mode pipeline on HotpotQA samples."""
     results = []
@@ -225,6 +251,7 @@ def run_rosetta_benchmark(
             top_p=top_p,
             verbose=verbose,
             projection_temperature=projection_temperature,
+            num_transfer_states=num_transfer_states,
         )
         results.append(result)
 
