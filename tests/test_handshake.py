@@ -564,6 +564,36 @@ def test_resolve_logs_json_fallback(caplog):
     assert any("json_fallback" in r.message for r in caplog.records)
 
 
+# --- resolution_path on SessionInfo ---
+
+
+def test_session_info_resolution_path_hash_match():
+    """Hash match → resolution_path='hash_match'."""
+    local = ModelIdentity(model_hash="aaa", model_family="llama", hidden_dim=4096, num_layers=32)
+    remote = ModelIdentity(model_hash="aaa", model_family="llama", hidden_dim=4096, num_layers=32)
+    result = CompatibilityResolver.resolve(local, remote)
+
+    assert result.resolution_path == "hash_match"
+
+
+def test_session_info_resolution_path_json_fallback():
+    """Different models, no tokenizers → resolution_path='json_fallback'."""
+    import avp.rosetta.registry as registry
+
+    local = ModelIdentity(model_hash="aaa", model_family="gpt2", hidden_dim=64, num_layers=2)
+    remote = ModelIdentity(model_hash="bbb", model_family="llama", hidden_dim=128, num_layers=4)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        import pathlib
+        old_dir = registry._MAP_DIR
+        try:
+            registry._MAP_DIR = pathlib.Path(tmp)
+            result = CompatibilityResolver.resolve(local, remote)
+            assert result.resolution_path == "json_fallback"
+        finally:
+            registry._MAP_DIR = old_dir
+
+
 # ---------------------------------------------------------------------------
 # End-to-end auto-negotiation integration tests
 #

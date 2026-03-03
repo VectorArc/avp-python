@@ -271,4 +271,5 @@ class CompatibilityResolver:
             local_identity=local,
             remote_identity=remote,
             avp_map_id=avp_map_id,
+            resolution_path=resolution_path,
         )

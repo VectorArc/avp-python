@@ -179,6 +179,7 @@ class SessionInfo:
     local_identity: Optional[ModelIdentity] = None
     remote_identity: Optional[ModelIdentity] = None
     avp_map_id: str = ""  # non-empty if cross-model via Rosetta Stone
+    resolution_path: str = ""  # e.g. "hash_match", "structural_match", "json_fallback"
 
 
 @dataclass

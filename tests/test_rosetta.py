@@ -1491,3 +1491,112 @@ class TestCalibrateAutoSave:
             assert found is None
         finally:
             registry._MAP_DIR = old_dir
+
+
+# ---------------------------------------------------------------------------
+# Tests: Per-transfer quality gate
+# ---------------------------------------------------------------------------
+
+
+class TestTransferQuality:
+    """Tests for rosetta.quality — per-transfer quality gate."""
+
+    def test_short_prompt_recommends_latent(self):
+        """200 tokens → recommend latent."""
+        from avp.rosetta.quality import assess_transfer
+
+        result = assess_transfer(prompt_tokens=200)
+        assert result.recommend_latent is True
+
+    def test_long_prompt_recommends_json(self):
+        """1500 tokens → recommend JSON fallback."""
+        from avp.rosetta.quality import assess_transfer
+
+        result = assess_transfer(prompt_tokens=1500)
+        assert result.recommend_latent is False
+
+    def test_boundary_at_default_threshold(self):
+        """512 tokens (== max_prompt_tokens) → recommend latent."""
+        from avp.rosetta.quality import assess_transfer
+
+        result = assess_transfer(prompt_tokens=512)
+        assert result.recommend_latent is True
+
+    def test_one_above_threshold(self):
+        """513 tokens (> max_prompt_tokens) → recommend JSON."""
+        from avp.rosetta.quality import assess_transfer
+
+        result = assess_transfer(prompt_tokens=513)
+        assert result.recommend_latent is False
+
+    def test_custom_threshold(self):
+        """Custom max_prompt_tokens is respected."""
+        from avp.rosetta.quality import TransferQualityConfig, assess_transfer
+
+        config = TransferQualityConfig(max_prompt_tokens=100)
+        assert assess_transfer(prompt_tokens=100, config=config).recommend_latent is True
+        assert assess_transfer(prompt_tokens=101, config=config).recommend_latent is False
+
+    def test_zero_tokens(self):
+        """Edge case: 0 tokens → recommend latent."""
+        from avp.rosetta.quality import assess_transfer
+
+        result = assess_transfer(prompt_tokens=0)
+        assert result.recommend_latent is True
+
+    def test_result_fields_populated(self):
+        """All fields present with correct types."""
+        from avp.rosetta.quality import TransferQualityResult, assess_transfer
+
+        result = assess_transfer(prompt_tokens=200)
+        assert isinstance(result, TransferQualityResult)
+        assert isinstance(result.recommend_latent, bool)
+        assert isinstance(result.prompt_tokens, int)
+        assert result.prompt_tokens == 200
+        assert isinstance(result.reason, str)
+        assert len(result.reason) > 0
+
+    def test_effective_rank_not_computed_by_default(self):
+        """effective_rank_ratio is None when not requested."""
+        from avp.rosetta.quality import assess_transfer
+
+        result = assess_transfer(prompt_tokens=200)
+        assert result.effective_rank_ratio is None
+
+    @requires_torch
+    def test_effective_rank_computed_when_requested(self):
+        """effective_rank_ratio is computed when check_effective_rank=True."""
+        from avp.rosetta.quality import TransferQualityConfig, assess_transfer
+
+        config = TransferQualityConfig(check_effective_rank=True)
+        hidden = torch.randn(10, 64)
+        result = assess_transfer(prompt_tokens=200, hidden_states=hidden, config=config)
+        assert result.effective_rank_ratio is not None
+        assert 0.0 <= result.effective_rank_ratio <= 1.0
+
+    @requires_torch
+    def test_effective_rank_3d_input(self):
+        """Accepts [1, seq_len, D] shape."""
+        from avp.rosetta.quality import TransferQualityConfig, assess_transfer
+
+        config = TransferQualityConfig(check_effective_rank=True)
+        hidden = torch.randn(1, 10, 64)
+        result = assess_transfer(prompt_tokens=200, hidden_states=hidden, config=config)
+        assert result.effective_rank_ratio is not None
+        assert 0.0 <= result.effective_rank_ratio <= 1.0
+
+    @requires_torch
+    def test_effective_rank_gate_triggers(self):
+        """Identity-like matrix (high rank) triggers JSON recommendation."""
+        from avp.rosetta.quality import TransferQualityConfig, assess_transfer
+
+        config = TransferQualityConfig(
+            check_effective_rank=True,
+            max_effective_rank_ratio=0.5,
+        )
+        # Identity-like matrix has maximum effective rank
+        hidden = torch.eye(32)
+        result = assess_transfer(prompt_tokens=200, hidden_states=hidden, config=config)
+        assert result.recommend_latent is False
+        assert result.effective_rank_ratio is not None
+        assert result.effective_rank_ratio > 0.5

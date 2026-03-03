@@ -88,6 +88,9 @@ _ROSETTA_NAMES = {
     "ValidationConfig",
     "ValidationResult",
     "validate_projection",
+    "TransferQualityConfig",
+    "TransferQualityResult",
+    "assess_transfer",
 }
 
 # Transport classes are lazy-loaded because httpx is an optional dependency.
@@ -191,6 +194,9 @@ __all__ = [
     "ValidationConfig",
     "ValidationResult",
     "validate_projection",
+    "TransferQualityConfig",
+    "TransferQualityResult",
+    "assess_transfer",
     # Universal representation (lazy — requires torch)
     "UniversalConfig",
     "UniversalEncoder",
