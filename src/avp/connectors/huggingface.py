@@ -634,7 +634,7 @@ class HuggingFaceConnector(EngineConnector):
 
         # Encode: [T, D_src] → [K+2, D_universal]
         with torch.no_grad():
-            universal_tokens = self._universal_encoder(hidden_states)
+            universal_tokens = self._universal_encoder(hidden_states.float())
 
         # Apply affine_out if present
         if adapter.affine_out is not None:

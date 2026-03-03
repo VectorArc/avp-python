@@ -77,7 +77,7 @@ def run_universal_pipeline(
         encoder.eval()
 
         with torch.no_grad():
-            universal_tokens = encoder(hidden_states)
+            universal_tokens = encoder(hidden_states.float())
 
         # Apply affine_out if present
         if adapter_a.affine_out is not None:
@@ -132,7 +132,7 @@ def run_universal_pipeline(
             decoded = decoded.unsqueeze(0)
 
         # KV-cache priming
-        embed_input = decoded.to(device).to(model_b.dtype) * gate
+        embed_input = decoded.to(device).to(model_b.dtype)
         embed_mask = torch.ones(
             (1, embed_input.shape[1]), dtype=torch.long, device=device,
         )
