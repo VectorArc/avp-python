@@ -244,7 +244,9 @@ Task complexity determines projection viability:
 - **Multi-specialist math** (fan-out): Two specialists' reasoning compressed to one vector. Partial signal loss, but math structure is forgiving. **56%.**
 - **Reading comprehension** (HotpotQA): The Finder reads 10 paragraphs (1000-2000 tokens) and must transfer that comprehension through a single 3072-dimensional vector. The information bottleneck is too severe. **8%.**
 
-The HotpotQA result demonstrates a fundamental limitation of single-embedding projection: distributed comprehension across many token positions cannot be compressed into one vector. Multi-embedding transfer (sending the last N hidden states) would address this.
+The HotpotQA result demonstrates a fundamental limitation of single-embedding projection: distributed comprehension across many token positions cannot be compressed into one vector.
+
+**Quality gate:** The SDK includes a per-transfer advisory gate (`avp.assess_transfer(prompt_tokens=N)`) that recommends latent vs JSON fallback based on prompt length. Short structured prompts (<=512 tokens, e.g. GSM8K) pass; long comprehension prompts (>512 tokens, e.g. HotpotQA with 10 paragraphs) are flagged for JSON fallback. The gate is advisory — callers decide how to act.
 
 ### Wire Size Comparison
 
@@ -264,7 +266,7 @@ Cross-model Rosetta achieves near-solver-ceiling accuracy on math tasks with wir
 
 2. **Small models (1B-7B).** Latent transfer may behave differently on 13B+ models where attention heads have more capacity and can better utilize injected KV states.
 
-3. **Single-embedding bottleneck.** Cross-model projection currently transfers one hidden state vector per hop. This works for structured tasks (math: 72%) but fails for comprehension (HotpotQA: 8%). Multi-embedding transfer (sending N hidden states) is planned.
+3. **Single-embedding bottleneck.** Cross-model projection currently transfers one hidden state vector per hop. This works for structured tasks (math: 72%) but fails for comprehension (HotpotQA: 8%). The SDK provides an advisory quality gate (`avp.assess_transfer()`) that recommends JSON fallback for long prompts where single-embedding transfer is unlikely to work.
 
 4. **Fan-out accuracy gap.** Sequential KV injection from multiple specialists loses signal at 7B scale (-25pp vs text). The aggregator benefits from reading each specialist's explicit reasoning rather than merged KV states.
 
