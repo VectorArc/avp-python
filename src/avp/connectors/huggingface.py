@@ -516,8 +516,18 @@ class HuggingFaceConnector(EngineConnector):
         """
         import torch
 
-        # Auto-detect universal context: decode to KV-cache first
+        # Auto-detect universal context: decode to KV-cache first.
+        # NOTE: Universal mode is validated negative (0% same-model accuracy).
+        # Preserved for backward compatibility but should not be used.
         if context is not None and context.is_universal:
+            import warnings
+            warnings.warn(
+                "Universal context detected. Universal KV-cache priming via "
+                "inputs_embeds has been validated negative on text-only LLMs. "
+                "Use latent (same-model) or rosetta projection (cross-model) instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             context = self.decode_universal(context)
 
         messages = _to_messages(prompt)
@@ -584,6 +594,11 @@ class HuggingFaceConnector(EngineConnector):
     ) -> AVPContext:
         """Encode prompt into universal representation tokens.
 
+        .. deprecated::
+            Universal KV-cache priming via inputs_embeds has been validated
+            negative on text-only LLMs (0% same-model accuracy). Use
+            ``think()`` for same-model or rosetta projection for cross-model.
+
         Runs latent rollout steps to collect hidden states, then encodes
         them through the universal encoder into K+2 universal tokens.
 
@@ -598,6 +613,15 @@ class HuggingFaceConnector(EngineConnector):
         Raises:
             RealignmentError: If no universal adapter is found for this model.
         """
+        import warnings
+        warnings.warn(
+            "encode_universal() is deprecated. Universal KV-cache priming via "
+            "inputs_embeds has been validated negative on text-only LLMs "
+            "(0% same-model accuracy). Use think() for same-model or "
+            "rosetta projection for cross-model.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         import torch
         from ..universal import UniversalEncoder
         from ..universal.adapter_registry import load_adapter
@@ -659,6 +683,11 @@ class HuggingFaceConnector(EngineConnector):
     def decode_universal(self, context: AVPContext) -> AVPContext:
         """Decode universal tokens into a KV-cache via KV-cache priming.
 
+        .. deprecated::
+            Universal KV-cache priming via inputs_embeds has been validated
+            negative on text-only LLMs (0% same-model accuracy). Use
+            ``think()`` for same-model or rosetta projection for cross-model.
+
         Loads the decoder adapter for this (target) model, decodes universal
         tokens to target embedding space, then runs them through the model
         to build a primed KV-cache.
@@ -673,6 +702,15 @@ class HuggingFaceConnector(EngineConnector):
         Raises:
             RealignmentError: If no universal adapter is found for this model.
         """
+        import warnings
+        warnings.warn(
+            "decode_universal() is deprecated. Universal KV-cache priming via "
+            "inputs_embeds has been validated negative on text-only LLMs "
+            "(0% same-model accuracy). Use think() for same-model or "
+            "rosetta projection for cross-model.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         import torch
         from ..universal import UniversalDecoder
         from ..universal.adapter_registry import load_adapter

@@ -413,8 +413,12 @@ class TestAdapterRegistry:
 
 @requires_torch
 class TestHandshakeUniversal:
-    def test_universal_when_adapters_exist(self):
-        """Handshake returns UNIVERSAL when both models have adapters."""
+    def test_universal_disabled_in_handshake(self):
+        """Handshake no longer resolves to UNIVERSAL even when adapters exist.
+
+        Universal KV-cache priming via inputs_embeds was validated negative
+        (0% same-model accuracy). Rule 5 in the handshake is disabled.
+        """
         from avp.handshake import CompatibilityResolver
         from avp.types import ModelIdentity
         from avp.universal.adapter_registry import (
@@ -452,8 +456,8 @@ class TestHandshakeUniversal:
             remote = ModelIdentity(model_hash=hash_b, model_family="y", hidden_dim=128, num_layers=4)
 
             session = CompatibilityResolver.resolve(local, remote)
-            assert session.mode == CommunicationMode.UNIVERSAL
-            assert "universal:" in session.avp_map_id
+            # Universal is disabled — should fall through to JSON
+            assert session.mode != CommunicationMode.UNIVERSAL
 
             reg._ADAPTER_DIR = old_dir
         finally:

@@ -232,6 +232,15 @@ def pack(
         identity_duration = _time.perf_counter() - t_id
 
         if universal:
+            import warnings
+            warnings.warn(
+                "universal=True is deprecated and will be removed in a future version. "
+                "Universal KV-cache priming via inputs_embeds has been validated negative "
+                "on text-only LLMs (0% same-model accuracy). "
+                "Use think_steps for same-model or rosetta projection for cross-model.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             connector = _get_or_create_connector(model)
             t_think = _time.perf_counter()
             avp_context = connector.encode_universal(content, steps=rollout_steps)
