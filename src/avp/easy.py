@@ -301,6 +301,7 @@ def generate(
     content: str,
     *,
     model: str,
+    source_model: Optional[str] = None,
     think_steps: int = 20,
     store: Optional[Any] = None,
     store_key: Optional[str] = None,
@@ -327,10 +328,17 @@ def generate(
 
         text = avp.generate(prompt, model=M)
 
+    Cross-model (Rosetta projection) in one line::
+
+        text = avp.generate(prompt, model="target", source_model="source")
+
     Args:
         content: The prompt text.
         model: HuggingFace model name/path (required — generate always
             needs a model).
+        source_model: Optional source model for cross-model projection.
+            When set, thinks on the source model and projects the hidden
+            state to the target model (``model``) via Rosetta Stone.
         think_steps: Number of latent thinking steps.  Defaults to 20
             (the recommended value).  Set to 0 for text-only generation
             without latent context.
@@ -354,6 +362,49 @@ def generate(
         raise TypeError(f"generate() content must be str, got {type(content).__name__}")
     if (store_key is not None or prior_key is not None) and store is None:
         raise ValueError("store_key/prior_key require store= (pass a ContextStore)")
+
+    # Cross-model path: think on source, project to target
+    if source_model is not None:
+        source_connector = _get_or_create_connector(source_model)
+        target_connector = _get_or_create_connector(model)
+
+        t_think = _time.perf_counter()
+        source_context = source_connector.think(content, steps=think_steps)
+        think_duration = _time.perf_counter() - t_think
+
+        t_gen = _time.perf_counter()
+        text = target_connector.generate(
+            content,
+            context=source_context,
+            source=source_connector,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+        )
+        generate_duration = _time.perf_counter() - t_gen
+
+        logger.info(
+            "generate() cross-model %s→%s think=%.3fs generate=%.3fs total=%.3fs",
+            source_model, model, think_duration, generate_duration,
+            _time.perf_counter() - t_start,
+        )
+
+        if collect_metrics:
+            from .metrics import GenerateMetrics
+
+            metrics = GenerateMetrics(
+                model=model,
+                think_steps=think_steps,
+                has_prior_context=False,
+                stored=False,
+                duration_s=_time.perf_counter() - t_start,
+                think_duration_s=think_duration,
+                generate_duration_s=generate_duration,
+            )
+            return text, metrics
+
+        return text
+
+    # Same-model path (existing behavior)
 
     # Retrieve prior context from store
     prior_context: Optional[PackedMessage] = None

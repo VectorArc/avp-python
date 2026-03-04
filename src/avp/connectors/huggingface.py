@@ -111,6 +111,7 @@ class HuggingFaceConnector(EngineConnector):
         self._identity = extract_model_identity(self.model, tokenizer=self.tokenizer)
         self._w_realign = None
         self._target_norm = None
+        self._avp_map_cache: Dict[str, Any] = {}  # source_hash → AVPMap
 
     @classmethod
     def from_pretrained(
@@ -475,9 +476,11 @@ class HuggingFaceConnector(EngineConnector):
             past_kv = context.past_key_values
             accumulated_steps = context.num_steps
 
-        past_kv = self.generate_latent_steps(
-            input_ids, steps, attention_mask=attention_mask, past_key_values=past_kv
+        past_kv, hidden_states = self.generate_latent_steps(
+            input_ids, steps, attention_mask=attention_mask,
+            past_key_values=past_kv, collect_hidden_states=True,
         )
+        last_hidden = hidden_states[-1].unsqueeze(0)  # [1, D]
 
         return AVPContext(
             past_key_values=past_kv,
@@ -487,12 +490,14 @@ class HuggingFaceConnector(EngineConnector):
             model_family=self._identity.model_family,
             hidden_dim=self._identity.hidden_dim,
             num_layers=self._identity.num_layers,
+            last_hidden_state=last_hidden,
         )
 
     def generate(
         self,
         prompt: Union[str, List[Dict[str, str]]],
         context: Optional[AVPContext] = None,
+        source: Optional["HuggingFaceConnector"] = None,
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.95,
@@ -503,6 +508,9 @@ class HuggingFaceConnector(EngineConnector):
         Args:
             prompt: A string (wrapped as user message) or list of chat messages.
             context: Optional AVPContext to condition generation on.
+            source: Optional source HuggingFaceConnector for cross-model projection.
+                When provided and context is from a different model, automatically
+                handles calibration, projection, and KV-cache priming.
             max_new_tokens: Maximum tokens to generate.
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
@@ -512,7 +520,8 @@ class HuggingFaceConnector(EngineConnector):
             Generated text string.
 
         Raises:
-            IncompatibleModelsError: If context is from a different model.
+            IncompatibleModelsError: If context is from a different model
+                and no source connector is provided.
         """
         import torch
 
@@ -530,6 +539,14 @@ class HuggingFaceConnector(EngineConnector):
             )
             context = self.decode_universal(context)
 
+        # Cross-model: auto-project when source connector is provided
+        if (
+            source is not None
+            and context is not None
+            and context.model_hash != self._model_hash
+        ):
+            context = self._apply_rosetta_projection(source, context)
+
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)
         input_ids, attention_mask = _tokenize_prompt(
@@ -544,7 +561,7 @@ class HuggingFaceConnector(EngineConnector):
                 raise IncompatibleModelsError(
                     f"Context model_hash {context.model_hash!r} does not match "
                     f"this connector's model_hash {self._model_hash!r}. "
-                    "Use the same model or serialize via to_bytes() for cross-model transfer."
+                    "Pass source= with the source connector for cross-model projection."
                 )
             past_kv = context.past_key_values
             past_len = _past_length(past_kv)
@@ -583,6 +600,103 @@ class HuggingFaceConnector(EngineConnector):
 
         generated_ids = outputs.sequences[0, prompt_len:]
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+
+    # --- Cross-model rosetta projection ---
+
+    def _apply_rosetta_projection(
+        self,
+        source: "HuggingFaceConnector",
+        context: AVPContext,
+    ) -> AVPContext:
+        """Project cross-model context to this model's space.
+
+        Handles: AVPMap lookup/calibration, quality gate, projection, KV-cache priming.
+        Returns a new AVPContext with model_hash == self._model_hash.
+        """
+        import logging
+        import torch
+
+        if context.last_hidden_state is None:
+            raise ValueError(
+                "Cross-model generate() requires context with last_hidden_state. "
+                "Use think() to produce the context (it captures the hidden state "
+                "automatically)."
+            )
+
+        avp_map = self._get_or_calibrate_map(source)
+
+        # Advisory quality gate — log warning but proceed
+        prompt_tokens = max(0, context.seq_len - context.num_steps)
+        from ..rosetta.quality import assess_transfer
+        quality = assess_transfer(prompt_tokens=prompt_tokens)
+        if not quality.recommend_latent:
+            logging.getLogger(__name__).warning(
+                "Quality gate recommends JSON fallback for this transfer: %s",
+                quality.reason,
+            )
+
+        # Project source hidden state → target embedding space
+        projected = source.project_hidden_for_cross_model(
+            context.last_hidden_state, avp_map,
+        )
+
+        # Ensure [1, N, D_tgt] shape for KV-cache priming
+        if projected.dim() == 1:
+            projected = projected.unsqueeze(0)
+        if projected.dim() == 2:
+            projected = projected.unsqueeze(0)
+
+        # Prime this model's KV-cache with projected embedding
+        embed_input = projected.to(self.device).to(self.model.dtype)
+        embed_mask = torch.ones(
+            (1, embed_input.shape[1]), dtype=torch.long, device=self.device,
+        )
+        with torch.no_grad():
+            prime_out = self.model(
+                inputs_embeds=embed_input,
+                attention_mask=embed_mask,
+                use_cache=True,
+                return_dict=True,
+            )
+
+        return AVPContext(
+            past_key_values=prime_out.past_key_values,
+            model_hash=self._model_hash,
+            num_steps=context.num_steps,
+            seq_len=embed_input.shape[1],
+            model_family=self._identity.model_family,
+            hidden_dim=self._identity.hidden_dim,
+            num_layers=self._identity.num_layers,
+        )
+
+    def _get_or_calibrate_map(self, source: "HuggingFaceConnector") -> Any:
+        """Get AVPMap for source→self, calibrating if needed.
+
+        3-tier cache: memory → disk registry → calibrate (one-time).
+        """
+        # Tier 1: In-memory cache
+        cache_key = source._model_hash
+        if cache_key in self._avp_map_cache:
+            return self._avp_map_cache[cache_key]
+
+        # Tier 2: Disk registry (~/.avp/maps/)
+        from ..rosetta.registry import load_map
+        avp_map = load_map(
+            source._model_hash, self._model_hash, device=self.device,
+        )
+        if avp_map is not None:
+            self._avp_map_cache[cache_key] = avp_map
+            return avp_map
+
+        # Tier 3: Calibrate (auto-saves to disk)
+        from ..rosetta.calibrate import calibrate
+        avp_map = calibrate(
+            source.model, self.model,
+            source.tokenizer, self.tokenizer,
+            device=self.device,
+        )
+        self._avp_map_cache[cache_key] = avp_map
+        return avp_map
 
     # --- Universal representation ---
 

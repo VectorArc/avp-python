@@ -58,6 +58,9 @@ class AVPContext:
     gate_value: float = 1.0
     """Decoder confidence gate (0-1). Applied during KV-cache priming."""
 
+    last_hidden_state: Any = None
+    """Last hidden state [1, D] from think() for cross-model projection."""
+
     def to_bytes(
         self,
         session_id: str = "",
