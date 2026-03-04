@@ -58,8 +58,6 @@ class TestThinkCapturesHidden:
 
     def test_think_last_hidden_is_final_step(self, tiny_tied_connector):
         """Verify last_hidden_state is from the final latent step."""
-        import torch
-
         ctx = tiny_tied_connector.think("Test prompt", steps=5)
 
         # Also run with collect_hidden_states to compare
