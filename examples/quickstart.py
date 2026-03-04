@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""AVP Quickstart: latent communication between agents in 5 lines.
+"""AVP Quickstart: latent communication between agents.
 
 Requires: pip install "avp[latent]"
 (torch + transformers for HuggingFace connector)
 
-Uses a tiny GPT-2 model with random weights — no downloads, runs on CPU.
+Uses a tiny GPT-2 model with random weights for demo — output is garbage.
+For real results, use a real model (e.g. Qwen/Qwen2.5-1.5B-Instruct on GPU).
 """
 
 import avp

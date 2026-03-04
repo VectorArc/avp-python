@@ -1,43 +1,56 @@
 """Lightweight observability dataclasses for AVP operations.
 
-Returned by pack()/unpack() when ``collect_metrics=True``.  No global
+Returned by think()/generate() when ``collect_metrics=True``.  No global
 registry, no accumulator — callers own the metrics and can log, aggregate,
 or discard them as they please.
 """
 
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
 
 @dataclass
-class PackMetrics:
-    """Metrics collected during a pack() call."""
-
-    layer: int = 0
-    """Resolved layer: 0 (JSON), 1 (identity), or 2 (latent)."""
+class ThinkMetrics:
+    """Metrics collected during an avp.think() call."""
 
     model: Optional[str] = None
-    """Model name passed to pack(), if any."""
+    """Model name used for thinking."""
 
-    think_steps: int = 0
+    steps: int = 0
     """Number of latent thinking steps requested."""
 
     has_prior_context: bool = False
-    """Whether a prior PackedMessage context was provided."""
+    """Whether a prior AVPContext was provided."""
 
     duration_s: float = 0.0
-    """Total wall-clock time for pack() in seconds."""
-
-    identity_duration_s: float = 0.0
-    """Time spent extracting model identity."""
+    """Total wall-clock time for think() in seconds."""
 
     think_duration_s: float = 0.0
-    """Time spent in connector.think() (Layer 2 only)."""
+    """Time spent in connector.think()."""
+
+
+def _PackMetrics(*args, **kwargs):
+    """Deprecated. Use ThinkMetrics instead."""
+    warnings.warn(
+        "PackMetrics is deprecated and will be removed in v0.4. Use ThinkMetrics.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return ThinkMetrics(*args, **kwargs)
+
+
+# Keep PackMetrics importable as an alias
+PackMetrics = ThinkMetrics
 
 
 @dataclass
 class UnpackMetrics:
-    """Metrics collected during an unpack() call."""
+    """Metrics collected during an unpack() call.
+
+    .. deprecated:: 0.3.0
+        Use avp.generate() with collect_metrics=True instead.
+    """
 
     input_format: str = "unknown"
     """Detected input format: 'text', 'json', 'binary', or 'packed_message'."""
@@ -65,20 +78,20 @@ class GenerateMetrics:
     model: Optional[str] = None
     """Model name used for generation."""
 
-    think_steps: int = 0
+    steps: int = 0
     """Number of latent thinking steps requested."""
 
     has_prior_context: bool = False
     """Whether prior context was retrieved from the store."""
 
     stored: bool = False
-    """Whether the packed result was stored in a ContextStore."""
+    """Whether the result was stored in a ContextStore."""
 
     duration_s: float = 0.0
     """Total wall-clock time for generate() in seconds."""
 
     think_duration_s: float = 0.0
-    """Time spent in pack() (identity + think)."""
+    """Time spent in connector.think()."""
 
     generate_duration_s: float = 0.0
     """Time spent in connector.generate()."""

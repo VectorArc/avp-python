@@ -2,25 +2,22 @@
 
 Start here:
     >>> import avp
-    >>> msg = avp.pack("Hello from agent A")
-    >>> avp.unpack(msg.to_bytes())
-    'Hello from agent A'
+    >>> context = avp.think("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
+    >>> answer = avp.generate("Analyze this", model="Qwen/Qwen2.5-7B-Instruct",
+    ...                        context=context)
 
-Add model identity (downloads config only, not weights):
-    >>> msg = avp.pack("Hello", model="Qwen/Qwen2.5-7B-Instruct")
+Or as a one-liner:
+    >>> answer = avp.generate("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
 
-Add latent reasoning (requires GPU + torch):
-    >>> msg = avp.pack("Analyze this", model="Qwen/...", think_steps=20)
-    >>> answer = avp.unpack(msg, model="Qwen/...")
-
-For direct connector access (advanced):
+For direct connector access:
     >>> connector = avp.HuggingFaceConnector.from_pretrained("Qwen/...")
     >>> context = connector.think("...", steps=20)
     >>> answer = connector.generate("...", context=context)
 """
 
 # --- Easy API (start here) ---
-from .easy import PackedMessage, generate, pack, unpack
+from .easy import generate, think
+from .easy import PackedMessage, pack, unpack  # deprecated, kept for compat
 from .context_store import ContextStore
 
 # --- Protocol layer ---
@@ -116,7 +113,10 @@ _UNIVERSAL_NAMES = {
 _EASY_NAMES = {"clear_cache"}
 
 # Metrics classes — lazy-loaded to avoid unconditional import
-_METRICS_NAMES = {"PackMetrics", "UnpackMetrics", "GenerateMetrics", "HandshakeMetrics"}
+_METRICS_NAMES = {
+    "ThinkMetrics", "PackMetrics", "UnpackMetrics",
+    "GenerateMetrics", "HandshakeMetrics",
+}
 
 
 def __getattr__(name: str):
@@ -149,15 +149,16 @@ def __getattr__(name: str):
 
 __all__ = [
     # Easy API (start here)
-    "pack",
-    "unpack",
+    "think",
     "generate",
-    "PackedMessage",
     "clear_cache",
     "ContextStore",
+    # Deprecated (remove in 0.4)
+    "pack",
+    "unpack",
+    "PackedMessage",
     # Observability (lazy — stdlib only)
-    "PackMetrics",
-    "UnpackMetrics",
+    "ThinkMetrics",
     "GenerateMetrics",
     "HandshakeMetrics",
     # Connectors (lazy — requires torch/transformers/vllm)

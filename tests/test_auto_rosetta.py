@@ -235,7 +235,7 @@ class TestEasyGenerateCrossModel:
                 "Hello",
                 model="target_model",
                 source_model="source_model",
-                think_steps=10,
+                steps=10,
             )
 
         assert result == "answer"
@@ -247,18 +247,13 @@ class TestEasyGenerateCrossModel:
 
     def test_no_source_model_uses_same_model_path(self):
         """Without source_model, uses existing same-model path."""
-        with patch("avp.easy._get_or_create_connector") as mock_get, \
-             patch("avp.easy.pack") as mock_pack:
+        with patch("avp.easy._get_or_create_connector") as mock_get:
             mock_connector = MagicMock()
             mock_connector.generate.return_value = "same-model answer"
             mock_get.return_value = mock_connector
 
-            mock_packed = MagicMock()
-            mock_packed.context = None
-            mock_pack.return_value = mock_packed
-
             from avp.easy import generate
 
-            result = generate("Hello", model="my_model", think_steps=0)
+            result = generate("Hello", model="my_model", steps=0)
 
         assert result == "same-model answer"

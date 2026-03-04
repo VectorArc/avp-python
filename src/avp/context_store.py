@@ -1,6 +1,6 @@
-"""Thread-safe store for PackedMessage objects with TTL expiry.
+"""Thread-safe store for AVPContext objects with TTL expiry.
 
-Provides the ad-hoc ``_latent_store: dict[str, PackedMessage]`` that every
+Provides the ad-hoc ``_latent_store: dict[str, AVPContext]`` that every
 framework integration reinvents, as a proper SDK utility with TTL cleanup
 and thread safety.
 
@@ -9,23 +9,25 @@ Usage::
     import avp
 
     store = avp.ContextStore(default_ttl=300)
-    store.store("task-1", avp.pack("hello", model="Qwen/..."))
-    msg = store.get("task-1")   # None after TTL expires
+    ctx = avp.think("hello", model="Qwen/...")
+    store.store("task-1", ctx)
+    ctx = store.get("task-1")   # None after TTL expires
 """
 
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-from .easy import PackedMessage
+if TYPE_CHECKING:
+    from .context import AVPContext
 
 
 @dataclass
 class _Entry:
-    """Internal wrapper around a stored PackedMessage."""
+    """Internal wrapper around a stored AVPContext."""
 
-    packed: PackedMessage
+    context: "AVPContext"
     stored_at: float
     ttl: float
 
@@ -35,7 +37,7 @@ class _Entry:
 
 
 class ContextStore:
-    """Thread-safe PackedMessage store with per-entry TTL.
+    """Thread-safe AVPContext store with per-entry TTL.
 
     Default TTL is 300 s (5 min) — shorter than SessionManager's 1 hr
     because tensor-backed contexts are memory-heavy.
@@ -49,24 +51,24 @@ class ContextStore:
         self._lock = threading.Lock()
         self._default_ttl = default_ttl
 
-    def store(self, key: str, packed: PackedMessage, ttl: Optional[float] = None) -> None:
-        """Store a PackedMessage under *key*, replacing any existing entry.
+    def store(self, key: str, context: "AVPContext", ttl: Optional[float] = None) -> None:
+        """Store an AVPContext under *key*, replacing any existing entry.
 
         Args:
             key: Lookup key (e.g. task ID, session ID).
-            packed: The PackedMessage to store.
+            context: The AVPContext to store.
             ttl: Per-entry TTL in seconds.  ``None`` uses the store default.
         """
         entry = _Entry(
-            packed=packed,
+            context=context,
             stored_at=time.time(),
             ttl=ttl if ttl is not None else self._default_ttl,
         )
         with self._lock:
             self._entries[key] = entry
 
-    def get(self, key: str) -> Optional[PackedMessage]:
-        """Retrieve a PackedMessage by key, or ``None`` if missing/expired.
+    def get(self, key: str) -> Optional["AVPContext"]:
+        """Retrieve an AVPContext by key, or ``None`` if missing/expired.
 
         Expired entries are lazily removed on access.
         """
@@ -77,7 +79,7 @@ class ContextStore:
             if entry.is_expired:
                 del self._entries[key]
                 return None
-            return entry.packed
+            return entry.context
 
     def remove(self, key: str) -> bool:
         """Remove an entry.  Returns ``True`` if it existed."""

@@ -1,4 +1,4 @@
-"""Tests for the avp.pack()/unpack() latent path (Layer 2).
+"""Tests for the avp.think() easy API (latent path).
 
 Requires torch + transformers.
 """
@@ -24,7 +24,6 @@ def _mock_connector(monkeypatch):
     from avp import easy
 
     mock = MagicMock()
-    # think() returns a minimal AVPContext
     mock_cache = MagicMock()
     mock_context = AVPContext(
         past_key_values=mock_cache,
@@ -53,60 +52,77 @@ def _mock_connector(monkeypatch):
     return mock
 
 
-class TestPackLatent:
-    def test_pack_with_think_steps(self, _mock_connector):
-        from avp.easy import pack
-
-        msg = pack("test problem", model="test-model", think_steps=5)
-        assert msg.context is not None
-        assert msg.content == "test problem"
-
-    def test_pack_latent_has_context(self, _mock_connector):
-        from avp.easy import pack
+class TestThink:
+    def test_returns_avp_context(self, _mock_connector):
         from avp.context import AVPContext
+        from avp.easy import think
 
-        msg = pack("test", model="test-model", think_steps=5)
-        assert isinstance(msg.context, AVPContext)
-        assert msg.context.model_hash == "test-hash"
-        assert msg.context.num_steps == 5
+        ctx = think("test problem", model="test-model")
+        assert isinstance(ctx, AVPContext)
+        assert ctx.model_hash == "test-hash"
+        assert ctx.num_steps == 5
 
-    def test_pack_latent_identity(self, _mock_connector):
-        from avp.easy import pack
+    def test_default_steps_20(self, _mock_connector):
+        from avp.easy import think
 
-        msg = pack("test", model="test-model", think_steps=5)
-        assert msg.identity is not None
-        assert msg.identity["model_hash"] == "test-hash"
+        think("test", model="test-model")
+        call_kwargs = _mock_connector.think.call_args[1]
+        assert call_kwargs["steps"] == 20
+
+    def test_custom_steps(self, _mock_connector):
+        from avp.easy import think
+
+        think("test", model="test-model", steps=5)
+        call_kwargs = _mock_connector.think.call_args[1]
+        assert call_kwargs["steps"] == 5
+
+    def test_with_prior_context(self, _mock_connector):
+        from avp.context import AVPContext
+        from avp.easy import think
+
+        prior = AVPContext(
+            past_key_values=None,
+            model_hash="test-hash",
+            num_steps=3,
+            seq_len=10,
+        )
+        think("continue", model="test-model", context=prior)
+        call_kwargs = _mock_connector.think.call_args[1]
+        assert call_kwargs["context"] is prior
+
+    def test_rejects_non_string(self, _mock_connector):
+        from avp.easy import think
+
+        with pytest.raises(TypeError, match="prompt must be str"):
+            think(123, model="test-model")
+
+    def test_with_metrics(self, _mock_connector):
+        from avp.easy import think
+        from avp.metrics import ThinkMetrics
+
+        result = think("test", model="test-model", collect_metrics=True)
+        assert isinstance(result, tuple)
+        ctx, metrics = result
+        assert isinstance(metrics, ThinkMetrics)
+        assert metrics.model == "test-model"
+        assert metrics.steps == 20
+        assert metrics.duration_s > 0
 
 
-class TestUnpackLatent:
-    def test_unpack_with_model_generates(self, _mock_connector):
-        from avp.easy import pack, unpack
+class TestThinkImport:
+    def test_importable_from_avp(self, _mock_connector):
+        import avp
 
-        msg = pack("What is 2+2?", model="test-model", think_steps=5)
-        result = unpack(msg, model="test-model")
-        assert result == "generated response"
-        # Verify generate() was called with the latent context
-        _mock_connector.generate.assert_called_once()
-        call_kwargs = _mock_connector.generate.call_args
-        assert call_kwargs[1]["context"] is not None
-
-    def test_unpack_latent_context_passthrough(self, _mock_connector):
-        from avp.easy import pack, unpack
-
-        ctx = pack("shared context", model="test-model", think_steps=5)
-        result = unpack("follow up", model="test-model", context=ctx)
-        assert result == "generated response"
-        # Verify context was passed through
-        call_kwargs = _mock_connector.generate.call_args
-        assert call_kwargs[1]["context"] is ctx.context
+        assert hasattr(avp, "think")
+        ctx = avp.think("hello", model="test-model")
+        assert ctx is not None
 
 
 class TestClearCache:
     def test_clear_cache_frees_connectors(self, _mock_connector):
-        from avp.easy import _connector_cache, _identity_cache, clear_cache, pack
+        from avp.easy import _connector_cache, _identity_cache, clear_cache, think
 
-        pack("test", model="test-model", think_steps=5)
-        # Caches may have entries (though we patched, identity cache may be empty)
+        think("test", model="test-model")
         clear_cache()
         assert len(_connector_cache) == 0
         assert len(_identity_cache) == 0

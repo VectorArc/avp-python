@@ -1,46 +1,49 @@
-"""Zero-friction pack()/unpack() API for AVP.
+"""Easy API: avp.think() and avp.generate().
 
-This is the recommended entry point. Progressive layers — you only pay
-for what you use:
+    import avp
 
-  Layer 0: JSON messaging     pack(text) / unpack(data)        (no optional deps)
-  Layer 1: + Model identity   pack(text, model="Qwen/...")     (+ transformers)
-  Layer 2: + Latent context   pack(..., think_steps=20)        (+ torch)
+    # Get latent context
+    context = avp.think("Analyze this problem", model="Qwen/Qwen2.5-7B-Instruct")
 
-Messages are self-describing (first-byte detection). No handshake required.
+    # Generate with latent context
+    answer = avp.generate("Solve it", model="Qwen/Qwen2.5-7B-Instruct", context=context)
 
-When to use pack()/unpack() vs HuggingFaceConnector directly:
-  - pack()/unpack(): Simple integration, gradual opt-in to latent features.
-    Manages connector lifecycle, caching, and identity extraction for you.
-  - HuggingFaceConnector: Direct control over model loading, device placement,
-    batch generation, and AVPContext serialization. Use when you need to manage
-    the model yourself or integrate with custom orchestration.
+    # Or do both in one call
+    answer = avp.generate("Analyze and solve: 24*17+3", model="Qwen/Qwen2.5-7B-Instruct")
+
+For direct connector access (advanced):
+    connector = avp.HuggingFaceConnector.from_pretrained("Qwen/...")
+    context = connector.think("...", steps=20)
+    answer = connector.generate("...", context=context)
 """
 
 import json
 import logging
 import time as _time
 import threading
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
 from .types import AVP_VERSION_HEADER, MAGIC
 
 if TYPE_CHECKING:
-    from .metrics import GenerateMetrics, PackMetrics, UnpackMetrics
+    from .context import AVPContext
+    from .metrics import GenerateMetrics, ThinkMetrics
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# PackedMessage
+# PackedMessage (DEPRECATED — kept for backward compatibility)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class PackedMessage:
-    """A packed AVP message. Strings in, strings out.
+    """A packed AVP message.
 
-    str(msg) returns the text content. bytes(msg) returns wire bytes.
+    .. deprecated:: 0.3.0
+        Use ``avp.think()`` to create latent context (returns ``AVPContext``).
     """
 
     content: str
@@ -74,20 +77,12 @@ class PackedMessage:
     def from_wire(cls, data: Union[bytes, bytearray, memoryview, str]) -> "PackedMessage":
         """Decode wire data into a PackedMessage for inspection.
 
-        Use this when you need access to identity or context, not just text.
-
-        Example::
-
-            msg = PackedMessage.from_wire(wire_bytes)
-            print(msg.content)    # text
-            print(msg.identity)   # model identity dict (if present)
-            print(msg.context)    # AVPContext (if binary with latent data)
         """
         return _decode_input(data)
 
 
 # ---------------------------------------------------------------------------
-# Identity helpers (Layer 1)
+# Identity helpers
 # ---------------------------------------------------------------------------
 
 _identity_cache: Dict[str, Dict[str, Any]] = {}
@@ -134,7 +129,7 @@ def _get_local_identity(model_name: str) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Connector caching (Layer 2)
+# Connector caching
 # ---------------------------------------------------------------------------
 
 _connector_cache: Dict[str, Any] = {}
@@ -165,131 +160,67 @@ def clear_cache() -> None:
 
 
 # ---------------------------------------------------------------------------
-# pack()
+# think()
 # ---------------------------------------------------------------------------
 
 
-def pack(
-    content: str,
+def think(
+    prompt: str,
     *,
-    model: Optional[str] = None,
-    context: Optional[PackedMessage] = None,
-    think_steps: int = 0,
-    universal: bool = False,
-    rollout_steps: int = 256,
+    model: str,
+    steps: int = 20,
+    context: Optional["AVPContext"] = None,
     collect_metrics: bool = False,
-) -> Union[PackedMessage, Tuple[PackedMessage, "PackMetrics"]]:
-    """Pack a text message for transfer between agents.
+) -> Union["AVPContext", Tuple["AVPContext", "ThinkMetrics"]]:
+    """Run latent thinking steps on a prompt. Returns AVPContext.
+
+    Equivalent to creating a HuggingFaceConnector and calling
+    ``connector.think()``, but handles model loading and caching for you.
 
     Examples::
 
-        msg = avp.pack("Hello")                              # Layer 0: JSON
-        msg = avp.pack("Hello", model="Qwen/Qwen2.5-7B")    # Layer 1: + identity
-        msg = avp.pack("Hello", model="Qwen/...",            # Layer 2: + latent
-                        think_steps=20)
-        msg = avp.pack("Hello", model="Qwen/...",            # Layer 2: + universal
-                        universal=True)
-
-        # With metrics:
-        msg, metrics = avp.pack("Hello", collect_metrics=True)
+        context = avp.think("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
+        context = avp.think("Continue", model="Qwen/...", context=prior_context)
 
     Args:
-        content: The text to send.
-        model: HuggingFace model name/path (self-hosted, local weights).
-            Layer 1 downloads only the config (~1 KB) for identity.
-            Layer 2 (think_steps > 0 or universal=True) loads the full model.
-        context: A previous PackedMessage whose latent context should be reused.
-        think_steps: Number of latent thinking steps. 0 = no latent (Layer 0/1).
-            20 is the recommended value (accuracy plateaus beyond this).
-            Ignored when universal=True.
-        universal: If True, encode into universal representation tokens
-            instead of same-model KV-cache. Requires a trained adapter.
-        rollout_steps: Number of latent rollout steps for universal encoding.
-            Only used when universal=True. Default: 256.
-        collect_metrics: If True, return ``(PackedMessage, PackMetrics)`` tuple.
+        prompt: The text prompt to think about.
+        model: HuggingFace model name/path (required).
+        steps: Number of latent thinking steps. Default 20.
+        context: Prior AVPContext to continue from.
+        collect_metrics: If True, return ``(AVPContext, ThinkMetrics)`` tuple.
 
     Returns:
-        PackedMessage — use str(msg) for text, bytes(msg) for wire format.
-        If collect_metrics=True, returns (PackedMessage, PackMetrics).
+        AVPContext containing the KV-cache and metadata.
+        If collect_metrics=True, returns (AVPContext, ThinkMetrics).
     """
     t_start = _time.perf_counter()
 
-    if not isinstance(content, str):
-        raise TypeError(f"pack() content must be str, got {type(content).__name__}")
-    if think_steps > 0 and model is None:
-        raise ValueError("think_steps requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
-    if universal and model is None:
-        raise ValueError("universal=True requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
+    if not isinstance(prompt, str):
+        raise TypeError(f"think() prompt must be str, got {type(prompt).__name__}")
 
-    identity = None
-    avp_context = None
-    identity_duration = 0.0
-    think_duration = 0.0
+    connector = _get_or_create_connector(model)
+    t_think = _time.perf_counter()
+    avp_context = connector.think(prompt, steps=steps, context=context)
+    think_duration = _time.perf_counter() - t_think
 
-    if model is not None:
-        t_id = _time.perf_counter()
-        identity = _get_local_identity(model)
-        identity_duration = _time.perf_counter() - t_id
-
-        if universal:
-            import warnings
-            warnings.warn(
-                "universal=True is deprecated and will be removed in a future version. "
-                "Universal KV-cache priming via inputs_embeds has been validated negative "
-                "on text-only LLMs (0% same-model accuracy). "
-                "Use think_steps for same-model or rosetta projection for cross-model.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            connector = _get_or_create_connector(model)
-            t_think = _time.perf_counter()
-            avp_context = connector.encode_universal(content, steps=rollout_steps)
-            think_duration = _time.perf_counter() - t_think
-            logger.info(
-                "pack() universal encoding: rollout_steps=%d duration=%.3fs",
-                rollout_steps, think_duration,
-            )
-        elif think_steps > 0:
-            connector = _get_or_create_connector(model)
-            prior_context = context.context if context is not None else None
-            t_think = _time.perf_counter()
-            avp_context = connector.think(
-                content, steps=think_steps, context=prior_context
-            )
-            think_duration = _time.perf_counter() - t_think
-            logger.info(
-                "pack() latent thinking: steps=%d duration=%.3fs",
-                think_steps, think_duration,
-            )
-
-    layer = 0 if model is None else (2 if (think_steps > 0 or universal) else 1)
-    logger.debug(
-        "pack() layer=%d model=%s think_steps=%d universal=%s",
-        layer, model, think_steps, universal,
-    )
-
-    result = PackedMessage(
-        content=content,
-        identity=identity,
-        context=avp_context,
-        model=model,
+    logger.info(
+        "think() model=%s steps=%d duration=%.3fs",
+        model, steps, think_duration,
     )
 
     if collect_metrics:
-        from .metrics import PackMetrics
+        from .metrics import ThinkMetrics
 
-        metrics = PackMetrics(
-            layer=layer,
+        metrics = ThinkMetrics(
             model=model,
-            think_steps=think_steps,
+            steps=steps,
             has_prior_context=context is not None,
             duration_s=_time.perf_counter() - t_start,
-            identity_duration_s=identity_duration,
             think_duration_s=think_duration,
         )
-        return result, metrics
+        return avp_context, metrics
 
-    return result
+    return avp_context
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +233,8 @@ def generate(
     *,
     model: str,
     source_model: Optional[str] = None,
-    think_steps: int = 20,
+    steps: int = 20,
+    context: Optional["AVPContext"] = None,
     store: Optional[Any] = None,
     store_key: Optional[str] = None,
     prior_key: Optional[str] = None,
@@ -312,42 +244,30 @@ def generate(
 ) -> Union[str, Tuple[str, "GenerateMetrics"]]:
     """Think about a prompt, optionally store/retrieve context, and generate text.
 
-    Combines pack() + ContextStore + unpack() into a single call.  This is
-    the pattern every agent framework integration needs::
+    One-liner for the common think + generate pattern::
 
-        # Before (7 lines):
-        packed = avp.pack(prompt, model=M, think_steps=20, context=prior)
-        store.store("researcher", packed)
-        text = avp.unpack(packed, model=M, max_new_tokens=256)
+        text = avp.generate("Solve: 2+2", model="Qwen/Qwen2.5-7B-Instruct")
 
-        # After (1 line):
-        text = avp.generate(prompt, model=M, store=store,
-                            store_key="researcher")
-
-    Without a store, it still collapses the pack→unpack dance::
-
-        text = avp.generate(prompt, model=M)
-
-    Cross-model (Rosetta projection) in one line::
+    Cross-model (Rosetta projection)::
 
         text = avp.generate(prompt, model="target", source_model="source")
 
+    With context store for multi-turn::
+
+        text = avp.generate(prompt, model=M, store=store, store_key="agent-a")
+
     Args:
         content: The prompt text.
-        model: HuggingFace model name/path (required — generate always
-            needs a model).
-        source_model: Optional source model for cross-model projection.
-            When set, thinks on the source model and projects the hidden
-            state to the target model (``model``) via Rosetta Stone.
-        think_steps: Number of latent thinking steps.  Defaults to 20
-            (the recommended value).  Set to 0 for text-only generation
-            without latent context.
+        model: HuggingFace model name/path (required).
+        source_model: Source model for cross-model projection. When set,
+            thinks on the source model and projects to the target (``model``)
+            via Rosetta Stone.
+        steps: Number of latent thinking steps. Default 20. Set to 0 for
+            text-only generation without latent context.
+        context: Prior AVPContext to continue from.
         store: A ``ContextStore`` instance for automatic context management.
-            Required if *store_key* or *prior_key* is set.
-        store_key: If set, the packed context is stored under this key
-            after thinking (requires *store*).
-        prior_key: If set, retrieve prior context from *store* under this
-            key and pass it as input context (requires *store*).
+        store_key: Store the context under this key after thinking.
+        prior_key: Retrieve prior context from store under this key.
         max_new_tokens: Max tokens for generation.
         temperature: Sampling temperature.
         collect_metrics: If True, return ``(str, GenerateMetrics)`` tuple.
@@ -369,7 +289,7 @@ def generate(
         target_connector = _get_or_create_connector(model)
 
         t_think = _time.perf_counter()
-        source_context = source_connector.think(content, steps=think_steps)
+        source_context = source_connector.think(content, steps=steps)
         think_duration = _time.perf_counter() - t_think
 
         t_gen = _time.perf_counter()
@@ -393,7 +313,7 @@ def generate(
 
             metrics = GenerateMetrics(
                 model=model,
-                think_steps=think_steps,
+                steps=steps,
                 has_prior_context=False,
                 stored=False,
                 duration_s=_time.perf_counter() - t_start,
@@ -404,32 +324,30 @@ def generate(
 
         return text
 
-    # Same-model path (existing behavior)
+    # Same-model path
 
     # Retrieve prior context from store
-    prior_context: Optional[PackedMessage] = None
     if prior_key is not None and store is not None:
-        prior_context = store.get(prior_key)
+        prior = store.get(prior_key)
+        if prior is not None:
+            context = prior
 
-    # Pack (think)
+    # Think
     t_think = _time.perf_counter()
-    packed = pack(
-        content,
-        model=model,
-        context=prior_context,
-        think_steps=think_steps,
-    )
+    if steps > 0:
+        avp_context = think(content, model=model, steps=steps, context=context)
+    else:
+        avp_context = context
     think_duration = _time.perf_counter() - t_think
 
-    # Store
+    # Store context
     stored = False
-    if store_key is not None and store is not None:
-        store.store(store_key, packed)
+    if store_key is not None and store is not None and avp_context is not None:
+        store.store(store_key, avp_context)
         stored = True
 
     # Generate text
     connector = _get_or_create_connector(model)
-    avp_context = packed.context
 
     t_gen = _time.perf_counter()
     text = connector.generate(
@@ -441,8 +359,8 @@ def generate(
     generate_duration = _time.perf_counter() - t_gen
 
     logger.debug(
-        "generate() model=%s think_steps=%d stored=%s prior=%s",
-        model, think_steps, store_key, prior_key,
+        "generate() model=%s steps=%d stored=%s prior=%s",
+        model, steps, store_key, prior_key,
     )
     logger.info(
         "generate() think=%.3fs generate=%.3fs total=%.3fs",
@@ -454,8 +372,8 @@ def generate(
 
         metrics = GenerateMetrics(
             model=model,
-            think_steps=think_steps,
-            has_prior_context=prior_context is not None,
+            steps=steps,
+            has_prior_context=context is not None,
             stored=stored,
             duration_s=_time.perf_counter() - t_start,
             think_duration_s=think_duration,
@@ -467,8 +385,89 @@ def generate(
 
 
 # ---------------------------------------------------------------------------
-# unpack()
+# Deprecated: pack() / unpack()
 # ---------------------------------------------------------------------------
+
+
+def pack(
+    content: str,
+    *,
+    model: Optional[str] = None,
+    context: Optional[PackedMessage] = None,
+    think_steps: int = 0,
+    universal: bool = False,
+    rollout_steps: int = 256,
+    collect_metrics: bool = False,
+) -> Union[PackedMessage, Tuple[PackedMessage, Any]]:
+    """Pack a text message for transfer between agents.
+
+    .. deprecated:: 0.3.0
+        Use ``avp.think()`` for latent context or ``avp.generate()`` for text.
+    """
+    warnings.warn(
+        "avp.pack() is deprecated and will be removed in v0.4. "
+        "Use avp.think() for latent context or avp.generate() for text output.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    t_start = _time.perf_counter()
+
+    if not isinstance(content, str):
+        raise TypeError(f"pack() content must be str, got {type(content).__name__}")
+    if think_steps > 0 and model is None:
+        raise ValueError("think_steps requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
+    if universal and model is None:
+        raise ValueError("universal=True requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
+
+    identity = None
+    avp_context = None
+    think_duration = 0.0
+
+    if model is not None:
+        identity = _get_local_identity(model)
+
+        if universal:
+            warnings.warn(
+                "universal=True is deprecated and will be removed in a future version. "
+                "Universal KV-cache priming via inputs_embeds has been validated negative "
+                "on text-only LLMs (0% same-model accuracy). "
+                "Use think_steps for same-model or rosetta projection for cross-model.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            connector = _get_or_create_connector(model)
+            t_think = _time.perf_counter()
+            avp_context = connector.encode_universal(content, steps=rollout_steps)
+            think_duration = _time.perf_counter() - t_think
+        elif think_steps > 0:
+            connector = _get_or_create_connector(model)
+            prior_context = context.context if context is not None else None
+            t_think = _time.perf_counter()
+            avp_context = connector.think(
+                content, steps=think_steps, context=prior_context
+            )
+            think_duration = _time.perf_counter() - t_think
+
+    result = PackedMessage(
+        content=content,
+        identity=identity,
+        context=avp_context,
+        model=model,
+    )
+
+    if collect_metrics:
+        from .metrics import ThinkMetrics
+
+        metrics = ThinkMetrics(
+            model=model,
+            steps=think_steps,
+            has_prior_context=context is not None,
+            duration_s=_time.perf_counter() - t_start,
+            think_duration_s=think_duration,
+        )
+        return result, metrics
+
+    return result
 
 
 def unpack(
@@ -479,34 +478,18 @@ def unpack(
     max_new_tokens: int = 512,
     temperature: float = 0.7,
     collect_metrics: bool = False,
-) -> Union[str, Tuple[str, "UnpackMetrics"]]:
+) -> Union[str, Tuple[str, Any]]:
     """Unpack an AVP message back to text. Optionally generate a response.
 
-    Accepts any format — AVP binary, AVP JSON, legacy JSONMessage, plain text,
-    or a PackedMessage object. Format is detected automatically.
-
-    Examples::
-
-        text = avp.unpack(wire_bytes)                          # extract text
-        text = avp.unpack("plain string")                      # passthrough
-        answer = avp.unpack(msg, model="Qwen/Qwen2.5-7B")     # generate response
-
-        # With metrics:
-        text, metrics = avp.unpack("hello", collect_metrics=True)
-
-    Args:
-        data: Wire bytes, JSON string, raw text, or PackedMessage.
-        model: HuggingFace model name/path for generation. If None, just
-            extracts text (no model needed, no GPU needed).
-        context: Previous PackedMessage providing latent context for generation.
-        max_new_tokens: Max tokens for generation (only used with model=).
-        temperature: Sampling temperature for generation (only used with model=).
-        collect_metrics: If True, return ``(str, UnpackMetrics)`` tuple.
-
-    Returns:
-        The text content, or generated response if model= is provided.
-        If collect_metrics=True, returns (str, UnpackMetrics).
+    .. deprecated:: 0.3.0
+        Use ``avp.generate()`` for text generation.
     """
+    warnings.warn(
+        "avp.unpack() is deprecated and will be removed in v0.4. "
+        "Use avp.generate() for text generation.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     t_start = _time.perf_counter()
 
     input_format = _detect_format(data)
@@ -536,11 +519,6 @@ def unpack(
             temperature=temperature,
         )
         generate_duration = _time.perf_counter() - t_gen
-        has_ctx = avp_context is not None
-        logger.info(
-            "unpack() generated: has_context=%s duration=%.3fs",
-            has_ctx, generate_duration,
-        )
 
     if collect_metrics:
         from .metrics import UnpackMetrics
@@ -564,8 +542,13 @@ def unpack(
     return text
 
 
+# ---------------------------------------------------------------------------
+# Internal decode helpers
+# ---------------------------------------------------------------------------
+
+
 def _detect_format(data: Union[bytes, bytearray, memoryview, str, "PackedMessage"]) -> str:
-    """Determine input format label for metrics."""
+    """Determine input format label."""
     if isinstance(data, PackedMessage):
         return "packed_message"
     if isinstance(data, (bytes, bytearray, memoryview)):
@@ -584,11 +567,6 @@ def _detect_format(data: Union[bytes, bytearray, memoryview, str, "PackedMessage
             return "json"
         return "text"
     return "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Input decoding
-# ---------------------------------------------------------------------------
 
 
 def _decode_input(data: Union[bytes, str, "PackedMessage"]) -> PackedMessage:
@@ -611,7 +589,7 @@ def _decode_input(data: Union[bytes, str, "PackedMessage"]) -> PackedMessage:
     if isinstance(data, str):
         return _decode_json_or_text(data)
 
-    raise TypeError(f"unpack() expects bytes, str, or PackedMessage, got {type(data).__name__}")
+    raise TypeError(f"Expected bytes or str, got {type(data).__name__}")
 
 
 def _decode_json_or_text(text: str) -> PackedMessage:

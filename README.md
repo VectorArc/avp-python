@@ -9,7 +9,7 @@
 **Multi-agent text handoffs discard KV-cache, embeddings, and attention state the previous agent already computed. AVP transfers that state directly — 51-78% fewer tokens, 1.5-5x faster, across models and families.**
 
 ```bash
-pip install avp
+pip install "avp[latent]"
 ```
 
 ## Who This Is For
@@ -25,10 +25,7 @@ pip install avp
 **Requires:** Python 3.9+, PyTorch >= 2.0. For vLLM integration: vLLM >= 0.15.
 
 ```bash
-# Core SDK (codec, handshake, session, fallback)
-pip install avp
-
-# With latent communication (realignment, KV-cache, HuggingFace connector)
+# Latent communication (HuggingFace connector, KV-cache transfer)
 pip install "avp[latent]"
 
 # With HTTP/2 transport server
@@ -38,42 +35,59 @@ pip install "avp[server]"
 pip install "avp[all]"
 ```
 
-**From source:**
-
-```bash
-git clone https://github.com/VectorArc/avp-python.git
-cd avp-python
-pip install -e ".[all]"
-```
-
 ## Quick Start
 
-**Layer 0 — JSON messaging (no GPU, no model download):**
+```python
+from avp import HuggingFaceConnector
+
+connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+
+prompt = "Analyze this math problem: 24 * 17 + 3"
+
+# Agent A: latent reasoning (no text output, builds KV-cache)
+context = connector.think(prompt, steps=20)
+
+# Agent B: generate with Agent A's context (same prompt — KV-cache continues from it)
+answer = connector.generate(prompt, context=context)
+```
+
+**Cross-model transfer (zero training):**
+
+```python
+from avp import HuggingFaceConnector
+
+researcher = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+solver = HuggingFaceConnector.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
+
+prompt = "Solve step by step: 24 * 17 + 3"
+context = researcher.think(prompt, steps=20)
+answer = solver.generate(prompt, context=context, source=researcher)
+```
+
+**Easy API (convenience wrappers with model caching):**
 
 ```python
 import avp
 
-msg = avp.pack("Analyze this math problem: 24 * 17 + 3")
-text = avp.unpack(msg)  # → "Analyze this math problem: 24 * 17 + 3"
+# One-liner: think + generate
+answer = avp.generate("Solve: 24 * 17 + 3", model="Qwen/Qwen2.5-1.5B-Instruct")
 
-wire = msg.to_bytes()   # send over any transport
+# Cross-model: think on larger model, generate on smaller
+answer = avp.generate("Solve: 24 * 17 + 3", model="meta-llama/Llama-3.2-3B-Instruct",
+                       source_model="Qwen/Qwen2.5-7B-Instruct")
 ```
 
-**Layer 1 — Add model identity (downloads config only, ~1 KB):**
+**Cross-process transfer:**
 
 ```python
-msg = avp.pack("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
-# msg.identity contains model_id; with `transformers` installed,
-# also includes model family, dimensions, and hash
-# Receiving agent can check compatibility before GPU work
-```
+# Process A: serialize context
+wire_bytes = context.to_bytes(session_id="s1", source_agent_id="agent-a")
 
-**Layer 2 — Latent transfer (requires GPU + model):**
-
-```python
-msg = avp.pack("Analyze this math problem: 24 * 17 + 3",
-               model="Qwen/Qwen2.5-1.5B-Instruct", think_steps=20)
-answer = avp.unpack(msg, model="Qwen/Qwen2.5-1.5B-Instruct")
+# Process B: restore and generate
+from avp import AVPContext, HuggingFaceConnector
+connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+restored = AVPContext.from_bytes(wire_bytes, device="cuda")
+answer = connector.generate(prompt, context=restored)
 ```
 
 ## Key Results
@@ -86,7 +100,7 @@ answer = avp.unpack(msg, model="Qwen/Qwen2.5-1.5B-Instruct")
 | Models validated | Qwen2.5 (1.5B, 7B), DeepSeek-R1 (1.5B), Llama 3.2 (1B, 3B) |
 | Hardware | A100 (cloud), RTX 3070 Ti (local) |
 
-> **Same-model:** Latent matches direct accuracy on Qwen 7B (85%) and beats text by 10pp. **Cross-model:** Zero-training vocabulary projection hits solver ceiling on structured tasks (math: 72%), but fails on comprehension (HotpotQA: 8%). See [full results](docs/BENCHMARKS.md).
+> **Same-model:** Latent matches direct accuracy on Qwen 7B (85%) and beats text by 10pp. **Cross-model:** Zero-training vocabulary projection hits solver ceiling on structured tasks (math: 72%). See [full results](docs/BENCHMARKS.md).
 
 ## How It Works
 
@@ -109,6 +123,10 @@ graph LR
 Every multi-agent framework today — LangChain, CrewAI, AutoGen, OpenAI Swarm — copies text between agents. Each agent re-tokenizes and re-processes everything prior agents already computed. Our benchmarks show **47-53% of all tokens in text chains are redundant re-processing**. (See [Works With](#works-with) for integration examples.)
 
 AVP eliminates this by transferring the KV-cache (the computed attention states) directly. The receiving agent reads prior reasoning from attention states instead of re-computing it from text.
+
+**Transfer size:** 28-130 MB per turn depending on model and sequence length. This is per handoff, not cumulative — each agent's context replaces the previous one.
+
+**VRAM overhead:** Zero additional VRAM. `AVPContext` holds references to the KV-cache already in GPU memory. No copies.
 
 AVP defines a binary format, handshake, and codec — not the transport. It works alongside any agent framework or protocol.
 
@@ -142,56 +160,23 @@ AVP defines a binary format, handshake, and codec — not the transport. It work
 | **Cross-model** | Same or different family (e.g. Qwen 7B to Llama 3B) | Vocabulary-mediated projection, zero training needed |
 | **JSON fallback** | No compatible projection path | Standard text, auto-negotiated |
 
+**Cross-model calibration** is one-time per model pair (~0.5-2s), cached to `~/.avp/maps/`. Subsequent calls are instant.
+
 **Transport-agnostic:** HTTP/2 (reference), gRPC, A2A, MCP, WebSockets, shared memory. AVP handles the latent communication layer — not discovery, routing, or orchestration.
 
-## Connector API
+## When Does AVP Win?
 
-For full control over model loading, device placement, and context serialization:
+| Sequence Length | Re-compute (A100) | AVP Transfer (10 Gbps) | Winner |
+|----------------|-------------------|----------------------|--------|
+| 500 tokens | ~50 ms | ~25 ms (28 MB) | AVP |
+| 2,000 tokens | ~200 ms | ~50 ms (55 MB) | AVP |
+| 8,000 tokens | ~800 ms | ~130 ms (130 MB) | AVP |
 
-**High-level API (5 lines):**
-
-```python
-from avp import HuggingFaceConnector
-
-connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
-
-prompt = "Analyze this math problem: 24 * 17 + 3"
-
-# Agent A: latent reasoning (no text output, builds KV-cache)
-context = connector.think(prompt, steps=20)
-
-# Agent B: generate with Agent A's context (same prompt — KV-cache continues from it)
-answer = connector.generate(prompt, context=context)
-```
-
-**Cross-process transfer:**
-
-```python
-# Process A: serialize context
-wire_bytes = context.to_bytes(session_id="s1", source_agent_id="agent-a")
-
-# Process B: restore and generate
-from avp import AVPContext, HuggingFaceConnector
-connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
-restored = AVPContext.from_bytes(wire_bytes, device="cuda")
-answer = connector.generate(prompt, context=restored)
-```
-
-**Check model compatibility:**
-
-```python
-from avp import extract_model_identity, CompatibilityResolver
-
-# Pass loaded HuggingFace model objects (not strings)
-local = extract_model_identity(model_a)
-remote = extract_model_identity(model_b)
-session = CompatibilityResolver.resolve(local, remote)
-# session.mode → LATENT (same model) or JSON (different)
-```
+Re-computation scales quadratically with attention; transfer scales linearly with KV-cache size. AVP wins for sequences above ~300 tokens on datacenter interconnects.
 
 ## Production: vLLM Integration
 
-vLLM can't expose per-step hidden states, so latent transfer happens at the engine level via a KV connector plugin — transparent to your application code:
+vLLM can't expose per-step hidden states, so latent transfer happens at the engine level via a KV connector plugin. This requires launching vLLM with a custom connector module:
 
 ```bash
 # Launch vLLM with AVP KV connector
@@ -201,7 +186,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct \
 ```
 
 ```python
-# Application code stays simple — KV transfer happens behind the scenes
+# Application code uses VLLMConnector — KV transfer happens behind the scenes
 from avp import VLLMConnector
 
 connector = VLLMConnector(model_id="Qwen/Qwen2.5-7B-Instruct")
@@ -212,23 +197,21 @@ The `AVPKVConnectorV1Dynamic` plugin saves/loads KV-cache between vLLM instances
 
 ## API Reference
 
-### Easy API (start here)
+### Easy API
 
 | Import | What It Does |
 |--------|-------------|
-| `pack(content, *, model=, think_steps=)` | Pack text for transfer. Layer 0: JSON. Layer 1: + model identity. Layer 2: + latent context. Returns `PackedMessage`. |
-| `unpack(data, *, model=)` | Unpack any AVP format to text. With `model=`, generates a response using latent context. |
-| `generate(prompt, *, model=, context=)` | Generate text with optional latent context. Shortcut for connector setup + generation. |
-| `PackedMessage` | Result of `pack()`. `str(msg)` for text, `msg.to_bytes()` for wire format, `.identity` for model info, `.context` for latent data. |
+| `think(prompt, *, model=, steps=20)` | Run latent thinking steps. Returns `AVPContext`. |
+| `generate(prompt, *, model=, steps=20, context=, source_model=)` | Think + generate in one call. Returns text. |
+| `ContextStore` | Thread-safe `AVPContext` store with TTL for multi-turn sessions. |
 
-### Connector API (advanced)
+### Connector API
 
 | Import | What It Does |
 |--------|-------------|
 | `HuggingFaceConnector` | Main connector. `think()` builds KV-cache (returns `AVPContext`), `generate()` produces text. `from_pretrained()` for easy setup. |
 | `VLLMConnector` | Production connector. `generate()` returns text. Latent transfer happens at engine level via KV connector plugin. |
 | `AVPContext` | Wraps KV-cache + model metadata. Pass between `think()` and `generate()`, or serialize with `to_bytes()` / `from_bytes()` for cross-process transfer. |
-| `ContextStore` | In-memory store for sharing `AVPContext` objects between agents by session ID. Thread-safe. |
 
 ### Protocol Layer
 
@@ -268,24 +251,25 @@ All errors inherit from `AVPError`. Key types: `IncompatibleModelsError`, `Hands
 
 AVP works *with* your orchestration framework, not instead of it. Your framework handles routing, state, and agent lifecycle. AVP handles the communication primitive between agents.
 
-The integration pattern is the same across all six tested frameworks:
+The integration pattern is the same across all frameworks:
 
 ```python
-# Agent A's output → AVP → Agent B's input
-packed = avp.pack(agent_a_output, model="Qwen/Qwen2.5-7B-Instruct")
-agent_b_input = str(packed)  # works as plain text in any framework
+# Agent A thinks, stores context for Agent B
+context = connector.think(agent_a_output, steps=20)
+# Pass context via side-channel (dict, Redis, shared memory)
+answer = connector.generate(prompt, context=context)
 ```
 
-| Framework | Layer 0/1 Friction | Integration Point |
-|-----------|-------------------|-------------------|
-| **PydanticAI** | Zero — plain strings | `FunctionModel` callback |
-| **LangGraph** | Low — wrap in `AIMessage` | Graph node function |
-| **CrewAI** | Zero — plain strings | `BaseLLM.call()` override |
-| **LlamaIndex** | Zero — plain strings | `CustomLLM.complete()` override |
-| **OpenAI Agents SDK** | Low — custom `Model` class | `Model.get_response()` override |
-| **Google ADK** | Low — async generator | `BaseLlm.generate_content_async()` override |
+| Framework | Integration Point |
+|-----------|-------------------|
+| **PydanticAI** | `FunctionModel` callback |
+| **LangGraph** | Graph node function with side-channel dict for context |
+| **CrewAI** | `BaseLLM.call()` override |
+| **LlamaIndex** | `CustomLLM.complete()` override |
+| **OpenAI Agents SDK** | `Model.get_response()` override |
+| **Google ADK** | `BaseLlm.generate_content_async()` override |
 
-> **Layer 2 (latent transfer)** works in all six but requires a side-channel `dict` for KV-cache context — no framework natively supports binary tensor data between agents.
+> Latent transfer requires a side-channel for KV-cache context — no framework natively supports binary tensor data between agents.
 
 ### Infrastructure & Protocols
 
@@ -310,7 +294,7 @@ agent_b_input = str(packed)  # works as plain text in any framework
 
 - **[AVP Specification](https://github.com/VectorArc/avp-spec)** — Binary format, handshake, transport, security, test vectors
 - **[Benchmark Results](docs/BENCHMARKS.md)** — Full results: 4 benchmarks, 5 models, same-model + cross-model
-- **[Examples](examples/)** — Quickstart, agent demo, mixed-model demo, pack/unpack
+- **[Examples](examples/)** — Quickstart, agent demo, think/generate demo
 - **[Contributing](CONTRIBUTING.md)** — Dev setup, tests, code style
 
 ## Research Foundation

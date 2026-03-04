@@ -69,28 +69,28 @@ class TestGenerateBasic:
     def test_calls_think_and_generate(self, _mock_connector):
         from avp.easy import generate
 
-        generate("hello", model="test-model", think_steps=10)
+        generate("hello", model="test-model", steps=10)
         _mock_connector.think.assert_called_once()
         _mock_connector.generate.assert_called_once()
 
-    def test_think_steps_default_20(self, _mock_connector):
+    def test_steps_default_20(self, _mock_connector):
         from avp.easy import generate
 
         generate("hello", model="test-model")
         call_args = _mock_connector.think.call_args
         assert call_args[1]["steps"] == 20
 
-    def test_custom_think_steps(self, _mock_connector):
+    def test_custom_steps(self, _mock_connector):
         from avp.easy import generate
 
-        generate("hello", model="test-model", think_steps=5)
+        generate("hello", model="test-model", steps=5)
         call_args = _mock_connector.think.call_args
         assert call_args[1]["steps"] == 5
 
-    def test_zero_think_steps(self, _mock_connector):
+    def test_zero_steps(self, _mock_connector):
         from avp.easy import generate
 
-        generate("hello", model="test-model", think_steps=0)
+        generate("hello", model="test-model", steps=0)
         _mock_connector.think.assert_not_called()
         _mock_connector.generate.assert_called_once()
 
@@ -98,7 +98,7 @@ class TestGenerateBasic:
         from avp.easy import generate
 
         generate(
-            "hello", model="test-model", think_steps=0,
+            "hello", model="test-model", steps=0,
             max_new_tokens=128, temperature=0.3,
         )
         call_kwargs = _mock_connector.generate.call_args[1]
@@ -112,16 +112,17 @@ class TestGenerateBasic:
 
 
 class TestGenerateStore:
-    def test_store_key_stores_packed(self, _mock_connector):
+    def test_store_key_stores_context(self, _mock_connector):
+        from avp.context import AVPContext
         from avp.context_store import ContextStore
-        from avp.easy import PackedMessage, generate
+        from avp.easy import generate
 
         store = ContextStore()
         generate("hello", model="test-model", store=store, store_key="agent-a")
 
         result = store.get("agent-a")
         assert result is not None
-        assert isinstance(result, PackedMessage)
+        assert isinstance(result, AVPContext)
 
     def test_prior_key_retrieves_context(self, _mock_connector):
         from avp.context_store import ContextStore
@@ -225,12 +226,12 @@ class TestGenerateMetrics:
 
         store = ContextStore()
         _, metrics = generate(
-            "hello", model="test-model", think_steps=10,
+            "hello", model="test-model", steps=10,
             store=store, store_key="a",
             collect_metrics=True,
         )
         assert metrics.model == "test-model"
-        assert metrics.think_steps == 10
+        assert metrics.steps == 10
         assert metrics.stored is True
         assert metrics.duration_s > 0
         assert metrics.think_duration_s >= 0
