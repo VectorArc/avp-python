@@ -172,5 +172,10 @@ def run_text_benchmark(
         if verbose:
             status = "PASS" if result["correct"] else "FAIL"
             print(f"  => {status} (time={result['wall_time']:.1f}s)")
+        else:
+            passed = sum(1 for r in results if r["correct"])
+            print(f"  [Text] {i + 1}/{len(dataset)} "
+                  f"({passed}/{i + 1} passed, {result['wall_time']:.1f}s)",
+                  flush=True)
 
     return results

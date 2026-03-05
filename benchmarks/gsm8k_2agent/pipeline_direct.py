@@ -102,4 +102,10 @@ def run_direct_benchmark(
         )
         results.append(result)
 
+        if not verbose:
+            correct = sum(1 for r in results if r["correct"])
+            print(f"  [Direct] {i + 1}/{len(dataset)} "
+                  f"({correct}/{i + 1} correct, {result['wall_time']:.1f}s)",
+                  flush=True)
+
     return results

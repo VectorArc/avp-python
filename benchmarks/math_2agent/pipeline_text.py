@@ -170,5 +170,10 @@ def run_text_benchmark(
             status = "CORRECT" if result["correct"] else "WRONG"
             print(f"  => {status} (pred={result['prediction']}, gold={result['gold']}, "
                   f"time={result['wall_time']:.1f}s)")
+        else:
+            correct = sum(1 for r in results if r["correct"])
+            print(f"  [Text] {i + 1}/{len(dataset)} "
+                  f"({correct}/{i + 1} correct, {result['wall_time']:.1f}s)",
+                  flush=True)
 
     return results

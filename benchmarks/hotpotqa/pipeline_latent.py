@@ -213,5 +213,12 @@ def run_latent_benchmark(
                   f"gold='{result['gold']}', F1={result['f1']:.2f}, "
                   f"time={result['wall_time']:.1f}s, "
                   f"codec={result['codec_overhead_ms']:.1f}ms)")
+        else:
+            correct = sum(1 for r in results if r["exact_match"])
+            f1s = [r["f1"] for r in results]
+            mean_f1 = sum(f1s) / len(f1s)
+            print(f"  [Latent] {i + 1}/{len(dataset)} "
+                  f"(EM={correct}/{i + 1}, F1={mean_f1:.2f}, {result['wall_time']:.1f}s)",
+                  flush=True)
 
     return results

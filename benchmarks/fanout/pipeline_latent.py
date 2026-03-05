@@ -231,5 +231,10 @@ def run_latent_benchmark(
                   f"time={result['wall_time']:.1f}s, "
                   f"codec={result['codec_overhead_ms']:.1f}ms, "
                   f"parallel_speedup={result['parallel_speedup_potential']:.1f}x)")
+        else:
+            correct = sum(1 for r in results if r["correct"])
+            print(f"  [Latent] {i + 1}/{len(dataset)} "
+                  f"({correct}/{i + 1} correct, {result['wall_time']:.1f}s)",
+                  flush=True)
 
     return results

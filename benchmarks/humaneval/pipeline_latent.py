@@ -201,5 +201,10 @@ def run_latent_benchmark(
             print(f"  => {status} (time={result['wall_time']:.1f}s, "
                   f"codec={result['codec_overhead_ms']:.1f}ms, "
                   f"wire={result['avp_wire_bytes']:,} bytes)")
+        else:
+            passed = sum(1 for r in results if r["correct"])
+            print(f"  [Latent] {i + 1}/{len(dataset)} "
+                  f"({passed}/{i + 1} passed, {result['wall_time']:.1f}s)",
+                  flush=True)
 
     return results
