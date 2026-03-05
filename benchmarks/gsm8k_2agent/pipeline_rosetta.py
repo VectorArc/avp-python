@@ -65,6 +65,7 @@ def run_rosetta_pipeline(
         total_prompt_tokens += prompt_tokens
         total_latent_steps += latent_steps
 
+        attention_entropy = None
         if num_transfer_states > 1:
             # Multi-embedding: collect hidden states from all latent steps
             past_kv, hidden_states = conn_a.generate_latent_steps(
@@ -88,7 +89,7 @@ def run_rosetta_pipeline(
                 input_ids, latent_steps=latent_steps, attention_mask=attention_mask,
             )
 
-            # Extract last hidden state via dummy forward pass
+            # Extract last hidden state via dummy forward pass with attention weights
             proj_t0 = time.perf_counter()
             past_len = get_past_length(past_kv)
             dummy_mask = torch.ones((1, past_len + 1), dtype=torch.long, device=device)
@@ -100,9 +101,18 @@ def run_rosetta_pipeline(
                     attention_mask=dummy_mask,
                     past_key_values=past_kv,
                     output_hidden_states=True,
+                    output_attentions=True,
                     return_dict=True,
                 )
             last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
+
+            # Compute attention entropy from last layer
+            # out.attentions[-1] shape: [batch, heads, 1, seq_len]
+            if out.attentions:
+                last_attn = out.attentions[-1][:, :, -1, :]  # [batch, heads, seq_len]
+                attn_log = torch.log(last_attn.clamp_min(1e-12))
+                attn_ent = -(last_attn * attn_log).sum(dim=-1)  # [batch, heads]
+                attention_entropy = float(attn_ent.mean())
 
             # Project to target model space
             projected, proj_metrics = conn_a.project_hidden_for_cross_model(
@@ -217,6 +227,10 @@ def run_rosetta_pipeline(
         "num_transfer_states": num_transfer_states,
         "projection_entropy": float(proj_metrics["entropy"].mean()) if "entropy" in proj_metrics else None,
         "projection_max_prob": float(proj_metrics["max_prob"].mean()) if "max_prob" in proj_metrics else None,
+        "projection_logit_gap": float(proj_metrics["logit_gap"].mean()) if "logit_gap" in proj_metrics else None,
+        "hidden_state_norm": float(proj_metrics["hidden_state_norm"].mean()) if "hidden_state_norm" in proj_metrics else None,
+        "nearest_cos_sim": float(proj_metrics["nearest_cos_sim"].mean()) if "nearest_cos_sim" in proj_metrics else None,
+        "attention_entropy": attention_entropy,
         "agents": agent_traces,
         "mode": "rosetta",
     }

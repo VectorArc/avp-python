@@ -103,12 +103,32 @@ def vocab_overlap_projection(
         log_probs = torch.log(probs.clamp_min(1e-12))
         entropy = -(probs * log_probs).sum(dim=-1)
         max_prob = probs.max(dim=-1).values
+        # Top-k gap: difference between top-1 and top-2 probability
+        topk = torch.topk(probs, k=min(2, probs.shape[-1]), dim=-1)
+        top1 = topk.values[..., 0]
+        top2 = topk.values[..., 1] if topk.values.shape[-1] > 1 else torch.zeros_like(top1)
+        logit_gap = top1 - top2
+        # Hidden state norm (before projection)
+        h_norm = h.norm(dim=-1)
 
     # probs @ W_tgt_shared → target embedding [..., D_tgt]
     projected = torch.matmul(probs, w_tgt)
 
     if return_metrics:
-        metrics = {"entropy": entropy, "max_prob": max_prob}
+        # Cosine similarity to nearest target token embedding
+        proj_f32 = projected.to(torch.float32)
+        proj_normalized = proj_f32 / proj_f32.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        tgt_normalized = w_tgt / w_tgt.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        cos_sims = torch.matmul(proj_normalized, tgt_normalized.T)  # [..., N_shared]
+        nearest_cos_sim = cos_sims.max(dim=-1).values
+
+        metrics = {
+            "entropy": entropy,
+            "max_prob": max_prob,
+            "logit_gap": logit_gap,
+            "hidden_state_norm": h_norm,
+            "nearest_cos_sim": nearest_cos_sim,
+        }
         return projected.to(original_dtype), metrics
     return projected.to(original_dtype)
 
@@ -168,11 +188,31 @@ def vocabulary_mediated_projection(
         log_probs = torch.log(probs.clamp_min(1e-12))
         entropy = -(probs * log_probs).sum(dim=-1)
         max_prob = probs.max(dim=-1).values
+        # Top-k gap: difference between top-1 and top-2 probability
+        topk = torch.topk(probs, k=min(2, probs.shape[-1]), dim=-1)
+        top1 = topk.values[..., 0]
+        top2 = topk.values[..., 1] if topk.values.shape[-1] > 1 else torch.zeros_like(top1)
+        logit_gap = top1 - top2
+        # Hidden state norm (before projection)
+        h_norm = h.norm(dim=-1)
 
     # probs @ W_tgt → target embedding [..., D_tgt]
     projected = torch.matmul(probs, w_tgt)
 
     if return_metrics:
-        metrics = {"entropy": entropy, "max_prob": max_prob}
+        # Cosine similarity to nearest target token embedding
+        proj_f32 = projected.to(torch.float32)
+        proj_normalized = proj_f32 / proj_f32.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        tgt_normalized = w_tgt / w_tgt.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        cos_sims = torch.matmul(proj_normalized, tgt_normalized.T)  # [..., vocab_size]
+        nearest_cos_sim = cos_sims.max(dim=-1).values
+
+        metrics = {
+            "entropy": entropy,
+            "max_prob": max_prob,
+            "logit_gap": logit_gap,
+            "hidden_state_norm": h_norm,
+            "nearest_cos_sim": nearest_cos_sim,
+        }
         return projected.to(original_dtype), metrics
     return projected.to(original_dtype)

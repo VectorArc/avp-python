@@ -105,6 +105,7 @@ def run_rosetta_pipeline(
                       f"KV seq_len={kv_len}, time={agent_time_ms:.0f}ms")
 
         # --- Extract hidden state(s) and project ---
+        attention_entropy = None
         proj_t0 = time.perf_counter()
 
         if num_transfer_states > 1:
@@ -129,9 +130,17 @@ def run_rosetta_pipeline(
                     attention_mask=dummy_mask,
                     past_key_values=past_kv,
                     output_hidden_states=True,
+                    output_attentions=True,
                     return_dict=True,
                 )
             last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
+
+            # Compute attention entropy from last layer
+            if out.attentions:
+                last_attn = out.attentions[-1][:, :, -1, :]
+                attn_log = torch.log(last_attn.clamp_min(1e-12))
+                attn_ent = -(last_attn * attn_log).sum(dim=-1)
+                attention_entropy = float(attn_ent.mean())
 
             projected, proj_metrics = conn_a.project_hidden_for_cross_model(
                 last_hidden, avp_map, temperature=projection_temperature,
@@ -233,6 +242,10 @@ def run_rosetta_pipeline(
         "num_transfer_states": num_transfer_states,
         "projection_entropy": float(proj_metrics["entropy"].mean()) if "entropy" in proj_metrics else None,
         "projection_max_prob": float(proj_metrics["max_prob"].mean()) if "max_prob" in proj_metrics else None,
+        "projection_logit_gap": float(proj_metrics["logit_gap"].mean()) if "logit_gap" in proj_metrics else None,
+        "hidden_state_norm": float(proj_metrics["hidden_state_norm"].mean()) if "hidden_state_norm" in proj_metrics else None,
+        "nearest_cos_sim": float(proj_metrics["nearest_cos_sim"].mean()) if "nearest_cos_sim" in proj_metrics else None,
+        "attention_entropy": attention_entropy,
         "parallel_speedup_potential": parallel_speedup_potential,
         "agents": agent_traces,
         "mode": "rosetta",
