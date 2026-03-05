@@ -94,13 +94,14 @@ answer = connector.generate(prompt, context=restored)
 
 | Metric | Value |
 |--------|-------|
-| Token savings vs text chains | **51-78%** across 4 benchmarks, 5 models |
+| Token savings vs text chains | **51-78%** across 7 benchmarks, 5 models |
 | Speed improvement | **1.5-5x** faster (model and task dependent) |
+| HumanEval (code gen) | Latent **64%** vs text **42%** (p=0.029) — text multi-agent hurts code gen |
 | Cross-model (zero training) | **72%** GSM8K accuracy, Qwen 7B to Llama 3B, **6 KB** wire |
 | Models validated | Qwen2.5 (1.5B, 7B), DeepSeek-R1 (1.5B), Llama 3.2 (1B, 3B) |
 | Hardware | A100 (cloud), RTX 3070 Ti (local) |
 
-> **Same-model:** Latent matches direct accuracy on Qwen 7B (85%) and beats text by 10pp. **Cross-model:** Zero-training vocabulary projection hits solver ceiling on structured tasks (math: 72%). See [full results](docs/BENCHMARKS.md).
+> **Same-model:** Latent matches direct accuracy on math (GSM8K 85%) and beats text significantly on code generation (HumanEval 64% vs 42%, p=0.029). **Cross-model:** Zero-training vocabulary projection achieves 72% on structured tasks (GSM8K) with 6 KB wire. See [full results](docs/BENCHMARKS.md).
 
 ## How It Works
 
@@ -240,36 +241,49 @@ All errors inherit from `AVPError`. Key types: `IncompatibleModelsError`, `Hands
 
 ## Roadmap
 
-- Compact hidden state mode (same-model, ~60x smaller wire than full KV-cache)
 - Bidirectional latent communication (A→B + B→A latent, not just one-way)
-- CacheGen-style compression (3-4x KV-cache wire size reduction)
 - vLLM serving throughput benchmarks
+- CacheGen-style compression (3-4x KV-cache wire size reduction)
 
 ## Works With
 
 ### Agent Frameworks
 
-AVP works *with* your orchestration framework, not instead of it. Your framework handles routing, state, and agent lifecycle. AVP handles the communication primitive between agents.
-
-The integration pattern is the same across all frameworks:
+AVP works *with* your orchestration framework, not instead of it. Replace `llm.invoke()` with `avp.generate()` — your framework sees text in, text out. The KV-cache lives in a `ContextStore` on the GPU side; the framework's state carries only strings.
 
 ```python
-# Agent A thinks, stores context for Agent B
-context = connector.think(agent_a_output, steps=20)
-# Pass context via side-channel (dict, Redis, shared memory)
-answer = connector.generate(prompt, context=context)
+import avp
+
+MODEL = "Qwen/Qwen2.5-7B-Instruct"
+store = avp.ContextStore(default_ttl=300)
+
+# Before: result = llm.invoke("Research: " + query)
+# After:
+def researcher(state):
+    return avp.generate(
+        "Research: " + state["query"],
+        model=MODEL, store=store, store_key="researcher",
+    )
+
+def solver(state):
+    return avp.generate(
+        "Solve: " + state["query"],
+        model=MODEL, store=store, prior_key="researcher",
+    )
 ```
+
+The solver automatically receives the researcher's KV-cache via the store. The framework never touches tensors — it checkpoints text to its database as usual.
+
+See **[Framework Integration Guide](docs/FRAMEWORK_INTEGRATION.md)** for LangGraph, CrewAI, and cross-model examples.
 
 | Framework | Integration Point |
 |-----------|-------------------|
+| **LangGraph** | Graph node function — `avp.generate()` replaces LLM call |
+| **CrewAI** | `BaseLLM.call()` override or lambda wrapper |
 | **PydanticAI** | `FunctionModel` callback |
-| **LangGraph** | Graph node function with side-channel dict for context |
-| **CrewAI** | `BaseLLM.call()` override |
 | **LlamaIndex** | `CustomLLM.complete()` override |
 | **OpenAI Agents SDK** | `Model.get_response()` override |
 | **Google ADK** | `BaseLlm.generate_content_async()` override |
-
-> Latent transfer requires a side-channel for KV-cache context — no framework natively supports binary tensor data between agents.
 
 ### Infrastructure & Protocols
 
@@ -293,7 +307,8 @@ answer = connector.generate(prompt, context=context)
 ## Documentation
 
 - **[AVP Specification](https://github.com/VectorArc/avp-spec)** — Binary format, handshake, transport, security, test vectors
-- **[Benchmark Results](docs/BENCHMARKS.md)** — Full results: 4 benchmarks, 5 models, same-model + cross-model
+- **[Framework Integration](docs/FRAMEWORK_INTEGRATION.md)** — LangGraph, CrewAI, cross-model examples, ContextStore as sidecar
+- **[Benchmark Results](docs/BENCHMARKS.md)** — Full results: 7 benchmarks, 5 models, same-model + cross-model
 - **[Examples](examples/)** — Quickstart, agent demo, think/generate demo
 - **[Contributing](CONTRIBUTING.md)** — Dev setup, tests, code style
 
