@@ -233,12 +233,7 @@ class CompatibilityResolver:
                 resolution_path = "avp_map_file"
                 logger.debug("Handshake: avp_map_file (id=%s)", avp_map_id)
 
-        # Rule 5: Universal adapters — DISABLED (validated negative, Mar 2026).
-        # KV-cache priming via inputs_embeds does not work on text-only LLMs.
-        # Code preserved for potential future approaches (e.g. vision-language models).
-        # See learnings/universal_shared_space_research_mar2026.md.
-
-        # Rule 6: Vocabulary overlap (lightweight count, no torch needed)
+        # Rule 5: Vocabulary overlap (lightweight count, no torch needed)
         if (
             mode == CommunicationMode.JSON
             and source_tokenizer is not None

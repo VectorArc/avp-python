@@ -395,8 +395,6 @@ def pack(
     model: Optional[str] = None,
     context: Optional[PackedMessage] = None,
     think_steps: int = 0,
-    universal: bool = False,
-    rollout_steps: int = 256,
     collect_metrics: bool = False,
 ) -> Union[PackedMessage, Tuple[PackedMessage, Any]]:
     """Pack a text message for transfer between agents.
@@ -416,9 +414,6 @@ def pack(
         raise TypeError(f"pack() content must be str, got {type(content).__name__}")
     if think_steps > 0 and model is None:
         raise ValueError("think_steps requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
-    if universal and model is None:
-        raise ValueError("universal=True requires model= (e.g. model='Qwen/Qwen2.5-7B-Instruct')")
-
     identity = None
     avp_context = None
     think_duration = 0.0
@@ -426,20 +421,7 @@ def pack(
     if model is not None:
         identity = _get_local_identity(model)
 
-        if universal:
-            warnings.warn(
-                "universal=True is deprecated and will be removed in a future version. "
-                "Universal KV-cache priming via inputs_embeds has been validated negative "
-                "on text-only LLMs (0% same-model accuracy). "
-                "Use think_steps for same-model or rosetta projection for cross-model.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            connector = _get_or_create_connector(model)
-            t_think = _time.perf_counter()
-            avp_context = connector.encode_universal(content, steps=rollout_steps)
-            think_duration = _time.perf_counter() - t_think
-        elif think_steps > 0:
+        if think_steps > 0:
             connector = _get_or_create_connector(model)
             prior_context = context.context if context is not None else None
             t_think = _time.perf_counter()

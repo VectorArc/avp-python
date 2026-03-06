@@ -22,7 +22,6 @@ FLAG_COMPRESSED = 0x01
 FLAG_HYBRID = 0x02
 FLAG_HAS_MAP = 0x04
 FLAG_KV_CACHE = 0x08
-FLAG_URT = 0x10
 
 
 # --- Enums ---
@@ -43,7 +42,6 @@ class PayloadType(enum.IntEnum):
     HIDDEN_STATE = 0
     KV_CACHE = 1
     EMBEDDING = 2
-    URT = 3  # Universal Representation Tokens
 
 
 class CommunicationMode(enum.IntEnum):
@@ -52,7 +50,6 @@ class CommunicationMode(enum.IntEnum):
     LATENT = 0
     HYBRID = 1
     JSON = 2
-    UNIVERSAL = 3
 
     def __str__(self) -> str:
         return self.name
@@ -65,7 +62,6 @@ class ProjectionMethod(enum.Enum):
     PROCRUSTES = "procrustes"
     VOCAB_MEDIATED = "vocab_mediated"
     VOCAB_OVERLAP = "vocab_overlap"
-    UNIVERSAL = "universal"
 
 
 class DataType(enum.IntEnum):
@@ -124,9 +120,6 @@ class AVPHeader:
     def is_kv_cache(self) -> bool:
         return bool(self.flags & FLAG_KV_CACHE)
 
-    @property
-    def is_urt(self) -> bool:
-        return bool(self.flags & FLAG_URT)
 
 
 @dataclass

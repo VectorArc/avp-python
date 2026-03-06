@@ -22,7 +22,7 @@ from .context_store import ContextStore
 
 # --- Protocol layer ---
 from .codec import decode, encode
-from .codec import encode_hidden_state, encode_hybrid, encode_kv_cache, encode_urt  # noqa: F401
+from .codec import encode_hidden_state, encode_hybrid, encode_kv_cache  # noqa: F401
 from .compression import compress, decompress  # noqa: F401
 from .handshake import CompatibilityResolver, extract_model_identity
 from .handshake import HelloMessage, compute_model_hash, compute_tokenizer_hash  # noqa: F401
@@ -62,7 +62,6 @@ from .types import (  # noqa: F401
     FLAG_HAS_MAP,
     FLAG_HYBRID,
     FLAG_KV_CACHE,
-    FLAG_URT,
     HEADER_SIZE,
     MAGIC,
     PROTOCOL_VERSION,
@@ -98,17 +97,6 @@ _TRANSPORT_NAMES = {"AVPClient", "AVPAsyncClient", "create_app"}
 # Connector and context classes are lazy-loaded because they require torch/transformers/vllm.
 _CONNECTOR_NAMES = {"AVPContext", "HuggingFaceConnector", "VLLMConnector"}
 
-# Universal representation classes — lazy-loaded because they require torch.
-_UNIVERSAL_NAMES = {
-    "UniversalConfig",
-    "UniversalEncoder",
-    "UniversalDecoder",
-    "UniversalAdapter",
-    "save_adapter",
-    "load_adapter",
-    "find_adapter",
-}
-
 # Easy API helpers that need lazy loading
 _EASY_NAMES = {"clear_cache"}
 
@@ -135,9 +123,6 @@ def __getattr__(name: str):
     if name == "VLLMConnector":
         from .connectors.vllm import VLLMConnector
         return VLLMConnector
-    if name in _UNIVERSAL_NAMES:
-        from . import universal as _universal
-        return getattr(_universal, name)
     if name in _EASY_NAMES:
         from . import easy as _easy
         return getattr(_easy, name)
@@ -198,14 +183,6 @@ __all__ = [
     "TransferQualityConfig",
     "TransferQualityResult",
     "assess_transfer",
-    # Universal representation (lazy — requires torch)
-    "UniversalConfig",
-    "UniversalEncoder",
-    "UniversalDecoder",
-    "UniversalAdapter",
-    "save_adapter",
-    "load_adapter",
-    "find_adapter",
     # Errors
     "AVPError",
     "IncompatibleModelsError",
