@@ -337,7 +337,7 @@ def print_summary(
         lines.append("")
         lines.append("Per-Hop Latency (mean across samples):")
 
-        agent_names = [a["name"] for a in hop_modes[0][1][0]["agents"]]
+        agent_names = [a.get("name", a.get("method_name", f"step_{i}")) for i, a in enumerate(hop_modes[0][1][0]["agents"])]
         header_line = f"  {'Agent':<12}"
         for label, _ in hop_modes:
             header_line += f" {label:>14}"

@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+import sys
 import tempfile
 from typing import Dict, List, Optional
 
@@ -54,7 +55,7 @@ def execute_code(code: str, test_code: str, timeout: int = 10) -> Dict:
 
         try:
             result = subprocess.run(
-                ["python", f.name],
+                [sys.executable, f.name],
                 capture_output=True,
                 text=True,
                 timeout=timeout,

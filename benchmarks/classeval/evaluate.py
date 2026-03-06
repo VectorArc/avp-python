@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 from typing import Dict, List, Optional
@@ -204,7 +205,7 @@ def execute_tests(
 
         try:
             result = subprocess.run(
-                ["python", f.name],
+                [sys.executable, f.name],
                 capture_output=True,
                 text=True,
                 timeout=timeout,

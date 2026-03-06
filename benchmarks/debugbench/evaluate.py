@@ -13,6 +13,7 @@ Evaluation strategy:
 import ast
 import re
 import subprocess
+import sys
 import tempfile
 from typing import Dict, List, Optional
 
@@ -102,6 +103,14 @@ def _build_comparison_script(
     # and compare outputs.
     lines = [
         "import sys",
+        "from typing import List, Optional, Tuple, Dict, Set",
+        "from collections import defaultdict, deque, Counter",
+        "from itertools import combinations, permutations, accumulate",
+        "from functools import lru_cache",
+        "from math import inf, gcd, sqrt, ceil, floor, log2",
+        "from heapq import heappush, heappop, heapify",
+        "from bisect import bisect_left, bisect_right",
+        "import string",
         "",
         "# --- Reference Solution ---",
     ]
@@ -315,7 +324,7 @@ def execute_script(script: str, timeout: int = 10) -> Dict:
 
         try:
             result = subprocess.run(
-                ["python", f.name],
+                [sys.executable, f.name],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
