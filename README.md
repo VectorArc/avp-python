@@ -4,7 +4,7 @@
 [![CI](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml/badge.svg)](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
-[![Spec](https://img.shields.io/badge/spec-v0.2-blue.svg)](https://github.com/VectorArc/avp-spec)
+[![Spec](https://img.shields.io/badge/spec-v0.3-blue.svg)](https://github.com/VectorArc/avp-spec)
 
 **Multi-agent text handoffs discard KV-cache, embeddings, and attention state the previous agent already computed. AVP transfers that state directly — 51-78% fewer tokens, 1.5-5x faster, across models and families.**
 
