@@ -190,7 +190,7 @@ class TestQualityGateWarning:
         ctx = tiny_untied_connector.think("Hello", steps=3)
 
         # Artificially inflate seq_len to trigger quality gate
-        # (prompt_tokens = seq_len - num_steps > 512)
+        # (prompt_tokens = seq_len - num_steps > 300)
         ctx_large = AVPContext(
             past_key_values=None,  # won't be used — replaced by primed KV
             model_hash=ctx.model_hash,

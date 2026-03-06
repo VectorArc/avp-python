@@ -1516,17 +1516,17 @@ class TestTransferQuality:
         assert result.recommend_latent is False
 
     def test_boundary_at_default_threshold(self):
-        """512 tokens (== max_prompt_tokens) → recommend latent."""
+        """300 tokens (== max_prompt_tokens) → recommend latent."""
         from avp.rosetta.quality import assess_transfer
 
-        result = assess_transfer(prompt_tokens=512)
+        result = assess_transfer(prompt_tokens=300)
         assert result.recommend_latent is True
 
     def test_one_above_threshold(self):
-        """513 tokens (> max_prompt_tokens) → recommend JSON."""
+        """301 tokens (> max_prompt_tokens) → recommend JSON."""
         from avp.rosetta.quality import assess_transfer
 
-        result = assess_transfer(prompt_tokens=513)
+        result = assess_transfer(prompt_tokens=301)
         assert result.recommend_latent is False
 
     def test_custom_threshold(self):
