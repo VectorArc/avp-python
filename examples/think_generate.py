@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """avp.think() / avp.generate() — the easiest way to use AVP.
 
-Requires: pip install "avp[latent]" (torch + transformers + GPU)
+Requires: pip install "avp[hf]" (torch + transformers + GPU)
 
 Run:
     python examples/think_generate.py

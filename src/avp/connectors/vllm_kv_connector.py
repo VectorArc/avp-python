@@ -57,7 +57,7 @@ def _require_torch():
         return torch
     except ImportError:
         raise ImportError(
-            "torch is required for AVP KV connector. Install with: pip install avp[latent]"
+            "torch is required for AVP KV connector. Install with: pip install avp[hf]"
         )
 
 

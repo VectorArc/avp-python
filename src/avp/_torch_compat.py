@@ -22,5 +22,5 @@ def require_torch():
     except ImportError:
         raise RealignmentError(
             "torch is required for this operation. "
-            "Install with: pip install avp[latent]"
+            "Install with: pip install avp[hf]"
         )
