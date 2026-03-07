@@ -239,7 +239,10 @@ class TestEasyGenerateCrossModel:
             )
 
         assert result == "answer"
-        mock_source.think.assert_called_once_with("Hello", steps=10)
+        mock_source.think.assert_called_once()
+        call_args = mock_source.think.call_args
+        assert call_args[0][0] == "Hello"
+        assert call_args[1]["steps"] == 10
         mock_target.generate.assert_called_once()
         call_kwargs = mock_target.generate.call_args
         assert call_kwargs.kwargs.get("source") is mock_source or \

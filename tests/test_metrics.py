@@ -104,3 +104,33 @@ def test_unpack_json_format():
         text, metrics = avp.unpack(data, collect_metrics=True)
     assert text == "hello"
     assert metrics.input_format == "json"
+
+
+# --- TransferDiagnostics on metrics ---
+
+
+def test_think_metrics_diagnostics_field():
+    m = ThinkMetrics()
+    assert m.diagnostics is None
+
+    from avp.metrics import TransferDiagnostics
+    d = TransferDiagnostics(transfer_mode="latent")
+    m2 = ThinkMetrics(diagnostics=d)
+    assert m2.diagnostics is not None
+    assert m2.diagnostics.transfer_mode == "latent"
+
+
+def test_generate_metrics_diagnostics_field():
+    m = GenerateMetrics()
+    assert m.diagnostics is None
+
+    from avp.metrics import TransferDiagnostics
+    d = TransferDiagnostics(output_empty=True)
+    m2 = GenerateMetrics(diagnostics=d)
+    assert m2.diagnostics is not None
+    assert m2.diagnostics.healthy is False
+
+
+def test_transfer_diagnostics_importable_from_avp():
+    from avp.metrics import TransferDiagnostics
+    assert avp.TransferDiagnostics is TransferDiagnostics

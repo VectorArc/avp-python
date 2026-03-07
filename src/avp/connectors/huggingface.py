@@ -6,6 +6,7 @@ interface for latent communication.
 Requires torch and transformers — uses lazy imports.
 """
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..context import AVPContext
@@ -20,6 +21,8 @@ from ..realign import (
 )
 from ..types import ModelIdentity
 from .base import EngineConnector, _render_prompt, _tokenize_prompt
+
+logger = logging.getLogger(__name__)
 
 
 def _require_deps():
@@ -422,6 +425,14 @@ class HuggingFaceConnector(EngineConnector):
             if collect_hidden_states:
                 collected_hidden.append(last_hidden.clone())
 
+            # Early exit on NaN — continuing would only accumulate garbage KV entries
+            if torch.isnan(last_hidden).any():
+                logger.warning(
+                    "NaN in hidden state at latent step %d/%d — stopping early",
+                    step + 1, latent_steps,
+                )
+                break
+
         if collect_hidden_states:
             # Each element is [B, D] where B=1 in practice.
             # cat along dim=0 gives [1 + latent_steps, D] for B=1.
@@ -440,6 +451,7 @@ class HuggingFaceConnector(EngineConnector):
         prompt: Union[str, List[Dict[str, str]]],
         steps: int = 20,
         context: Optional[AVPContext] = None,
+        _diagnostics: Optional[Any] = None,
     ) -> AVPContext:
         """Generate latent context via thinking steps.
 
@@ -447,6 +459,7 @@ class HuggingFaceConnector(EngineConnector):
             prompt: A string (wrapped as user message) or list of chat messages.
             steps: Number of latent thinking steps (must be >= 1).
             context: Optional AVPContext from a prior think() to continue from.
+            _diagnostics: Internal. Pre-created TransferDiagnostics to populate.
 
         Returns:
             AVPContext with accumulated KV-cache.
@@ -482,6 +495,35 @@ class HuggingFaceConnector(EngineConnector):
         )
         last_hidden = hidden_states[-1].unsqueeze(0)  # [1, D]
 
+        # Always-on: check for NaN/Inf in hidden states
+        import warnings as _warnings
+        import torch
+        has_nan = bool(torch.isnan(hidden_states).any())
+        has_inf = bool(torch.isinf(hidden_states).any())
+        if has_nan:
+            _warnings.warn(
+                "AVP: NaN detected in hidden states during think(). "
+                "Downstream generation will likely produce garbage.",
+                RuntimeWarning, stacklevel=2,
+            )
+        if has_inf:
+            _warnings.warn(
+                "AVP: Inf detected in hidden states during think(). "
+                "Downstream generation will likely produce garbage.",
+                RuntimeWarning, stacklevel=2,
+            )
+
+        if _diagnostics is not None:
+            _diagnostics.has_nan = has_nan
+            _diagnostics.has_inf = has_inf
+            _diagnostics.transfer_mode = "latent"
+            _diagnostics.prompt_tokens = input_ids.shape[-1]
+
+        # Norm trajectory (when diagnostics are being collected)
+        if _diagnostics is not None:
+            norms = [float(hidden_states[i].norm()) for i in range(hidden_states.shape[0])]
+            _diagnostics.norm_trajectory = norms
+
         return AVPContext(
             past_key_values=past_kv,
             model_hash=self._model_hash,
@@ -502,6 +544,7 @@ class HuggingFaceConnector(EngineConnector):
         temperature: float = 0.7,
         top_p: float = 0.95,
         do_sample: bool = True,
+        _diagnostics: Optional[Any] = None,
     ) -> str:
         """Generate text, optionally conditioned on latent context from think().
 
@@ -515,6 +558,7 @@ class HuggingFaceConnector(EngineConnector):
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
             do_sample: Whether to use sampling (True) or greedy decoding (False).
+            _diagnostics: Internal. Pre-created TransferDiagnostics to populate.
 
         Returns:
             Generated text string.
@@ -531,7 +575,9 @@ class HuggingFaceConnector(EngineConnector):
             and context is not None
             and context.model_hash != self._model_hash
         ):
-            context = self._apply_rosetta_projection(source, context)
+            context = self._apply_rosetta_projection(
+                source, context, _diagnostics=_diagnostics,
+            )
 
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)
@@ -585,7 +631,27 @@ class HuggingFaceConnector(EngineConnector):
             outputs = self.model.generate(**gen_kwargs)
 
         generated_ids = outputs.sequences[0, prompt_len:]
-        return self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+
+        # Always-on: warn on empty output
+        if not text:
+            import warnings as _warnings
+            _warnings.warn(
+                f"AVP: generate() produced empty output (prompt_len={prompt_len}, "
+                f"context={'yes' if context is not None else 'no'}). "
+                "Common cause: prompt mismatch between think() and generate().",
+                RuntimeWarning, stacklevel=2,
+            )
+
+        if _diagnostics is not None:
+            _diagnostics.output_length = len(text)
+            _diagnostics.output_empty = not text
+            if _diagnostics.prompt_tokens == 0:
+                _diagnostics.prompt_tokens = input_ids.shape[-1]
+            if context is not None and _diagnostics.transfer_mode == "":
+                _diagnostics.transfer_mode = "latent"
+
+        return text
 
     # --- Cross-model rosetta projection ---
 
@@ -593,13 +659,13 @@ class HuggingFaceConnector(EngineConnector):
         self,
         source: "HuggingFaceConnector",
         context: AVPContext,
+        _diagnostics: Optional[Any] = None,
     ) -> AVPContext:
         """Project cross-model context to this model's space.
 
         Handles: AVPMap lookup/calibration, quality gate, projection, KV-cache priming.
         Returns a new AVPContext with model_hash == self._model_hash.
         """
-        import logging
         import torch
 
         if context.last_hidden_state is None:
@@ -616,15 +682,35 @@ class HuggingFaceConnector(EngineConnector):
         from ..rosetta.quality import assess_transfer
         quality = assess_transfer(prompt_tokens=prompt_tokens)
         if not quality.recommend_latent:
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "Quality gate recommends JSON fallback for this transfer: %s",
                 quality.reason,
             )
 
+        # Determine projection method name
+        method = getattr(avp_map, "method", None)
+        method_name = method.name if hasattr(method, "name") else str(method or "")
+
+        if _diagnostics is not None:
+            _diagnostics.transfer_mode = "rosetta"
+            _diagnostics.projection_method = method_name
+            _diagnostics.quality_gate_passed = quality.recommend_latent
+            _diagnostics.quality_gate_reason = quality.reason
+            _diagnostics.prompt_tokens = prompt_tokens
+
         # Project source hidden state → target embedding space
-        projected = source.project_hidden_for_cross_model(
+        use_metrics = _diagnostics is not None
+        result = source.project_hidden_for_cross_model(
             context.last_hidden_state, avp_map,
+            return_metrics=use_metrics,
         )
+        if use_metrics and isinstance(result, tuple):
+            projected, proj_metrics = result
+            if _diagnostics is not None and proj_metrics:
+                _diagnostics.hidden_state_norm = float(proj_metrics["hidden_state_norm"].mean()) if "hidden_state_norm" in proj_metrics else None
+                _diagnostics.nearest_cos_sim = float(proj_metrics["nearest_cos_sim"].mean()) if "nearest_cos_sim" in proj_metrics else None
+        else:
+            projected = result
 
         # Ensure [1, N, D_tgt] shape for KV-cache priming
         if projected.dim() == 1:

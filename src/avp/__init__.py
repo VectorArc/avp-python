@@ -95,12 +95,12 @@ _ROSETTA_NAMES = {
 _TRANSPORT_NAMES = {"AVPClient", "AVPAsyncClient", "create_app"}
 
 # Easy API helpers that need lazy loading
-_EASY_NAMES = {"clear_cache"}
+_EASY_NAMES = {"clear_cache", "inspect"}
 
 # Metrics classes — lazy-loaded to avoid unconditional import
 _METRICS_NAMES = {
     "ThinkMetrics", "PackMetrics", "UnpackMetrics",
-    "GenerateMetrics", "HandshakeMetrics",
+    "GenerateMetrics", "HandshakeMetrics", "TransferDiagnostics", "DebugConfig",
 }
 
 
@@ -133,6 +133,7 @@ __all__ = [
     # Easy API (start here)
     "think",
     "generate",
+    "inspect",
     "clear_cache",
     "ContextStore",
     # Deprecated (remove in 0.4)
@@ -143,6 +144,8 @@ __all__ = [
     "ThinkMetrics",
     "GenerateMetrics",
     "HandshakeMetrics",
+    "TransferDiagnostics",
+    "DebugConfig",
     # Connectors (lazy — requires torch/transformers/vllm)
     "HuggingFaceConnector",
     "VLLMConnector",

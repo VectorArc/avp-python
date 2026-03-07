@@ -137,6 +137,7 @@ class EngineConnector(ABC):
         prompt: Union[str, List[Dict[str, str]]],
         steps: int = 20,
         context: Optional[Any] = None,
+        _diagnostics: Optional[Any] = None,
     ) -> Any:
         """Generate latent context via thinking steps.
 
@@ -170,6 +171,7 @@ class EngineConnector(ABC):
         temperature: float = 0.7,
         top_p: float = 0.95,
         do_sample: bool = True,
+        _diagnostics: Optional[Any] = None,
     ) -> str:
         """Generate text, optionally conditioned on latent context.
 
