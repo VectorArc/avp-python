@@ -53,32 +53,3 @@ class JSONMessage:
         return cls.from_dict(json.loads(data))
 
 
-@dataclass
-class FallbackRequest:
-    """Request to switch from latent to JSON fallback mode."""
-
-    session_id: str = ""
-    reason: str = ""
-    perplexity_score: float = 0.0
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "reason": self.reason,
-            "perplexity_score": self.perplexity_score,
-        }
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "FallbackRequest":
-        return cls(
-            session_id=d.get("session_id", ""),
-            reason=d.get("reason", ""),
-            perplexity_score=d.get("perplexity_score", 0.0),
-        )
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
-
-    @classmethod
-    def from_json(cls, data: str) -> "FallbackRequest":
-        return cls.from_dict(json.loads(data))

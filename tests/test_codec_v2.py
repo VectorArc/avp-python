@@ -3,7 +3,6 @@
 import struct
 
 import numpy as np
-import pytest
 
 import avp
 from avp.codec import _HEADER_FMT, encode, decode
@@ -118,14 +117,12 @@ def test_encode_decode_extra_fields():
     payload = b"\x01\x02\x03"
     metadata = AVPMetadata(
         model_id="test",
-        confidence_score=0.95,
         avp_map_id="map-xyz",
         extra={"custom_key": "custom_value"},
     )
     data = encode(payload, metadata)
     msg = decode(data)
 
-    assert msg.metadata.confidence_score == pytest.approx(0.95, abs=0.01)
     assert msg.metadata.avp_map_id == "map-xyz"
     assert msg.metadata.extra["custom_key"] == "custom_value"
 

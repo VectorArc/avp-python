@@ -64,14 +64,6 @@ class RealignmentError(AVPError):
     """Raised when realignment matrix computation or application fails."""
 
 
-class FallbackRequested(AVPError):
-    """Raised when communication should fall back to JSON."""
-
-    def __init__(self, reason: str, perplexity_score: float = 0.0):
-        self.reason = reason
-        self.perplexity_score = perplexity_score
-        super().__init__(f"Fallback requested: {reason} (perplexity={perplexity_score:.4f})")
-
 
 class IncompatibleModelsError(HandshakeError):
     """Raised when models are incompatible for latent communication."""

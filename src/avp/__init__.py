@@ -27,7 +27,7 @@ from .compression import compress, decompress  # noqa: F401
 from .handshake import CompatibilityResolver, extract_model_identity
 from .handshake import HelloMessage, compute_model_hash, compute_tokenizer_hash  # noqa: F401
 from .session import Session, SessionManager  # noqa: F401
-from .fallback import FallbackRequest, JSONMessage  # noqa: F401
+from .fallback import JSONMessage  # noqa: F401
 
 # --- Types ---
 from .types import (
@@ -43,7 +43,6 @@ from .types import AVPHeader, DataType, PayloadType, ProjectionMethod, SessionIn
 from .errors import AVPError, DecodeError, HandshakeError, IncompatibleModelsError
 from .errors import (  # noqa: F401
     EngineNotAvailableError,
-    FallbackRequested,
     InvalidMagicError,
     RealignmentError,
     SessionError,
@@ -72,7 +71,6 @@ from .version import __version__
 # Rosetta Stone (cross-model projection) — lazy-loaded because it requires torch.
 _ROSETTA_NAMES = {
     "AVPMap",
-    "DEFAULT_ANCHORS",
     "calibrate",
     "apply_cross_model_projection",
     "vocabulary_mediated_projection",
@@ -164,7 +162,6 @@ __all__ = [
     "AVPMetadata",
     # Transport (lazy — requires httpx)
     "AVPClient",
-    "AVPAsyncClient",
     "create_app",
     # Cross-model / Rosetta Stone (lazy — requires torch)
     "AVPMap",
@@ -176,7 +173,6 @@ __all__ = [
     "load_map",
     "find_map",
     "map_id",
-    "DEFAULT_ANCHORS",
     "ValidationConfig",
     "ValidationResult",
     "validate_projection",

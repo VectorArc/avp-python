@@ -44,25 +44,11 @@ message Metadata {
   // Communication
   CommunicationMode mode = 10;
   optional string compression = 11;
-  float confidence_score = 12;
   string avp_map_id = 13;
 
   // Extensible
   map<string, string> extra = 14;
 
-  // v0.1.0 backward-compat fields (deprecated, kept for wire compat)
-  uint32 embedding_dim = 100;  // Use hidden_dim instead
-  string data_type = 101;      // Use dtype enum instead
-  optional string agent_id = 102;  // Use source_agent_id instead
-  optional string task_id = 103;   // Use extra["task_id"] instead
-}
-
-// --- Fallback ---
-
-message FallbackRequest {
-  string session_id = 1;
-  string reason = 2;
-  float perplexity_score = 3;
 }
 
 // --- Responses ---

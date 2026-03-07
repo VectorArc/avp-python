@@ -5,7 +5,6 @@ registry, no accumulator — callers own the metrics and can log, aggregate,
 or discard them as they please.
 """
 
-import warnings
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -145,16 +144,6 @@ class ThinkMetrics:
 
     diagnostics: Optional[TransferDiagnostics] = None
     """Debug diagnostics (populated when debug=True)."""
-
-
-def _PackMetrics(*args, **kwargs):
-    """Deprecated. Use ThinkMetrics instead."""
-    warnings.warn(
-        "PackMetrics is deprecated and will be removed in v0.4. Use ThinkMetrics.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return ThinkMetrics(*args, **kwargs)
 
 
 # Keep PackMetrics importable as an alias

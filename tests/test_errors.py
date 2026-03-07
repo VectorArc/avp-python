@@ -5,7 +5,6 @@ from avp.errors import (
     AVPError,
     DecodeError,
     EngineNotAvailableError,
-    FallbackRequested,
     HandshakeError,
     IncompatibleModelsError,
     InvalidMagicError,
@@ -32,7 +31,6 @@ def test_all_errors_inherit_from_avp_error():
         SessionExpiredError("sess-1"),
         ShapeMismatchError((10,), (20,)),
         RealignmentError("oops"),
-        FallbackRequested("reason", 10.0),
         IncompatibleModelsError("mismatch"),
         EngineNotAvailableError("vllm"),
     ]
@@ -80,12 +78,6 @@ def test_shape_mismatch_attributes():
     assert err.expected == (10, 20)
     assert err.got == (10, 30)
 
-
-def test_fallback_requested_attributes():
-    err = FallbackRequested("high perplexity", perplexity_score=15.5)
-    assert err.reason == "high perplexity"
-    assert err.perplexity_score == 15.5
-    assert "15.5" in str(err)
 
 
 def test_engine_not_available_attributes():

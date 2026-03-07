@@ -184,7 +184,6 @@ class AVPMetadata:
     tensor_shape: Tuple[int, ...] = ()
     mode: CommunicationMode = CommunicationMode.LATENT
     compression: Optional[str] = None
-    confidence_score: float = 0.0
     avp_map_id: str = ""
     extra: Dict[str, str] = field(default_factory=dict)
 

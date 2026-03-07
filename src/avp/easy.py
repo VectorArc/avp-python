@@ -512,7 +512,6 @@ def inspect(data: bytes) -> Dict[str, Any]:
                 "source_agent_id": "",
                 "target_agent_id": "",
                 "avp_map_id": "",
-                "confidence_score": 0.0,
                 "extra": {"model_hash": "abc123", ...},
                 "raw_size": 12435,
             }
@@ -545,7 +544,6 @@ def inspect(data: bytes) -> Dict[str, Any]:
         "source_agent_id": m.source_agent_id,
         "target_agent_id": m.target_agent_id,
         "avp_map_id": m.avp_map_id,
-        "confidence_score": m.confidence_score,
         "extra": dict(m.extra) if m.extra else {},
         "raw_size": msg.raw_size,
     }

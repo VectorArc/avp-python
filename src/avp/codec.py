@@ -65,7 +65,6 @@ def encode(
         dtype=int(metadata.dtype),
         tensor_shape=list(metadata.tensor_shape),
         mode=int(metadata.mode),
-        confidence_score=metadata.confidence_score,
         avp_map_id=metadata.avp_map_id,
     )
     if compression != CompressionLevel.NONE:
@@ -165,7 +164,6 @@ def decode(data: bytes) -> AVPMessage:
         tensor_shape=tuple(meta_pb.tensor_shape),
         mode=CommunicationMode(meta_pb.mode),
         compression="zstd" if is_compressed else None,
-        confidence_score=meta_pb.confidence_score,
         avp_map_id=meta_pb.avp_map_id,
         extra=dict(meta_pb.extra),
     )

@@ -2,7 +2,7 @@
 
 
 
-from avp.fallback import FallbackRequest, JSONMessage
+from avp.fallback import JSONMessage
 
 
 # --- JSONMessage ---
@@ -53,38 +53,3 @@ def test_json_message_no_extra_in_dict():
     assert "extra" not in d
 
 
-# --- FallbackRequest ---
-
-
-def test_fallback_request_roundtrip_dict():
-    req = FallbackRequest(
-        session_id="sess-1",
-        reason="incompatible models",
-        perplexity_score=15.5,
-    )
-    d = req.to_dict()
-    restored = FallbackRequest.from_dict(d)
-
-    assert restored.session_id == "sess-1"
-    assert restored.reason == "incompatible models"
-    assert restored.perplexity_score == 15.5
-
-
-def test_fallback_request_roundtrip_json():
-    req = FallbackRequest(
-        session_id="sess-2",
-        reason="high perplexity",
-        perplexity_score=25.0,
-    )
-    json_str = req.to_json()
-    restored = FallbackRequest.from_json(json_str)
-
-    assert restored.reason == "high perplexity"
-    assert restored.perplexity_score == 25.0
-
-
-def test_fallback_request_defaults():
-    req = FallbackRequest()
-    assert req.session_id == ""
-    assert req.reason == ""
-    assert req.perplexity_score == 0.0
