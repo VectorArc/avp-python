@@ -29,7 +29,7 @@ from .types import AVP_VERSION_HEADER, MAGIC
 
 if TYPE_CHECKING:
     from .context import AVPContext
-    from .metrics import GenerateMetrics, ThinkMetrics
+    from .metrics import DebugConfig, GenerateMetrics, ThinkMetrics
 
 logger = logging.getLogger(__name__)
 

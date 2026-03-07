@@ -1,16 +1,13 @@
 """Tests for AVP v0.2.0 codec: encode/decode, flags, backward compat."""
 
-import struct
-
 import numpy as np
 
 import avp
-from avp.codec import _HEADER_FMT, encode, decode
+from avp.codec import encode, decode
 from avp.types import (
     FLAG_COMPRESSED,
     FLAG_HAS_MAP,
     FLAG_KV_CACHE,
-    HEADER_SIZE,
     PROTOCOL_VERSION,
     AVPMetadata,
     CommunicationMode,

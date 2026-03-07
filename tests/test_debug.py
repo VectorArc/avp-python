@@ -1,8 +1,5 @@
 """Tests for AVP debug mode (DebugConfig, TransferDiagnostics, inspect, compare)."""
 
-import struct
-from unittest.mock import MagicMock, patch
-
 import numpy as np
 import pytest
 
