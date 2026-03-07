@@ -119,7 +119,6 @@ def print_summary(
     latent_results: Optional[List[Dict]] = None,
     text_results: Optional[List[Dict]] = None,
     direct_results: Optional[List[Dict]] = None,
-    hybrid_results: Optional[List[Dict]] = None,
     agreement: Optional[Dict] = None,
 ) -> str:
     """Print a formatted comparison summary and return it as a string."""
@@ -131,8 +130,6 @@ def print_summary(
         modes.append(("Direct", 13, direct_results))
     if latent_results is not None:
         modes.append(("Latent (AVP)", 13, latent_results))
-    if hybrid_results is not None:
-        modes.append(("Hybrid", 13, hybrid_results))
     if text_results is not None:
         modes.append(("Text", 13, text_results))
 
@@ -227,7 +224,7 @@ def print_summary(
 
     lines.append(sep)
 
-    # --- Token savings (latent/hybrid vs text) ---
+    # --- Token savings (latent vs text) ---
     text_tok = _mean(_get_field(text_results, "total_tokens")) if text_results else 0
     if text_tok > 0:
         lines.append("")

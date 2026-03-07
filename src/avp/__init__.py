@@ -22,7 +22,7 @@ from .context_store import ContextStore
 
 # --- Protocol layer ---
 from .codec import decode, encode
-from .codec import encode_hidden_state, encode_hybrid, encode_kv_cache  # noqa: F401
+from .codec import encode_hidden_state, encode_kv_cache  # noqa: F401
 from .compression import compress, decompress  # noqa: F401
 from .handshake import CompatibilityResolver, extract_model_identity
 from .handshake import HelloMessage, compute_model_hash, compute_tokenizer_hash  # noqa: F401
@@ -60,7 +60,7 @@ from .types import (  # noqa: F401
     CONTENT_TYPE,
     FLAG_COMPRESSED,
     FLAG_HAS_MAP,
-    FLAG_HYBRID,
+
     FLAG_KV_CACHE,
     HEADER_SIZE,
     MAGIC,

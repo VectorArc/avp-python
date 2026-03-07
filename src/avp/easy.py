@@ -497,7 +497,6 @@ def inspect(data: bytes) -> Dict[str, Any]:
                 "version": 1,
                 "flags": 3,
                 "compressed": True,
-                "hybrid": True,
                 "has_map": False,
                 "kv_cache": False,
                 "payload_length": 12345,
@@ -516,7 +515,6 @@ def inspect(data: bytes) -> Dict[str, Any]:
                 "confidence_score": 0.0,
                 "extra": {"model_hash": "abc123", ...},
                 "raw_size": 12435,
-                "text_fallback": null,
             }
 
     Raises:
@@ -532,9 +530,8 @@ def inspect(data: bytes) -> Dict[str, Any]:
         "version": h.version,
         "flags": h.flags,
         "compressed": bool(h.flags & 0x01),
-        "hybrid": bool(h.flags & 0x02),
-        "has_map": bool(h.flags & 0x04),
-        "kv_cache": bool(h.flags & 0x08),
+        "has_map": bool(h.flags & 0x02),
+        "kv_cache": bool(h.flags & 0x04),
         "payload_length": h.payload_length,
         "metadata_length": h.metadata_length,
         "model_id": m.model_id,
@@ -551,7 +548,6 @@ def inspect(data: bytes) -> Dict[str, Any]:
         "confidence_score": m.confidence_score,
         "extra": dict(m.extra) if m.extra else {},
         "raw_size": msg.raw_size,
-        "text_fallback": msg.text_fallback,
     }
 
 
@@ -774,9 +770,9 @@ def _decode_avp_binary(data: bytes) -> PackedMessage:
     from .codec import decode as avp_decode
 
     msg = avp_decode(data)
-    text = msg.text_fallback or ""
+    text = ""
 
-    # If it's a hybrid message with latent content, reconstruct AVPContext
+    # If there's latent content, reconstruct AVPContext
     avp_context = None
     if msg.payload:
         try:

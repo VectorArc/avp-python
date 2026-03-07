@@ -213,7 +213,6 @@ class TestInspect:
         data = self._make_avp_binary()
         result = avp.inspect(data)
         assert "compressed" in result
-        assert "hybrid" in result
         assert "has_map" in result
         assert "kv_cache" in result
         assert result["compressed"] is False

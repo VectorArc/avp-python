@@ -955,12 +955,11 @@ class TestValidation:
         tok = VocabMockTokenizer(vocab_size=256)
         avp_map = calibrate(model, model, tok, tok, device="cpu")
 
-        # Set extremely strict thresholds — perplexity_latent=0 should
-        # push result toward HYBRID or JSON even for a decent projection
+        # Set extremely strict thresholds — impossibly low perplexity_json
+        # should push result toward JSON even for a decent projection
         config = ValidationConfig(
             cosine_sim_threshold=-1.0,  # never trigger fast gate
-            perplexity_latent=0.001,    # impossibly low
-            perplexity_json=0.002,      # also impossibly low
+            perplexity_json=0.002,      # impossibly low
         )
         result = validate_projection(
             model, model, avp_map, tok, tok,

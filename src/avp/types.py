@@ -19,9 +19,8 @@ AVP_VERSION_STRING = "0.3.0"
 
 # Flag bit constants
 FLAG_COMPRESSED = 0x01
-FLAG_HYBRID = 0x02
-FLAG_HAS_MAP = 0x04
-FLAG_KV_CACHE = 0x08
+FLAG_HAS_MAP = 0x02
+FLAG_KV_CACHE = 0x04
 
 
 # --- Enums ---
@@ -48,8 +47,7 @@ class CommunicationMode(enum.IntEnum):
     """Communication mode negotiated during handshake."""
 
     LATENT = 0
-    HYBRID = 1
-    JSON = 2
+    JSON = 1
 
     def __str__(self) -> str:
         return self.name
@@ -107,10 +105,6 @@ class AVPHeader:
             self.flags |= FLAG_COMPRESSED
         else:
             self.flags &= ~FLAG_COMPRESSED
-
-    @property
-    def is_hybrid(self) -> bool:
-        return bool(self.flags & FLAG_HYBRID)
 
     @property
     def has_map(self) -> bool:
@@ -220,7 +214,6 @@ class AVPMessage:
     metadata: AVPMetadata
     payload: bytes = b""
     raw_size: int = 0
-    text_fallback: Optional[str] = None  # Populated for HYBRID messages
 
     @property
     def embedding(self) -> np.ndarray:

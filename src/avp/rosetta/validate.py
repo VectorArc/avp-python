@@ -7,7 +7,7 @@ Two-tier validation:
    target model, compute cross-entropy against known next tokens. Only available
    when both models share the same tokenizer.
 
-Returns a recommended CommunicationMode (LATENT / HYBRID / JSON).
+Returns a recommended CommunicationMode (LATENT / JSON).
 """
 
 from dataclasses import dataclass
@@ -32,8 +32,7 @@ class ValidationConfig:
     """Thresholds for projection quality validation."""
 
     cosine_sim_threshold: float = 0.5  # Below → instant JSON (skip perplexity)
-    perplexity_latent: float = 50.0    # Below → LATENT (calibrated: Qwen2.5-1.5B→0.5B ppl=25.8 works)
-    perplexity_json: float = 100.0     # Above → JSON, between → HYBRID
+    perplexity_json: float = 100.0     # Above → JSON, at or below → LATENT
     num_test_texts: int = 5
 
 
@@ -324,10 +323,10 @@ def validate_projection(
                 f"for perplexity check, recommending LATENT"
             )
         else:
-            mode = CommunicationMode.HYBRID
+            mode = CommunicationMode.LATENT
             detail = (
                 f"cos_sim={mean_cos_sim:.3f} (moderate) — no shared tokenizer "
-                f"for perplexity check, recommending HYBRID"
+                f"for perplexity check, recommending LATENT"
             )
         return ValidationResult(
             cosine_similarity=mean_cos_sim,
@@ -350,24 +349,17 @@ def validate_projection(
     mean_ppl = sum(all_ppl) / len(all_ppl)
 
     # Threshold decision
-    if mean_ppl < config.perplexity_latent:
-        mode = CommunicationMode.LATENT
-        detail = (
-            f"cos_sim={mean_cos_sim:.3f}, perplexity={mean_ppl:.1f} "
-            f"< {config.perplexity_latent} — high-quality projection"
-        )
-    elif mean_ppl > config.perplexity_json:
+    if mean_ppl > config.perplexity_json:
         mode = CommunicationMode.JSON
         detail = (
             f"cos_sim={mean_cos_sim:.3f}, perplexity={mean_ppl:.1f} "
             f"> {config.perplexity_json} — projection unreliable, using JSON"
         )
     else:
-        mode = CommunicationMode.HYBRID
+        mode = CommunicationMode.LATENT
         detail = (
             f"cos_sim={mean_cos_sim:.3f}, perplexity={mean_ppl:.1f} "
-            f"(between {config.perplexity_latent} and {config.perplexity_json}) "
-            f"— meaningful but lossy, using HYBRID"
+            f"— projection viable, using LATENT"
         )
 
     return ValidationResult(

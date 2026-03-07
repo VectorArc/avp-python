@@ -12,8 +12,7 @@ enum PayloadType {
 
 enum CommunicationMode {
   LATENT = 0;
-  HYBRID = 1;
-  JSON_MODE = 2;  // "JSON" is reserved in some protobuf implementations
+  JSON_MODE = 1;  // "JSON" is reserved in some protobuf implementations
 }
 
 enum DataType {
@@ -21,11 +20,6 @@ enum DataType {
   FLOAT16 = 1;
   BFLOAT16 = 2;
   INT8 = 3;
-}
-
-enum ChunkType {
-  TEXT_CHUNK = 0;
-  LATENT_CHUNK = 1;
 }
 
 // --- v0.2.0 Metadata ---
@@ -61,18 +55,6 @@ message Metadata {
   string data_type = 101;      // Use dtype enum instead
   optional string agent_id = 102;  // Use source_agent_id instead
   optional string task_id = 103;   // Use extra["task_id"] instead
-}
-
-// --- Hybrid payload ---
-
-message HybridChunk {
-  ChunkType chunk_type = 1;
-  bytes data = 2;             // Text (UTF-8) or latent (raw tensor bytes)
-  float confidence = 3;       // Per-chunk confidence
-}
-
-message HybridPayload {
-  repeated HybridChunk chunks = 1;
 }
 
 // --- Fallback ---

@@ -40,11 +40,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "direct", "hybrid", "both", "all"],
+        choices=["latent", "text", "direct", "both", "all"],
         default="all",
         help="Pipeline(s) to run. 'direct' = single-agent baseline, "
-             "'hybrid' = latent+text summary, "
-             "'both' = latent+text chains, 'all' = direct+text+latent+hybrid (default: all)",
+             "'both' = latent+text chains, 'all' = direct+text+latent (default: all)",
     )
     parser.add_argument(
         "--model_name",
@@ -83,12 +82,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=512,
         help="Max tokens for text generation (default: 512)",
-    )
-    parser.add_argument(
-        "--summary_max_tokens",
-        type=int,
-        default=128,
-        help="Max tokens for hybrid text summary per hop (default: 128)",
     )
     parser.add_argument(
         "--temperature",
@@ -202,7 +195,6 @@ def run_benchmark(config: dict) -> dict:
     latent_steps = config.get("latent_steps", 10)
     kv_mode = config.get("kv_mode", "full")
     max_new_tokens = config.get("max_new_tokens", 512)
-    summary_max_tokens = config.get("summary_max_tokens", 128)
     temperature = config.get("temperature", 0.7)
     top_p = config.get("top_p", 0.95)
     verbose = config.get("verbose", False)
@@ -211,8 +203,6 @@ def run_benchmark(config: dict) -> dict:
     run_direct = mode in ("direct", "all")
     run_latent = mode in ("latent", "both", "all")
     run_text = mode in ("text", "both", "all")
-    run_hybrid = mode in ("hybrid", "all")
-
     print(f"Device: {device}")
     print(f"Mode: {mode}")
     print(f"Model: {model_name}")
@@ -222,7 +212,7 @@ def run_benchmark(config: dict) -> dict:
     print(f"Max new tokens: {max_new_tokens}")
     print(f"Temperature: {temperature}")
     print(f"Seed: {seed}")
-    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, hybrid={run_hybrid}")
+    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}")
     print()
 
     # Load dataset
@@ -234,8 +224,6 @@ def run_benchmark(config: dict) -> dict:
     direct_results = None
     latent_results = None
     text_results = None
-    hybrid_results = None
-
     # Run direct baseline
     if run_direct:
         from benchmarks.gsm8k.pipeline_direct import run_direct_benchmark
@@ -301,31 +289,6 @@ def run_benchmark(config: dict) -> dict:
             verbose=verbose,
         )
 
-    # Run hybrid pipeline
-    if run_hybrid:
-        from benchmarks.gsm8k.pipeline_hybrid import run_hybrid_benchmark
-
-        print("\n" + "=" * 50)
-        print("Running HYBRID (AVP latent+text 4-agent chain) pipeline...")
-        print("=" * 50)
-        set_seed(seed)
-
-        hybrid_results = run_hybrid_benchmark(
-            connector=connector,
-            model=model,
-            tokenizer=tokenizer,
-            device=device,
-            identity=identity,
-            dataset=dataset,
-            model_name=model_name,
-            latent_steps=latent_steps,
-            max_new_tokens=max_new_tokens,
-            summary_max_tokens=summary_max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            verbose=verbose,
-        )
-
     # Print comprehensive summary
     from benchmarks.gsm8k.evaluate import compute_accuracy, print_summary
     from benchmarks.shared.evaluate_common import compute_agreement
@@ -338,15 +301,12 @@ def run_benchmark(config: dict) -> dict:
         available["text"] = text_results
     if latent_results is not None:
         available["latent"] = latent_results
-    if hybrid_results is not None:
-        available["hybrid"] = hybrid_results
     agreement_data = compute_agreement(available) if len(available) > 1 else None
 
     print_summary(
         latent_results=latent_results,
         text_results=text_results,
         direct_results=direct_results,
-        hybrid_results=hybrid_results,
         agreement=agreement_data,
     )
 
@@ -393,11 +353,6 @@ def run_benchmark(config: dict) -> dict:
         output_data["text"] = {
             "summary": compute_accuracy(text_results),
             "samples": text_results,
-        }
-    if hybrid_results is not None:
-        output_data["hybrid"] = {
-            "summary": compute_accuracy(hybrid_results),
-            "samples": hybrid_results,
         }
     if agreement_data is not None:
         output_data["agreement"] = agreement_data

@@ -5,7 +5,6 @@ import numpy as np
 from avp.types import (
     FLAG_COMPRESSED,
     FLAG_HAS_MAP,
-    FLAG_HYBRID,
     FLAG_KV_CACHE,
     PROTOCOL_VERSION,
     AVP_VERSION_STRING,
@@ -44,8 +43,7 @@ def test_payload_type_values():
 
 def test_communication_mode_values():
     assert CommunicationMode.LATENT == 0
-    assert CommunicationMode.HYBRID == 1
-    assert CommunicationMode.JSON == 2
+    assert CommunicationMode.JSON == 1
 
 
 def test_data_type_values():
@@ -70,9 +68,8 @@ def test_dtype_str_mapping():
 
 def test_flag_constants():
     assert FLAG_COMPRESSED == 0x01
-    assert FLAG_HYBRID == 0x02
-    assert FLAG_HAS_MAP == 0x04
-    assert FLAG_KV_CACHE == 0x08
+    assert FLAG_HAS_MAP == 0x02
+    assert FLAG_KV_CACHE == 0x04
 
 
 # --- AVPHeader ---
@@ -81,7 +78,6 @@ def test_flag_constants():
 def test_header_flag_properties():
     h = AVPHeader(flags=0)
     assert not h.compressed
-    assert not h.is_hybrid
     assert not h.has_map
     assert not h.is_kv_cache
 
@@ -89,8 +85,7 @@ def test_header_flag_properties():
     assert h.compressed
     assert h.flags & FLAG_COMPRESSED
 
-    h = AVPHeader(flags=FLAG_HYBRID | FLAG_HAS_MAP | FLAG_KV_CACHE)
-    assert h.is_hybrid
+    h = AVPHeader(flags=FLAG_HAS_MAP | FLAG_KV_CACHE)
     assert h.has_map
     assert h.is_kv_cache
     assert not h.compressed
