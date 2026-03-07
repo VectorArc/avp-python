@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "direct", "rosetta", "rosetta_seq", "universal", "soft_vocab", "both", "all"],
+        choices=["latent", "text", "direct", "rosetta", "both", "all"],
         default="all",
         help="Pipeline(s) to run (default: all)",
     )
@@ -64,18 +64,6 @@ def parse_args() -> argparse.Namespace:
                         help="Softmax temperature for cross-model projection (default: 1.0)")
     parser.add_argument("--num_transfer_states", type=int, default=1,
                         help="Number of hidden states to transfer in rosetta mode (default: 1)")
-    parser.add_argument("--k_tokens", type=int, default=64,
-                        help="Number of universal tokens for universal mode (default: 64)")
-    parser.add_argument("--rollout_steps", type=int, default=256,
-                        help="Latent rollout steps for universal mode (default: 256)")
-    parser.add_argument("--position_strategy", type=str, default="last_n",
-                        choices=["last_n", "stride"],
-                        help="Position selection strategy for soft_vocab mode (default: last_n)")
-    parser.add_argument("--state_source", type=str, default="text",
-                        choices=["text", "latent"],
-                        help="Hidden state source for soft_vocab mode (default: text)")
-    parser.add_argument("--num_positions", type=int, default=16,
-                        help="Number of hidden-state positions for rosetta_seq mode (default: 16)")
     return parser.parse_args()
 
 
@@ -123,20 +111,11 @@ def run_benchmark(config: dict) -> dict:
     run_latent = mode in ("latent", "both", "all")
     run_text = mode in ("text", "both", "all")
     run_rosetta = mode in ("rosetta", "all")
-    run_universal = mode in ("universal",)  # Explicit only — requires trained adapters
-    run_soft_vocab = mode in ("soft_vocab",)  # Explicit only — cross-model
-    run_rosetta_seq = mode in ("rosetta_seq",)  # Explicit only — cross-model discrete
-
-    k_tokens = config.get("k_tokens", 64)
-    rollout_steps = config.get("rollout_steps", 256)
-    position_strategy = config.get("position_strategy", "last_n")
-    state_source = config.get("state_source", "text")
-    num_positions = config.get("num_positions", 16)
 
     print(f"Device: {device}")
     print(f"Mode: {mode}")
     print(f"Model A: {model_name}")
-    if run_rosetta or run_universal or run_soft_vocab or run_rosetta_seq:
+    if run_rosetta:
         print(f"Model B: {model_b_name}")
     print(f"Samples: {max_samples}")
     print(f"Latent steps: {latent_steps}")
@@ -144,8 +123,7 @@ def run_benchmark(config: dict) -> dict:
     print(f"Temperature: {temperature}")
     print(f"Seed: {seed}")
     print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, "
-          f"rosetta={run_rosetta}, rosetta_seq={run_rosetta_seq}, "
-          f"universal={run_universal}, soft_vocab={run_soft_vocab}")
+          f"rosetta={run_rosetta}")
     print()
 
     dataset = load_dataset(max_samples)
@@ -155,9 +133,6 @@ def run_benchmark(config: dict) -> dict:
     latent_results = None
     text_results = None
     rosetta_results = None
-    universal_results = None
-    soft_vocab_results = None
-    rosetta_seq_results = None
 
     if run_direct:
         from benchmarks.gsm8k_2agent.pipeline_direct import run_direct_benchmark
@@ -244,124 +219,6 @@ def run_benchmark(config: dict) -> dict:
             import torch
             torch.cuda.empty_cache()
 
-    if run_universal:
-        from benchmarks.gsm8k_2agent.pipeline_universal import run_universal_benchmark
-        from avp.universal.adapter_registry import load_adapter
-        from avp.handshake import compute_model_hash
-
-        print("\n" + "=" * 50)
-        print("Running UNIVERSAL (learned cross-model) pipeline...")
-        print(f"  Model A (Researcher): {model_name}")
-        print(f"  Model B (Solver):     {model_b_name}")
-        print("=" * 50)
-        set_seed(seed)
-
-        # Load model B
-        model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
-
-        # Load adapters for both models
-        hash_a = connector._model_hash
-        hash_b = connector_b._model_hash
-        adapter_a = load_adapter(hash_a, device=device)
-        adapter_b = load_adapter(hash_b, device=device)
-
-        if adapter_a is None or adapter_b is None:
-            missing = []
-            if adapter_a is None:
-                missing.append(f"model A ({model_name}, hash={hash_a[:16]})")
-            if adapter_b is None:
-                missing.append(f"model B ({model_b_name}, hash={hash_b[:16]})")
-            print(f"ERROR: No trained universal adapter found for {', '.join(missing)}.")
-            print("Train adapters first: python universal/train.py --model <model_id> --steps 400")
-        else:
-            print(f"  Adapter A: {adapter_a.model_id} (d={adapter_a.d_source})")
-            print(f"  Adapter B: {adapter_b.model_id} (d={adapter_b.d_source})")
-
-            universal_results = run_universal_benchmark(
-                conn_a=connector, model_a=model, tokenizer_a=tokenizer,
-                identity_a=identity, model_b=model_b, tokenizer_b=tokenizer_b,
-                device=device, adapter_a=adapter_a, adapter_b=adapter_b,
-                dataset=dataset, rollout_steps=rollout_steps, k_tokens=k_tokens,
-                max_new_tokens=max_new_tokens, temperature=temperature,
-                top_p=top_p, verbose=verbose,
-            )
-
-        del model_b, tokenizer_b, connector_b, identity_b
-        if device == "cuda":
-            import torch
-            torch.cuda.empty_cache()
-
-    if run_soft_vocab:
-        from benchmarks.gsm8k_2agent.pipeline_soft_vocab import run_soft_vocab_benchmark
-        from avp.rosetta.calibrate import calibrate
-
-        print("\n" + "=" * 50)
-        print("Running SOFT_VOCAB (multi-position cross-model) pipeline...")
-        print(f"  Model A (Researcher): {model_name}")
-        print(f"  Model B (Solver):     {model_b_name}")
-        print(f"  State source: {state_source}, Positions: {position_strategy}, "
-              f"N={num_transfer_states}")
-        print("=" * 50)
-        set_seed(seed)
-
-        model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
-
-        print("Calibrating Rosetta Stone projection...")
-        avp_map = calibrate(
-            source_model=model, target_model=model_b,
-            source_tokenizer=tokenizer, target_tokenizer=tokenizer_b,
-            device=device,
-        )
-        print(f"  Method: {avp_map.method.value}, "
-              f"validation_score: {avp_map.validation_score:.4f}, "
-              f"{avp_map.source_dim}d → {avp_map.target_dim}d")
-
-        soft_vocab_results = run_soft_vocab_benchmark(
-            conn_a=connector, model_a=model, tokenizer_a=tokenizer,
-            identity_a=identity, model_b=model_b, tokenizer_b=tokenizer_b,
-            device=device, avp_map=avp_map, dataset=dataset,
-            num_transfer_states=num_transfer_states,
-            position_strategy=position_strategy,
-            state_source=state_source,
-            latent_steps=latent_steps,
-            projection_temperature=projection_temperature,
-            max_new_tokens=max_new_tokens, temperature=temperature,
-            top_p=top_p, verbose=verbose,
-        )
-
-        del model_b, tokenizer_b, connector_b, identity_b
-        if device == "cuda":
-            import torch
-            torch.cuda.empty_cache()
-
-    if run_rosetta_seq:
-        from benchmarks.gsm8k_2agent.pipeline_rosetta_seq import run_rosetta_seq_benchmark
-
-        print("\n" + "=" * 50)
-        print("Running ROSETTA_SEQ (discrete token transfer) pipeline...")
-        print(f"  Model A (Researcher): {model_name}")
-        print(f"  Model B (Solver):     {model_b_name}")
-        print(f"  Positions: {position_strategy}, N={num_positions}")
-        print("=" * 50)
-        set_seed(seed)
-
-        model_b, tokenizer_b, _, _ = load_model(model_b_name, device)
-
-        rosetta_seq_results = run_rosetta_seq_benchmark(
-            model_a=model, tokenizer_a=tokenizer,
-            model_b=model_b, tokenizer_b=tokenizer_b,
-            device=device, dataset=dataset,
-            num_positions=num_positions,
-            position_strategy=position_strategy,
-            max_new_tokens=max_new_tokens, temperature=temperature,
-            top_p=top_p, verbose=verbose,
-        )
-
-        del model_b, tokenizer_b
-        if device == "cuda":
-            import torch
-            torch.cuda.empty_cache()
-
     # Print summary
     from benchmarks.shared.evaluate_common import print_summary, compute_stats, compute_agreement
 
@@ -374,12 +231,6 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Text", 13, text_results))
     if rosetta_results is not None:
         modes.append(("Rosetta", 13, rosetta_results))
-    if universal_results is not None:
-        modes.append(("Universal", 13, universal_results))
-    if soft_vocab_results is not None:
-        modes.append(("SoftVocab", 13, soft_vocab_results))
-    if rosetta_seq_results is not None:
-        modes.append(("RosettaSeq", 13, rosetta_seq_results))
 
     # Compute agreement across available modes
     available = {}
@@ -391,12 +242,6 @@ def run_benchmark(config: dict) -> dict:
         available["latent"] = latent_results
     if rosetta_results is not None:
         available["rosetta"] = rosetta_results
-    if universal_results is not None:
-        available["universal"] = universal_results
-    if soft_vocab_results is not None:
-        available["soft_vocab"] = soft_vocab_results
-    if rosetta_seq_results is not None:
-        available["rosetta_seq"] = rosetta_seq_results
     agreement_data = compute_agreement(available) if len(available) > 1 else None
 
     print_summary(
@@ -417,7 +262,7 @@ def run_benchmark(config: dict) -> dict:
         "config": {
             "benchmark": "gsm8k_2agent",
             "model_a": model_name,
-            "model_b": model_b_name if (run_rosetta or run_universal or run_soft_vocab or run_rosetta_seq) else None,
+            "model_b": model_b_name if run_rosetta else None,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
@@ -447,21 +292,6 @@ def run_benchmark(config: dict) -> dict:
         output_data["rosetta"] = {
             "summary": compute_stats(rosetta_results),
             "samples": rosetta_results,
-        }
-    if universal_results is not None:
-        output_data["universal"] = {
-            "summary": compute_stats(universal_results),
-            "samples": universal_results,
-        }
-    if soft_vocab_results is not None:
-        output_data["soft_vocab"] = {
-            "summary": compute_stats(soft_vocab_results),
-            "samples": soft_vocab_results,
-        }
-    if rosetta_seq_results is not None:
-        output_data["rosetta_seq"] = {
-            "summary": compute_stats(rosetta_seq_results),
-            "samples": rosetta_seq_results,
         }
     if agreement_data is not None:
         output_data["agreement"] = agreement_data

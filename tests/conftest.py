@@ -61,21 +61,6 @@ def model_config_dict():
     }
 
 
-@pytest.fixture
-def model_config_dict_tied():
-    """A model config dict with tied embeddings."""
-    return {
-        "model_type": "gpt2",
-        "_name_or_path": "gpt2",
-        "hidden_size": 768,
-        "num_hidden_layers": 12,
-        "num_attention_heads": 12,
-        "num_key_value_heads": 12,
-        "head_dim": 64,
-        "tie_word_embeddings": True,
-    }
-
-
 # --- Tiny model fixtures for integration tests ---
 
 if HAS_TORCH and HAS_TRANSFORMERS:

@@ -94,9 +94,6 @@ _ROSETTA_NAMES = {
 # imported on first use; raises ImportError with install hint if httpx is missing.
 _TRANSPORT_NAMES = {"AVPClient", "AVPAsyncClient", "create_app"}
 
-# Connector and context classes are lazy-loaded because they require torch/transformers/vllm.
-_CONNECTOR_NAMES = {"AVPContext", "HuggingFaceConnector", "VLLMConnector"}
-
 # Easy API helpers that need lazy loading
 _EASY_NAMES = {"clear_cache"}
 
