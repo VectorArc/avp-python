@@ -75,6 +75,13 @@ class _AVPConnectorMetadata(KVConnectorMetadata):
 class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
     """AVP KV-cache connector for vLLM.
 
+    .. warning::
+        **Experimental — not validated end-to-end.** This plugin has known issues
+        with PagedAttention format conversion, CUDA graph compatibility, and
+        concurrent request isolation. It passes unit tests against mocks but has
+        not been tested with a real vLLM engine. Do not use in production.
+        See the v0.3.0 changelog and the vLLM integration plan for details.
+
     Intercepts save_kv_layer/wait_for_layer_load calls in vLLM's attention
     pipeline to serialize/deserialize KV-cache in AVP binary format.
 
@@ -96,6 +103,15 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             # Stub mode (testing without vLLM runtime)
             pass
         self._torch = _require_torch()
+
+        import warnings
+        warnings.warn(
+            "AVPKVConnectorV1Dynamic is experimental and has not been validated "
+            "end-to-end with a real vLLM engine. Known issues: PagedAttention "
+            "format conversion, CUDA graph compatibility, concurrent request "
+            "isolation. Do not use in production.",
+            stacklevel=2,
+        )
 
         # Store configuration
         self._store_dir = Path(

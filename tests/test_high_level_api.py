@@ -320,6 +320,7 @@ class MockLLM:
 
 
 @pytest.mark.skipif(not HAS_VLLM, reason="vllm not installed")
+@pytest.mark.filterwarnings("ignore::UserWarning")
 class TestVLLMGenerate:
     @pytest.fixture
     def vllm_connector(self):

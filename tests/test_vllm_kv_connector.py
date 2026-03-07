@@ -10,7 +10,10 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="torch not installed")
+pytestmark = [
+    pytest.mark.skipif(not HAS_TORCH, reason="torch not installed"),
+    pytest.mark.filterwarnings("ignore::UserWarning"),
+]
 
 
 @pytest.fixture

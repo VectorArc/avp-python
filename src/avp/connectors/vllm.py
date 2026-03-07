@@ -18,6 +18,7 @@ It does NOT support:
 Requires vllm — uses lazy imports so the core SDK works without it.
 """
 
+import warnings
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..errors import EngineNotAvailableError
@@ -39,6 +40,12 @@ def _require_vllm():
 
 class VLLMConnector(EngineConnector):
     """Engine connector for vLLM serving engine.
+
+    .. warning::
+        **Experimental.** Text generation and identity extraction work, but
+        latent KV-cache transfer via the engine plugin (AVPKVConnectorV1Dynamic)
+        has not been validated end-to-end with a real vLLM engine and may not
+        work correctly with PagedAttention. See the v0.3.0 changelog for details.
 
     Accepts a vLLM LLM instance and provides the EngineConnector interface
     for AVP handshake and communication.
@@ -62,6 +69,13 @@ class VLLMConnector(EngineConnector):
             model_id: Model ID to load (creates a new LLM instance).
                 Provide either engine or model_id, not both.
         """
+        warnings.warn(
+            "VLLMConnector is experimental. Text generation works, but latent "
+            "KV-cache transfer via AVPKVConnectorV1Dynamic has not been validated "
+            "end-to-end and may produce incorrect results. "
+            "Use HuggingFaceConnector for latent transfer.",
+            stacklevel=2,
+        )
         if engine is not None:
             self._engine = engine
         elif model_id is not None:

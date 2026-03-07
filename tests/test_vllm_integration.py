@@ -32,6 +32,7 @@ pytestmark = [
         not HAS_TORCH or not torch.cuda.is_available(),
         reason="CUDA not available",
     ),
+    pytest.mark.filterwarnings("ignore::UserWarning"),
 ]
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"

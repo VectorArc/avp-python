@@ -111,15 +111,9 @@ answer = avp.generate("Solve: 24 * 17 + 3",
 </details>
 
 <details>
-<summary><strong>vLLM integration</strong></summary>
+<summary><strong>vLLM integration (experimental)</strong></summary>
 
-Latent transfer at the engine level via KV connector plugin:
-
-```bash
-vllm serve Qwen/Qwen2.5-7B-Instruct \
-    --kv-connector AVPKVConnectorV1Dynamic \
-    --kv-connector-module-path avp.connectors.vllm_kv_connector
-```
+> **Status: Experimental.** `VLLMConnector` works for text generation and identity extraction. The KV connector plugin (`AVPKVConnectorV1Dynamic`) for latent KV-cache transfer between vLLM instances has not been validated end-to-end and has known issues with PagedAttention format conversion. Use `HuggingFaceConnector` for production latent transfer. See [CHANGELOG](CHANGELOG.md) for details.
 
 ```python
 from avp import VLLMConnector
@@ -127,8 +121,6 @@ from avp import VLLMConnector
 connector = VLLMConnector(model_id="Qwen/Qwen2.5-7B-Instruct")
 answer = connector.generate("Analyze and solve: 24 * 17 + 3")
 ```
-
-The plugin saves/loads KV-cache between vLLM instances via file-based store.
 
 </details>
 
@@ -158,7 +150,7 @@ AVP works *with* your orchestration framework, not instead of it. Replace `llm.i
 | **CrewAI** | `BaseLLM.call()` override |
 | **PydanticAI** | `FunctionModel` callback |
 | **LlamaIndex** | `CustomLLM.complete()` override |
-| **vLLM** | KVConnectorBase_V1 plugin |
+| **vLLM** | KVConnectorBase_V1 plugin (experimental — text generation works, latent transfer in progress) |
 | **HuggingFace** | Full hidden state and KV-cache access |
 | **A2A / MCP** | Complementary — AVP handles tensor transfer |
 

@@ -20,7 +20,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 - **Projection validation** — Two-tier gate: cosine similarity (fast, ~1ms) + pseudo-perplexity (~30ms). `validate_projection()` for model-pair diagnostics.
 - **`resolution_path` on `SessionInfo`** — Exposes which handshake rule matched: `hash_match`, `structural_match`, `shared_tokenizer`, `avp_map_file`, `vocab_overlap`, `json_fallback`.
 - **`tokenizer_hash` on `ModelIdentity`** — SHA-256 of sorted tokenizer vocabulary. Enables automatic cross-model projection via shared tokenizer detection.
-- **vLLM connector** — `VLLMConnector` (SDK wrapper) + `AVPKVConnectorV1Dynamic` (KVConnectorBase_V1 plugin). Text generation, identity extraction, PagedAttention conversion.
+- **vLLM connector (experimental)** — `VLLMConnector` (SDK wrapper) + `AVPKVConnectorV1Dynamic` (KVConnectorBase_V1 plugin). Text generation and identity extraction work. KV-cache transfer plugin has not been validated end-to-end with a real vLLM engine — known issues with PagedAttention format conversion, CUDA graph compatibility, and concurrent request isolation. Use `HuggingFaceConnector` for production latent transfer.
 - **`GenerateMetrics`** — Observability for `generate()`: think + generate durations, context/store flags, debug diagnostics.
 - **`HandshakeMetrics`** — Resolution path, mode, avp_map_id, duration.
 - **8 benchmark suites** — GSM8K (4-agent, 2-agent), HotpotQA, fan-out, MATH 2-agent, HumanEval, ClassEval, DebugBench. Cloud results on all.
