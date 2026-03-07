@@ -103,7 +103,7 @@ Latent transfer doesn't help every task. Two benchmarks where text outperforms:
 ## Reproduce
 
 ```bash
-pip install "avp[hf]" datasets
+pip install "avp" datasets
 
 python -m benchmarks.humaneval.run_humaneval \
     --model_name Qwen/Qwen2.5-7B-Instruct \

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AVP Quickstart: latent communication between agents.
 
-Requires: pip install "avp[hf]"
+Requires: pip install "avp"
 (torch + transformers for HuggingFace connector)
 
 Uses a tiny GPT-2 model with random weights for demo — output is garbage.
@@ -20,7 +20,7 @@ def main():
     try:
         from transformers import GPT2Config, GPT2LMHeadModel
     except ImportError:
-        print("transformers not installed. Install with: pip install 'avp[hf]'")
+        print("transformers not installed. Install with: pip install 'avp'")
         return
 
     # Create a tiny model (random weights, no download, CPU-only)

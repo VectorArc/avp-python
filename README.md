@@ -9,8 +9,7 @@
 **Multi-agent text handoffs discard KV-cache and attention state. AVP transfers that state directly — 46-78% fewer tokens, 2-4x faster, across models and families.** Built on [LatentMAS](https://arxiv.org/abs/2511.20639) (2025).
 
 ```bash
-pip install "avp[hf]"       # HuggingFace Transformers (development, benchmarks)
-pip install "avp[vllm]"     # vLLM (production serving)
+pip install avp
 ```
 
 > **Self-hosted models on GPUs only.** AVP needs access to model internals (KV-cache, hidden states) that cloud APIs don't expose. If you use OpenAI, Anthropic, or Google APIs — AVP can't help you. Good fit: multi-agent pipelines on vLLM or HuggingFace Transformers with datacenter or same-machine connectivity.

@@ -31,13 +31,13 @@ def _require_deps():
         import torch
     except ImportError:
         raise EngineNotAvailableError(
-            "huggingface (requires torch). Install with: pip install avp[hf]"
+            "huggingface (requires torch). pip install avp should include this dependency"
         )
     try:
         import transformers
     except ImportError:
         raise EngineNotAvailableError(
-            "huggingface (requires transformers). Install with: pip install avp[hf]"
+            "huggingface (requires transformers). pip install avp should include this dependency"
         )
     return torch, transformers
 

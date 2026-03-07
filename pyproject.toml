@@ -22,6 +22,8 @@ dependencies = [
     "numpy>=1.24",
     "protobuf>=4.21",
     "zstandard>=0.21",
+    "torch>=2.0",
+    "transformers>=4.36",
 ]
 
 [project.urls]
@@ -33,15 +35,11 @@ Changelog = "https://github.com/VectorArc/avp-python/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # User-facing extras
-hf = ["torch>=2.0", "transformers>=4.36"]
-vllm = ["avp[hf]", "vllm>=0.15.0"]
+vllm = ["vllm>=0.15.0"]
 transport = ["httpx[http2]>=0.25"]
 server = ["avp[transport]", "fastapi>=0.104", "uvicorn[standard]>=0.24"]
-all = ["avp[hf,vllm,transport,server]"]
-# Backward compat (hidden, not in docs)
-latent = ["avp[hf]"]
 # Development
-benchmark = ["avp[hf]", "datasets>=2.14"]
+benchmark = ["datasets>=2.14"]
 dev = [
     "avp[transport,server]",
     "pytest>=7.0",

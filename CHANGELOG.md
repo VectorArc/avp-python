@@ -34,6 +34,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 - **Flag bits renumbered** — `FLAG_COMPRESSED = 0x01`, `FLAG_HAS_MAP = 0x02`, `FLAG_KV_CACHE = 0x04`.
 - **Handshake resolution** now checks vocabulary overlap (>= 100 shared tokens) before falling back to JSON.
 - **Quality gate threshold** lowered from 512 to 300 tokens based on cross-benchmark validation.
+- **Package extras** — torch and transformers are now required deps. `pip install avp` just works. `[vllm]` extra for production serving. Removed `[latent]`, `[hf]`, `[demo]`, `[all]`.
 
 ### Removed
 
