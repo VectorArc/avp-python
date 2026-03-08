@@ -38,7 +38,7 @@ answer = connector.generate(prompt, context=context)
 | **DebugBench** (Qwen 7B, n=100) | 50.0% | **51.0%** | 49.0% |
 | **GSM8K** (Llama 3B, n=200) | 75.0% | **78.0%** | 75.5% |
 
-+14.1pp on code generation vs text (p=0.029). DebugBench is neutral across all modes, but you still save 47% of tokens and run 3x faster. All runs on NVIDIA A100.
++14.1pp on code generation vs text (p=0.004). DebugBench is neutral across all modes, but you still save 47% of tokens and run 3x faster. All runs on NVIDIA A100.
 
 **Cross-model (zero training, 6 KB on the wire):**
 

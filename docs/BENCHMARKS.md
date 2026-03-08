@@ -1,6 +1,6 @@
 # AVP Benchmarks
 
-> **+8.6pp on code generation (p=0.029) · 46-78% fewer tokens · 2-4x faster** — 8 benchmarks, 5 models, 2 families.
+> **+8.6pp on code generation (p=0.004) · 46-78% fewer tokens · 2-4x faster** — 8 benchmarks, 5 models, 2 families.
 
 ---
 
@@ -14,7 +14,7 @@ Same-model latent transfer matches or improves accuracy on structured tasks. Tes
 |---|--------|--------------|------|
 | **HumanEval** (Qwen 7B, n=164) | 58.5% | **67.1%** | 53.0% |
 
-Latent vs text: p=0.029. Text chains introduce formatting noise that disrupts code structure.
+Latent vs text: p=0.004. Text chains introduce formatting noise that disrupts code structure.
 
 ### Math Reasoning
 
