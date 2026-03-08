@@ -1,19 +1,16 @@
 """vLLM engine connector for AVP.
 
 Wraps a vLLM LLM engine to provide the EngineConnector interface for
-handshake, identity extraction, and embedding injection.
+identity extraction and text generation.
 
-vLLM is a serving engine — it cannot expose per-step hidden states.
+Latent transfer (think/generate with context) is NOT supported —
+vLLM does not expose the hidden state access needed for latent steps.
+Use HuggingFaceConnector for latent communication.
+
 This connector supports:
 - Model identity extraction (from HF config inside vLLM)
 - Tokenization
-- Text generation (vLLM's sweet spot)
-- Embedding injection via prompt_embeds API
-- Tied/untied weight detection
-
-It does NOT support:
-- extract_hidden_state() — raises EngineNotAvailableError
-- generate_latent_steps() — not applicable to serving engines
+- Text generation
 
 Requires vllm — uses lazy imports so the core SDK works without it.
 """
@@ -39,22 +36,17 @@ def _require_vllm():
 
 
 class VLLMConnector(EngineConnector):
-    """Engine connector for vLLM serving engine.
+    """Engine connector for vLLM serving engine (text-only).
 
-    .. warning::
-        **Experimental.** Text generation and identity extraction work, but
-        latent KV-cache transfer via the engine plugin (AVPKVConnectorV1Dynamic)
-        has not been validated end-to-end with a real vLLM engine and may not
-        work correctly with PagedAttention. See the v0.3.0 changelog for details.
-
-    Accepts a vLLM LLM instance and provides the EngineConnector interface
-    for AVP handshake and communication.
+    Provides model identity extraction and text generation via vLLM.
+    Latent transfer (think/generate with context) is not supported —
+    use HuggingFaceConnector for latent communication.
 
     Example:
         >>> from vllm import LLM
         >>> engine = LLM(model="Qwen/Qwen2.5-7B-Instruct")
         >>> connector = VLLMConnector(engine=engine)
-        >>> identity = connector.get_model_identity()
+        >>> answer = connector.generate("Solve: 2+2")
     """
 
     def __init__(
@@ -70,10 +62,9 @@ class VLLMConnector(EngineConnector):
                 Provide either engine or model_id, not both.
         """
         warnings.warn(
-            "VLLMConnector is experimental. Text generation works, but latent "
-            "KV-cache transfer via AVPKVConnectorV1Dynamic has not been validated "
-            "end-to-end and may produce incorrect results. "
-            "Use HuggingFaceConnector for latent transfer.",
+            "VLLMConnector supports text-only generation. "
+            "Latent transfer (think/generate with context) is not supported — "
+            "use HuggingFaceConnector for latent communication.",
             stacklevel=2,
         )
         if engine is not None:
@@ -376,7 +367,7 @@ class VLLMConnector(EngineConnector):
         top_p: float = 0.95,
         do_sample: bool = True,
     ) -> str:
-        """Generate text from a prompt. Context injection is not supported.
+        """Generate text from a prompt (text-only, no latent context).
 
         Args:
             prompt: A string (wrapped as user message) or list of chat messages.
@@ -394,9 +385,9 @@ class VLLMConnector(EngineConnector):
         """
         if context is not None:
             raise EngineNotAvailableError(
-                "vllm (generate() does not support context injection at the SDK level. "
-                "vLLM manages KV-cache internally. For cross-process KV-cache transfer, "
-                "use the AVPKVConnectorV1Dynamic plugin at the engine level.)"
+                "vllm (generate() does not support latent context injection. "
+                "vLLM does not expose the hidden state access needed for latent transfer. "
+                "Use HuggingFaceConnector for latent communication.)"
             )
 
         if isinstance(prompt, str):

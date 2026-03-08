@@ -1,4 +1,4 @@
-# Agent Vector Protocol (AVP) — KV-Cache Transfer for Multi-Agent LLMs
+# AVP — Agents Share Thoughts, Not Text
 
 [![PyPI](https://img.shields.io/pypi/v/avp.svg)](https://pypi.org/project/avp/)
 [![CI](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml/badge.svg)](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml)
@@ -6,13 +6,13 @@
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.3-blue.svg)](https://github.com/VectorArc/avp-spec)
 
-**Multi-agent text handoffs discard KV-cache and attention state. AVP transfers that state directly — 46-78% fewer tokens, 2-4x faster, across models and families.** Built on [LatentMAS](https://arxiv.org/abs/2511.20639) (2025).
+When LLM agents hand off work as text, the next agent re-processes everything from scratch. AVP transfers the actual computation — KV-cache, hidden states, attention — so the receiving agent picks up where the sender left off. 46-78% fewer tokens, 2-4x faster. Sometimes more accurate than text. Built on [LatentMAS](https://arxiv.org/abs/2511.20639).
 
 ```bash
 pip install avp
 ```
 
-> **Self-hosted models on GPUs only.** AVP needs access to model internals (KV-cache, hidden states) that cloud APIs don't expose. If you use OpenAI, Anthropic, or Google APIs — AVP can't help you. Good fit: multi-agent pipelines on vLLM or HuggingFace Transformers with datacenter or same-machine connectivity.
+> **Requires self-hosted models on GPUs.** AVP accesses model internals (KV-cache, hidden states) that cloud APIs don't expose. If you call OpenAI, Anthropic, or Google endpoints, AVP can't help. Good fit: multi-agent pipelines on HuggingFace Transformers with local or datacenter GPUs.
 
 ## Quick Start
 
@@ -22,58 +22,75 @@ from avp import HuggingFaceConnector
 connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
 prompt = "Analyze this math problem: 24 * 17 + 3"
 
-# Agent A: latent reasoning (no text output, builds KV-cache)
+# Agent A thinks (builds KV-cache, no text output)
 context = connector.think(prompt, steps=10)
 
-# Agent B: generate with Agent A's context
+# Agent B generates with Agent A's context
 answer = connector.generate(prompt, context=context)
 ```
 
 ## Results
 
-| | Direct | Latent (AVP) | Text |
-|---|--------|--------------|------|
+| | Direct | Latent (AVP) | Text Chain |
+|---|--------|--------------|------------|
 | **HumanEval** (Qwen 7B, n=164) | 58.5% | **67.1%** | 53.0% |
 | **GSM8K** (Qwen 7B, n=200) | 91.0% | **90.5%** | 87.0% |
 | **DebugBench** (Qwen 7B, n=100) | 50.0% | **51.0%** | 49.0% |
 | **GSM8K** (Llama 3B, n=200) | 75.0% | **78.0%** | 75.5% |
 
-+8.6pp on code generation (p=0.029). 46-78% fewer tokens. 2-4x faster. Tested on NVIDIA A100.
++14.1pp on code generation vs text (p=0.029). DebugBench is neutral across all modes, but you still save 47% of tokens and run 3x faster. All runs on NVIDIA A100.
 
-**Cross-model (zero training, 6 KB wire):**
+**Cross-model (zero training, 6 KB on the wire):**
 
-| Source → Target | GSM8K | HumanEval |
-|-----------------|-------|-----------|
-| Qwen 7B → Llama 3B | 74.5% | 47.0% |
-| Llama 3B → Qwen 7B | **90.0%** | **79.3%** |
+| Source | Target | GSM8K | HumanEval |
+|--------|--------|-------|-----------|
+| Qwen 7B | Llama 3B | 74.5% | 47.0% |
+| Llama 3B | Qwen 7B | **90.0%** | **79.3%** |
 
-Full results: **[Benchmarks](docs/BENCHMARKS.md)** — 8 benchmarks, 5 models, 2 families.
+A small 3B model sharing its reasoning lifts a 7B solver to 90% on math and 79.3% on code. The projection is vocabulary-mediated — no learned parameters, no training data, works across model families.
+
+Full results: **[Benchmarks](docs/BENCHMARKS.md)** — 8 benchmarks, 5 models, 2 families, reproducible.
 
 ## How It Works
 
 ```mermaid
 graph LR
-    subgraph text["Text Chain (today)"]
+    subgraph text["Text Handoff"]
         direction LR
-        A1["Agent A<br/>generates text"] -->|"serialize to text<br/>re-tokenize everything"| B1["Agent B<br/>re-processes from scratch"]
+        A1["Agent A generates text"] -->|"serialize, re-tokenize"| B1["Agent B re-processes from scratch"]
     end
 
-    subgraph avp["AVP Latent Transfer"]
+    subgraph avp["AVP Transfer"]
         direction LR
-        A2["Agent A<br/>generates KV-cache"] -->|"binary transfer<br/>28-130 MB"| B2["Agent B<br/>picks up where A left off"]
+        A2["Agent A builds KV-cache"] -->|"binary transfer"| B2["Agent B continues from cached state"]
     end
 
     style text fill:#fff3f3,stroke:#d44,stroke-width:2px
     style avp fill:#f3fff3,stroke:#4a4,stroke-width:2px
 ```
 
-AVP transfers the KV-cache (computed attention states) directly between agents. The receiving agent reads prior reasoning from attention states instead of re-computing it from text. Three modes, auto-negotiated:
+Three modes, auto-negotiated via handshake:
 
-| Mode | When | What Happens |
-|------|------|--------------|
-| **Latent** | Same model | KV-cache transfer, zero re-processing |
-| **Cross-model** | Same or different family | Vocabulary-mediated projection, zero training |
-| **JSON fallback** | No compatible path | Standard text, auto-negotiated |
+| Mode | When | Payload |
+|------|------|---------|
+| **Latent** | Same model | Full KV-cache |
+| **Cross-model** | Different model or family | Single projected hidden state (~6 KB) |
+| **JSON fallback** | No compatible projection path | Plain text |
+
+## Works With
+
+Replace `llm.invoke()` with `avp.generate()`. Your framework sees text in, text out.
+
+| Framework | Integration point |
+|-----------|-------------------|
+| **LangGraph** | Graph node replaces LLM call |
+| **CrewAI** | `BaseLLM.call()` override |
+| **PydanticAI** | `FunctionModel` callback |
+| **LlamaIndex** | `CustomLLM.complete()` override |
+| **A2A / MCP** | Complementary — AVP handles tensor transfer, they handle routing |
+| **HuggingFace** | Full latent pipeline (KV-cache + hidden states) |
+
+See **[Framework Integration Guide](docs/FRAMEWORK_INTEGRATION.md)** for working examples.
 
 <details>
 <summary><strong>Cross-model transfer</strong></summary>
@@ -89,20 +106,20 @@ context = researcher.think(prompt, steps=10)
 answer = solver.generate(prompt, context=context, source=researcher)
 ```
 
-Cross-model calibration is one-time per model pair (~0.5-2s), cached to `~/.avp/maps/`.
+Calibration is automatic and one-time per model pair (~0.5-2s), cached to `~/.avp/maps/`.
 
 </details>
 
 <details>
-<summary><strong>Easy API (convenience wrappers)</strong></summary>
+<summary><strong>Easy API (one-liners)</strong></summary>
 
 ```python
 import avp
 
-# One-liner: think + generate
+# think + generate in one call
 answer = avp.generate("Solve: 24 * 17 + 3", model="Qwen/Qwen2.5-7B-Instruct")
 
-# Cross-model
+# cross-model
 answer = avp.generate("Solve: 24 * 17 + 3",
                        model="meta-llama/Llama-3.2-3B-Instruct",
                        source_model="Qwen/Qwen2.5-7B-Instruct")
@@ -111,16 +128,9 @@ answer = avp.generate("Solve: 24 * 17 + 3",
 </details>
 
 <details>
-<summary><strong>vLLM integration (experimental)</strong></summary>
+<summary><strong>vLLM</strong></summary>
 
-> **Status: Experimental.** `VLLMConnector` works for text generation and identity extraction. The KV connector plugin (`AVPKVConnectorV1Dynamic`) for latent KV-cache transfer between vLLM instances has not been validated end-to-end and has known issues with PagedAttention format conversion. Use `HuggingFaceConnector` for production latent transfer. See [CHANGELOG](CHANGELOG.md) for details.
-
-```python
-from avp import VLLMConnector
-
-connector = VLLMConnector(model_id="Qwen/Qwen2.5-7B-Instruct")
-answer = connector.generate("Analyze and solve: 24 * 17 + 3")
-```
+**Latent transfer is not supported on vLLM yet.** The latent pipeline (`think()`/`generate()` with context) requires HuggingFace Transformers. `VLLMConnector` exists for text-only generation and model identity — it will error if you pass latent context. vLLM latent support is on the roadmap.
 
 </details>
 
@@ -128,7 +138,7 @@ answer = connector.generate("Analyze and solve: 24 * 17 + 3")
 <summary><strong>Cross-process transfer</strong></summary>
 
 ```python
-# Process A: serialize context
+# Process A: serialize
 wire_bytes = context.to_bytes(session_id="s1", source_agent_id="agent-a")
 
 # Process B: restore and generate
@@ -140,34 +150,19 @@ answer = connector.generate(prompt, context=restored)
 
 </details>
 
-## Works With
-
-AVP works *with* your orchestration framework, not instead of it. Replace `llm.invoke()` with `avp.generate()` — your framework sees text in, text out.
-
-| Framework | Integration |
-|-----------|-------------|
-| **LangGraph** | Graph node — `avp.generate()` replaces LLM call |
-| **CrewAI** | `BaseLLM.call()` override |
-| **PydanticAI** | `FunctionModel` callback |
-| **LlamaIndex** | `CustomLLM.complete()` override |
-| **vLLM** | KVConnectorBase_V1 plugin (experimental — text generation works, latent transfer in progress) |
-| **HuggingFace** | Full hidden state and KV-cache access |
-| **A2A / MCP** | Complementary — AVP handles tensor transfer |
-
-See **[Framework Integration Guide](docs/FRAMEWORK_INTEGRATION.md)** for examples.
-
 ## Roadmap
 
-- Bidirectional latent communication (A→B + B→A latent)
-- vLLM serving throughput benchmarks
-- CacheGen-style compression (3-4x KV-cache size reduction)
+- vLLM latent transfer
+- Bidirectional latent communication (both agents share thinking, not just one)
+- CacheGen-style KV-cache compression (3-4x reduction)
 
 ## Documentation
 
 - **[AVP Specification](https://github.com/VectorArc/avp-spec)** — Binary format, handshake, transport
 - **[Benchmarks](docs/BENCHMARKS.md)** — 8 benchmarks, 5 models, 2 families
-- **[Framework Integration](docs/FRAMEWORK_INTEGRATION.md)** — LangGraph, CrewAI, cross-model examples
-- **[Examples](examples/)** — Quickstart and agent demos
+- **[Framework Integration](docs/FRAMEWORK_INTEGRATION.md)** — LangGraph, CrewAI, PydanticAI, LlamaIndex
+- **[Examples](examples/)** — Quickstart, cross-model, and agent demos
+- **[CHANGELOG](CHANGELOG.md)**
 
 ## License
 
