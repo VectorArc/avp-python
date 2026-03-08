@@ -4,6 +4,12 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-03-08
+
+### Fixed
+
+- **Protobuf compatibility** — Removed gencode version check from `avp_pb2.py` that required protobuf >=6.31.1 at runtime. Now works with protobuf >=4.21 as declared in dependencies. Fixes installation on Google Colab and other environments with protobuf 4.x/5.x.
+
 ## [0.3.0] - 2026-03-07
 
 ### Added
