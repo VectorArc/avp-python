@@ -1,4 +1,4 @@
-# AVP — Agents Share Thoughts, Not Text
+# AVP – Agents Share Thoughts, Not Text
 
 [![PyPI](https://img.shields.io/pypi/v/avp.svg)](https://pypi.org/project/avp/)
 [![CI](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml/badge.svg)](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml)
@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.3-blue.svg)](https://github.com/VectorArc/avp-spec)
 
-When LLM agents hand off work as text, the next agent re-processes everything from scratch. AVP transfers the actual computation — KV-cache, hidden states, attention — so the receiving agent picks up where the sender left off. 46-78% fewer tokens, 2-4x faster. Sometimes more accurate than text. Built on [LatentMAS](https://arxiv.org/abs/2511.20639).
+When LLM agents hand off work as text, the next agent re-processes everything from scratch. AVP transfers the actual computation – KV-cache, hidden states, attention – so the receiving agent picks up where the sender left off. 46-78% fewer tokens, 2-4x faster. Sometimes more accurate than text. Built on [LatentMAS](https://arxiv.org/abs/2511.20639).
 
 ```bash
 pip install avp
@@ -47,9 +47,9 @@ answer = connector.generate(prompt, context=context)
 | Qwen 7B | Llama 3B | 74.5% | 47.0% |
 | Llama 3B | Qwen 7B | **90.0%** | **79.3%** |
 
-A small 3B model sharing its reasoning lifts a 7B solver to 90% on math and 79.3% on code. The projection is vocabulary-mediated — no learned parameters, no training data, works across model families.
+A small 3B model sharing its reasoning lifts a 7B solver to 90% on math and 79.3% on code. The projection is vocabulary-mediated – no learned parameters, no training data, works across model families.
 
-Full results: **[Benchmarks](docs/BENCHMARKS.md)** — 8 benchmarks, 5 models, 2 families, reproducible.
+Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 8 benchmarks, 5 models, 2 families, reproducible.
 
 ## How It Works
 
@@ -87,7 +87,7 @@ Replace `llm.invoke()` with `avp.generate()`. Your framework sees text in, text 
 | **CrewAI** | `BaseLLM.call()` override |
 | **PydanticAI** | `FunctionModel` callback |
 | **LlamaIndex** | `CustomLLM.complete()` override |
-| **A2A / MCP** | Complementary — AVP handles tensor transfer, they handle routing |
+| **A2A / MCP** | Complementary – AVP handles tensor transfer, they handle routing |
 | **HuggingFace** | Full latent pipeline (KV-cache + hidden states) |
 
 See **[Framework Integration Guide](docs/FRAMEWORK_INTEGRATION.md)** for working examples.
@@ -130,7 +130,7 @@ answer = avp.generate("Solve: 24 * 17 + 3",
 <details>
 <summary><strong>vLLM</strong></summary>
 
-**Latent transfer is not supported on vLLM yet.** The latent pipeline (`think()`/`generate()` with context) requires HuggingFace Transformers. `VLLMConnector` exists for text-only generation and model identity — it will error if you pass latent context. vLLM latent support is on the roadmap.
+**Latent transfer is not supported on vLLM yet.** The latent pipeline (`think()`/`generate()` with context) requires HuggingFace Transformers. `VLLMConnector` exists for text-only generation and model identity – it will error if you pass latent context. vLLM latent support is on the roadmap.
 
 </details>
 
@@ -158,12 +158,12 @@ answer = connector.generate(prompt, context=restored)
 
 ## Documentation
 
-- **[AVP Specification](https://github.com/VectorArc/avp-spec)** — Binary format, handshake, transport
-- **[Benchmarks](docs/BENCHMARKS.md)** — 8 benchmarks, 5 models, 2 families
-- **[Framework Integration](docs/FRAMEWORK_INTEGRATION.md)** — LangGraph, CrewAI, PydanticAI, LlamaIndex
-- **[Examples](examples/)** — Quickstart, cross-model, and agent demos
+- **[AVP Specification](https://github.com/VectorArc/avp-spec)** – Binary format, handshake, transport
+- **[Benchmarks](docs/BENCHMARKS.md)** – 8 benchmarks, 5 models, 2 families
+- **[Framework Integration](docs/FRAMEWORK_INTEGRATION.md)** – LangGraph, CrewAI, PydanticAI, LlamaIndex
+- **[Examples](examples/)** – Quickstart, cross-model, and agent demos
 - **[CHANGELOG](CHANGELOG.md)**
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE)
+Apache 2.0 – see [LICENSE](LICENSE)
