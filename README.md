@@ -6,7 +6,8 @@
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.3-blue.svg)](https://github.com/VectorArc/avp-spec)
 
-When LLM agents hand off work as text, the next agent re-processes everything from scratch. AVP transfers the actual computation – KV-cache, hidden states, attention – so the receiving agent picks up where the sender left off. 46-78% fewer tokens, 2-4x faster. Sometimes more accurate than text. Built on [LatentMAS](https://arxiv.org/abs/2511.20639).
+<!-- TODO: Rewrite intro paragraph — lead with accuracy (+14pp code gen), qualify efficiency per-task -->
+When LLM agents hand off work as text, the next agent re-processes everything from scratch. AVP transfers the actual computation – KV-cache, hidden states, attention – so the receiving agent picks up where the sender left off. 14-78% fewer tokens, 1.2-4x faster. Sometimes more accurate than text. Built on [LatentMAS](https://arxiv.org/abs/2511.20639).
 
 ```bash
 pip install avp
@@ -34,9 +35,9 @@ answer = connector.generate(prompt, context=context)
 | | Direct | Latent (AVP) | Text Chain |
 |---|--------|--------------|------------|
 | **HumanEval** (Qwen 7B, n=164) | 58.5% | **67.1%** | 53.0% |
-| **GSM8K** (Qwen 7B, n=200) | 91.0% | **90.5%** | 87.0% |
-| **DebugBench** (Qwen 7B, n=100) | 50.0% | **51.0%** | 49.0% |
-| **GSM8K** (Llama 3B, n=200) | 75.0% | **78.0%** | 75.5% |
+| **GSM8K** (Qwen 7B, n=200) | 91.0% | 90.5% | 87.0% |
+| **DebugBench** (Qwen 7B, n=100) | 50.0% | 51.0% | 49.0% |
+| **GSM8K** (Llama 3B, n=50) | 76.0% | 76.0% | 74.0% |
 
 +14.1pp on code generation vs text (p=0.004). DebugBench is neutral across all modes, but you still save 47% of tokens and run 3x faster. All runs on NVIDIA A100.
 
@@ -44,7 +45,7 @@ answer = connector.generate(prompt, context=context)
 
 | Source | Target | GSM8K | HumanEval |
 |--------|--------|-------|-----------|
-| Qwen 7B | Llama 3B | 74.5% | 47.0% |
+| Qwen 7B | Llama 3B | 77.0% | 47.0% |
 | Llama 3B | Qwen 7B | **90.0%** | **79.3%** |
 
 A small 3B model sharing its reasoning lifts a 7B solver to 90% on math and 79.3% on code. The projection is vocabulary-mediated – no learned parameters, no training data, works across model families.

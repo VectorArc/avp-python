@@ -1,6 +1,6 @@
 # AVP Benchmarks
 
-> **+8.6pp on code generation (p=0.004) · 46-78% fewer tokens · 2-4x faster** — 8 benchmarks, 5 models, 2 families.
+> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** — 8 benchmarks, 5 models, 2 families.
 
 ---
 
@@ -20,14 +20,14 @@ Latent vs text: p=0.004. Text chains introduce formatting noise that disrupts co
 
 | | Direct | Latent (AVP) | Text |
 |---|--------|--------------|------|
-| **GSM8K** (Qwen 7B, n=200) | 91.0% | **90.5%** | 87.0% |
-| **GSM8K** (Llama 3B, n=200) | 75.0% | **78.0%** | 75.5% |
+| **GSM8K** (Qwen 7B, n=200) | 91.0% | 90.5% | 87.0% |
+| **GSM8K** (Llama 3B, n=50) | 76.0% | 76.0% | 74.0% |
 
 ### Bug Fixing
 
 | | Direct | Latent (AVP) | Text |
 |---|--------|--------------|------|
-| **DebugBench** (Qwen 7B, n=100) | 50.0% | **51.0%** | 49.0% |
+| **DebugBench** (Qwen 7B, n=100) | 50.0% | 51.0% | 49.0% |
 | **DebugBench** (Llama 3B, n=100) | 31.0% | 30.0% | 31.0% |
 
 ### Comprehension
@@ -46,9 +46,12 @@ Token savings are structural — pre-computed KV-cache replaces re-processed tex
 
 | Agents | Benchmark | Token Savings | Speedup |
 |--------|-----------|---------------|---------|
-| 2 | GSM8K, HumanEval, DebugBench, MATH | 46-56% | 1.5-3x |
+| 2 | GSM8K, DebugBench, MATH | 46-56% | 1.5-3x |
+| 2 | HumanEval | 14% | 1.2x |
 | 3 | Fan-out | 56-60% | 1.5x |
 | 4 | GSM8K chain | 73-78% | 2-4x |
+
+HumanEval token savings are lower because prompts are short (~182 tokens avg) and the latent reviewer generates longer, more complete code solutions (+53% more output tokens).
 
 Text prompts grow **O(n²)** with agent count. Latent stays **O(n)**.
 
@@ -60,7 +63,7 @@ Different models communicate via vocabulary-mediated projection. Zero training �
 
 | Source → Target | GSM8K (n=200) | HumanEval (n=164) |
 |-----------------|---------------|-------------------|
-| Qwen 7B → Llama 3B | **74.5%** | **47.0%** |
+| Qwen 7B → Llama 3B | **77.0%** | **47.0%** |
 | Llama 3B → Qwen 7B | **90.0%** | **79.3%** |
 | Qwen 7B → Qwen 1.5B | 58.5% | 42.1% |
 
@@ -83,7 +86,7 @@ Latent transfer doesn't help every task. Two benchmarks where text outperforms:
 
 | Parameter | Value |
 |-----------|-------|
-| Latent steps | 10 (validated: 10 ≈ 20 > 40 > 80) |
+| Latent steps | 20 (validated: 10 ≈ 20 > 40 > 80) |
 | Temperature | 0.7 |
 | Max new tokens | 512 |
 | Seed | 42 |
@@ -107,7 +110,7 @@ pip install "avp" datasets
 
 python -m benchmarks.humaneval.run_humaneval \
     --model_name Qwen/Qwen2.5-7B-Instruct \
-    --mode all --max-samples 50 --latent-steps 10 --seed 42
+    --mode all --max-samples 50 --latent-steps 20 --seed 42
 ```
 
 All benchmark code: [`benchmarks/`](https://github.com/VectorArc/avp-python/tree/main/benchmarks). Llama models require [HF access](https://huggingface.co/meta-llama) and `HF_TOKEN`.
