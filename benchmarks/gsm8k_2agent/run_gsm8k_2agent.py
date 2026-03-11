@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "direct", "rosetta", "both", "all"],
+        choices=["latent", "text", "direct", "rosetta", "text_cross_model", "both", "all"],
         default="all",
         help="Pipeline(s) to run (default: all)",
     )
@@ -111,11 +111,12 @@ def run_benchmark(config: dict) -> dict:
     run_latent = mode in ("latent", "both", "all")
     run_text = mode in ("text", "both", "all")
     run_rosetta = mode in ("rosetta", "all")
+    run_text_cross_model = mode in ("text_cross_model", "all")
 
     print(f"Device: {device}")
     print(f"Mode: {mode}")
     print(f"Model A: {model_name}")
-    if run_rosetta:
+    if run_rosetta or run_text_cross_model:
         print(f"Model B: {model_b_name}")
     print(f"Samples: {max_samples}")
     print(f"Latent steps: {latent_steps}")
@@ -123,7 +124,7 @@ def run_benchmark(config: dict) -> dict:
     print(f"Temperature: {temperature}")
     print(f"Seed: {seed}")
     print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, "
-          f"rosetta={run_rosetta}")
+          f"rosetta={run_rosetta}, text_cross_model={run_text_cross_model}")
     print()
 
     dataset = load_dataset(max_samples)
@@ -133,6 +134,7 @@ def run_benchmark(config: dict) -> dict:
     latent_results = None
     text_results = None
     rosetta_results = None
+    text_cross_model_results = None
 
     if run_direct:
         from benchmarks.gsm8k_2agent.pipeline_direct import run_direct_benchmark
@@ -178,6 +180,29 @@ def run_benchmark(config: dict) -> dict:
             top_p=top_p, verbose=verbose,
         )
 
+    # Load model B if needed for cross-model modes
+    model_b = tokenizer_b = connector_b = identity_b = None
+    if run_rosetta or run_text_cross_model:
+        model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
+
+    if run_text_cross_model:
+        from benchmarks.gsm8k_2agent.pipeline_text_cross_model import run_text_cross_model_benchmark
+
+        print("\n" + "=" * 50)
+        print("Running TEXT CROSS-MODEL (A generates text → B reads text) pipeline...")
+        print(f"  Model A (Researcher): {model_name}")
+        print(f"  Model B (Solver):     {model_b_name}")
+        print("=" * 50)
+        set_seed(seed)
+
+        text_cross_model_results = run_text_cross_model_benchmark(
+            model_a=model, tokenizer_a=tokenizer,
+            model_b=model_b, tokenizer_b=tokenizer_b,
+            device=device, dataset=dataset,
+            max_new_tokens=max_new_tokens, temperature=temperature,
+            top_p=top_p, verbose=verbose,
+        )
+
     if run_rosetta:
         from benchmarks.gsm8k_2agent.pipeline_rosetta import run_rosetta_benchmark
         from avp.rosetta.calibrate import calibrate
@@ -188,9 +213,6 @@ def run_benchmark(config: dict) -> dict:
         print(f"  Model B (Solver):     {model_b_name}")
         print("=" * 50)
         set_seed(seed)
-
-        # Load model B (model A is already loaded)
-        model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
 
         # Calibrate once — instant for same-family vocab-mediated
         print("Calibrating Rosetta Stone projection...")
@@ -213,7 +235,8 @@ def run_benchmark(config: dict) -> dict:
             num_transfer_states=num_transfer_states,
         )
 
-        # Free model B to reclaim GPU memory
+    # Free model B to reclaim GPU memory
+    if model_b is not None:
         del model_b, tokenizer_b, connector_b, identity_b
         if device == "cuda":
             import torch
@@ -231,6 +254,8 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Text", 13, text_results))
     if rosetta_results is not None:
         modes.append(("Rosetta", 13, rosetta_results))
+    if text_cross_model_results is not None:
+        modes.append(("Text Cross-Model", 16, text_cross_model_results))
 
     # Compute agreement across available modes
     available = {}
@@ -242,6 +267,8 @@ def run_benchmark(config: dict) -> dict:
         available["latent"] = latent_results
     if rosetta_results is not None:
         available["rosetta"] = rosetta_results
+    if text_cross_model_results is not None:
+        available["text_cross_model"] = text_cross_model_results
     agreement_data = compute_agreement(available) if len(available) > 1 else None
 
     print_summary(
@@ -262,7 +289,7 @@ def run_benchmark(config: dict) -> dict:
         "config": {
             "benchmark": "gsm8k_2agent",
             "model_a": model_name,
-            "model_b": model_b_name if run_rosetta else None,
+            "model_b": model_b_name if (run_rosetta or run_text_cross_model) else None,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
@@ -292,6 +319,11 @@ def run_benchmark(config: dict) -> dict:
         output_data["rosetta"] = {
             "summary": compute_stats(rosetta_results),
             "samples": rosetta_results,
+        }
+    if text_cross_model_results is not None:
+        output_data["text_cross_model"] = {
+            "summary": compute_stats(text_cross_model_results),
+            "samples": text_cross_model_results,
         }
     if agreement_data is not None:
         output_data["agreement"] = agreement_data
