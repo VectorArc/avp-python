@@ -1,6 +1,6 @@
 # AVP Benchmarks
 
-> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** — 8 benchmarks, 5 models, 2 families.
+> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** — 7 benchmarks, 5 models, 2 families.
 
 ---
 
@@ -73,12 +73,13 @@ Accuracy is bounded by the target model's own capability. Advisory quality gate 
 
 ## Where Text Wins
 
-Latent transfer doesn't help every task. Two benchmarks where text outperforms:
+Latent transfer doesn't help every task:
 
 | | Direct | Latent (AVP) | Text | Why text wins |
 |---|--------|--------------|------|---------------|
 | **MATH** (Qwen 7B, n=500) | 43.2% | 45.0% | **59.4%** | Solver needs to read explicit step-by-step reasoning |
-| **ClassEval** (Qwen 7B, n=100) | **28.0%** | 9.0% | 22.0% | Multi-step code (4-10 hops) needs prior methods as visible code |
+
+When the downstream agent needs the upstream agent's explicit reasoning chain (step-by-step math solutions, proof structures), text mode wins. The decision rule: if Agent B needs to *read* Agent A's output, use text mode.
 
 ---
 
