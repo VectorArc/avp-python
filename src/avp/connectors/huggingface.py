@@ -843,6 +843,7 @@ class HuggingFaceConnector(EngineConnector):
                 source_lm_head_weight=source_lm_head.weight,
                 target_embed_weight=avp_map.w_map,  # target input embeddings
                 temperature=temperature,
+                target_norm=avp_map.target_norm,
                 return_metrics=return_metrics,
             )
         elif avp_map.method == ProjectionMethod.VOCAB_OVERLAP:
@@ -861,6 +862,7 @@ class HuggingFaceConnector(EngineConnector):
                 shared_target_embed_weight=avp_map.w_map,
                 src_indices=avp_map.src_indices,
                 temperature=temperature,
+                target_norm=avp_map.target_norm,
                 return_metrics=return_metrics,
             )
         else:

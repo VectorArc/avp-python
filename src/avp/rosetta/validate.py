@@ -214,6 +214,7 @@ def _apply_projection(
             hidden_states,
             source_lm_head_weight=source_lm_head.weight,
             target_embed_weight=avp_map.w_map,
+            target_norm=avp_map.target_norm,
         )
     elif avp_map.method == ProjectionMethod.VOCAB_OVERLAP:
         from .project import vocab_overlap_projection
@@ -225,6 +226,7 @@ def _apply_projection(
             source_lm_head_weight=source_lm_head.weight,
             shared_target_embed_weight=avp_map.w_map,
             src_indices=avp_map.src_indices,
+            target_norm=avp_map.target_norm,
         )
     else:
         from .project import apply_cross_model_projection

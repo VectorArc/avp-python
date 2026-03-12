@@ -56,6 +56,7 @@ def vocab_overlap_projection(
     shared_target_embed_weight: Any,
     src_indices: Any,
     temperature: float = 1.0,
+    target_norm: Optional[Any] = None,
     return_metrics: bool = False,
 ) -> Union[Any, Tuple[Any, Dict[str, Any]]]:
     """Project hidden states across models via overlapping vocabulary tokens.
@@ -74,6 +75,9 @@ def vocab_overlap_projection(
         shared_target_embed_weight: Target embeddings for shared tokens [N_shared, D_tgt].
         src_indices: LongTensor [N_shared] — source token IDs for shared tokens.
         temperature: Softmax temperature. Lower = sharper (closer to argmax).
+        target_norm: Optional scalar tensor — mean L2 norm of target model's
+            input embeddings. If provided, the projected vector is L2-normalized
+            to this value (matching apply_cross_model_projection behavior).
         return_metrics: If True, return (projected, metrics_dict) with entropy
             and max_prob of the softmax distribution.
 
@@ -114,6 +118,12 @@ def vocab_overlap_projection(
     # probs @ W_tgt_shared → target embedding [..., D_tgt]
     projected = torch.matmul(probs, w_tgt)
 
+    # Normalize to target embedding norm (matches apply_cross_model_projection)
+    if target_norm is not None:
+        tn = target_norm.to(device=projected.device, dtype=torch.float32)
+        pnorm = projected.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        projected = projected * (tn / pnorm)
+
     if return_metrics:
         # Cosine similarity to nearest target token embedding
         proj_f32 = projected.to(torch.float32)
@@ -138,6 +148,7 @@ def vocabulary_mediated_projection(
     source_lm_head_weight: Any,
     target_embed_weight: Any,
     temperature: float = 1.0,
+    target_norm: Optional[Any] = None,
     return_metrics: bool = False,
 ) -> Union[Any, Tuple[Any, Dict[str, Any]]]:
     """Project hidden states across models via shared vocabulary.
@@ -156,6 +167,9 @@ def vocabulary_mediated_projection(
         source_lm_head_weight: Source model's output head [vocab_size, D_src].
         target_embed_weight: Target model's input embeddings [vocab_size, D_tgt].
         temperature: Softmax temperature. Lower = sharper (closer to argmax).
+        target_norm: Optional scalar tensor — mean L2 norm of target model's
+            input embeddings. If provided, the projected vector is L2-normalized
+            to this value (matching apply_cross_model_projection behavior).
         return_metrics: If True, return (projected, metrics_dict) with entropy
             and max_prob of the softmax distribution.
 
@@ -198,6 +212,12 @@ def vocabulary_mediated_projection(
 
     # probs @ W_tgt → target embedding [..., D_tgt]
     projected = torch.matmul(probs, w_tgt)
+
+    # Normalize to target embedding norm (matches apply_cross_model_projection)
+    if target_norm is not None:
+        tn = target_norm.to(device=projected.device, dtype=torch.float32)
+        pnorm = projected.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        projected = projected * (tn / pnorm)
 
     if return_metrics:
         # Cosine similarity to nearest target token embedding
