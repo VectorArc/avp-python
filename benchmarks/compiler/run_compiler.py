@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_samples", type=int, default=10, help="Number of samples (default: 10)")
     parser.add_argument("--max_level", type=int, default=5, help="Max difficulty level 1-5 (default: 5)")
     parser.add_argument("--latent_steps", type=int, default=10, help="Latent steps per non-terminal agent (default: 10)")
-    parser.add_argument("--max_new_tokens", type=int, default=512, help="Max tokens for generation (default: 512)")
+    parser.add_argument("--max_new_tokens", type=int, default=2048, help="Max tokens for generation (default: 2048)")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature (default: 0.7)")
     parser.add_argument("--top_p", type=float, default=0.95, help="Top-p sampling (default: 0.95)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
