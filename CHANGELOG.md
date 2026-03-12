@@ -4,6 +4,12 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-03-12
+
+### Changed
+
+- **Cross-model projection is now opt-in** — `source_model=` (easy API) and `source=` (connector API) now require `cross_model=True` for latent transfer. Without it, falls back to text-only generation with a `UserWarning` explaining how to opt in. Rosetta Stone projection is experimental — accuracy varies by task type (structured tasks work well, comprehension may degrade). Same-model latent transfer is unaffected.
+
 ## [0.3.1] - 2026-03-08
 
 ### Fixed

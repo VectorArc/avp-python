@@ -57,7 +57,9 @@ Text prompts grow **O(n²)** with agent count. Latent stays **O(n)**.
 
 ---
 
-## Cross-Model (Rosetta Stone)
+## Cross-Model (Rosetta Stone) — Experimental
+
+> **Experimental.** Cross-model projection requires `cross_model=True`. Accuracy varies by task type — works well on structured tasks (math, code), degrades on comprehension.
 
 Different models communicate via vocabulary-mediated projection. Zero training — uses existing embedding matrices. Wire size: 3-7 KB.
 

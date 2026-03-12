@@ -41,6 +41,7 @@ def easy_api_cross_model():
         prompt,
         model="Qwen/Qwen2.5-1.5B-Instruct",
         source_model="Qwen/Qwen2.5-7B-Instruct",
+        cross_model=True,
         steps=20,
     )
     print(f"  Cross-model answer: {answer[:200]}")

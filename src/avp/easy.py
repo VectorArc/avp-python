@@ -251,6 +251,7 @@ def generate(
     *,
     model: str,
     source_model: Optional[str] = None,
+    cross_model: bool = False,
     steps: int = 20,
     context: Optional["AVPContext"] = None,
     store: Optional[Any] = None,
@@ -267,9 +268,10 @@ def generate(
 
         text = avp.generate("Solve: 2+2", model="Qwen/Qwen2.5-7B-Instruct")
 
-    Cross-model (Rosetta projection)::
+    Cross-model (Rosetta projection, experimental)::
 
-        text = avp.generate(prompt, model="target", source_model="source")
+        text = avp.generate(prompt, model="target", source_model="source",
+                            cross_model=True)
 
     With context store for multi-turn::
 
@@ -280,7 +282,10 @@ def generate(
         model: HuggingFace model name/path (required).
         source_model: Source model for cross-model projection. When set,
             thinks on the source model and projects to the target (``model``)
-            via Rosetta Stone.
+            via Rosetta Stone. Requires ``cross_model=True``.
+        cross_model: Must be True to enable cross-model projection.
+            Cross-model (Rosetta Stone) is experimental — accuracy varies
+            by task type. Default False.
         steps: Number of latent thinking steps. Default 20. Set to 0 for
             text-only generation without latent context.
         context: Prior AVPContext to continue from.
@@ -316,6 +321,22 @@ def generate(
         )
 
     # Cross-model path: think on source, project to target
+    if source_model is not None and not cross_model:
+        import warnings as _warnings
+        _warnings.warn(
+            "Cross-model projection (Rosetta Stone) is experimental. "
+            "Falling back to text-only generation on the target model. "
+            "Pass cross_model=True to avp.generate() to enable cross-model "
+            "latent transfer. Accuracy varies by task: structured tasks "
+            "(math, code) work well, comprehension tasks may degrade. "
+            "See docs/BENCHMARKS.md for details.",
+            UserWarning,
+            stacklevel=2,
+        )
+        source_model = None  # fall through to same-model path on target
+        if diagnostics is not None:
+            diagnostics.source_model = None
+
     if source_model is not None:
         source_connector = _get_or_create_connector(source_model)
         target_connector = _get_or_create_connector(model)
@@ -332,6 +353,7 @@ def generate(
             content,
             context=source_context,
             source=source_connector,
+            cross_model=True,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             _diagnostics=diagnostics,

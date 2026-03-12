@@ -159,6 +159,7 @@ def solver(state):
         "Solve: " + state["query"] + "\nResearch: " + state["research"],
         model="meta-llama/Llama-3.2-3B-Instruct",
         source_model="Qwen/Qwen2.5-7B-Instruct",
+        cross_model=True,
         store=store, prior_key="researcher",
     )
     return {"answer": text}

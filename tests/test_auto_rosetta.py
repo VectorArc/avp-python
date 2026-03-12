@@ -104,6 +104,7 @@ class TestGenerateCrossModel:
         with pytest.raises(ValueError, match="last_hidden_state"):
             tiny_tied_connector.generate(
                 "Hello", context=ctx, source=tiny_untied_connector,
+                cross_model=True,
             )
 
     def test_cross_model_projects_and_generates(
@@ -118,6 +119,7 @@ class TestGenerateCrossModel:
                 "Solve: 2 + 2",
                 context=ctx,
                 source=tiny_untied_connector,
+                cross_model=True,
                 max_new_tokens=20,
             )
         assert isinstance(result, str)
@@ -208,6 +210,7 @@ class TestQualityGateWarning:
                 "Hello",
                 context=ctx_large,
                 source=tiny_untied_connector,
+                cross_model=True,
                 max_new_tokens=10,
             )
         assert any("Quality gate" in r.message or "JSON fallback" in r.message
@@ -235,6 +238,7 @@ class TestEasyGenerateCrossModel:
                 "Hello",
                 model="target_model",
                 source_model="source_model",
+                cross_model=True,
                 steps=10,
             )
 
@@ -260,3 +264,94 @@ class TestEasyGenerateCrossModel:
             result = generate("Hello", model="my_model", steps=0)
 
         assert result == "same-model answer"
+
+    def test_source_model_without_cross_model_warns_and_falls_back(self):
+        """source_model= without cross_model=True warns and falls back to text-only."""
+        with patch("avp.easy._get_or_create_connector") as mock_get:
+            mock_connector = MagicMock()
+            mock_connector.generate.return_value = "fallback answer"
+            mock_connector.think.return_value = MagicMock()
+            mock_get.return_value = mock_connector
+
+            from avp.easy import generate
+            import warnings
+
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                result = generate(
+                    "Hello",
+                    model="target_model",
+                    source_model="source_model",
+                )
+            assert result == "fallback answer"
+            cross_model_warnings = [
+                x for x in w if "cross_model=True" in str(x.message)
+            ]
+            assert len(cross_model_warnings) == 1, (
+                f"Expected exactly 1 cross_model warning, got {len(cross_model_warnings)}"
+            )
+            assert cross_model_warnings[0].category is UserWarning
+            # Should NOT have called think on source (fell back to same-model on target)
+            # The connector.think is called for same-model path (steps=20 default)
+            # but source_model is ignored
+            mock_connector.generate.assert_called_once()
+
+    def test_no_source_model_no_warning(self):
+        """Same-model path emits no cross_model warning."""
+        with patch("avp.easy._get_or_create_connector") as mock_get:
+            mock_connector = MagicMock()
+            mock_connector.generate.return_value = "answer"
+            mock_get.return_value = mock_connector
+
+            from avp.easy import generate
+            import warnings
+
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                generate("Hello", model="my_model", steps=0)
+            cross_model_warnings = [
+                x for x in w if "cross_model" in str(x.message)
+            ]
+            assert len(cross_model_warnings) == 0
+
+
+@requires_torch
+@requires_transformers
+class TestCrossModelWithoutFlagFallback:
+    """Tests that cross-model generate() without cross_model=True falls back."""
+
+    def test_connector_cross_model_without_flag_warns(
+        self, tiny_tied_connector, tiny_untied_connector,
+    ):
+        """connector.generate(source=) without cross_model=True warns and generates text-only."""
+        import warnings
+
+        ctx = tiny_untied_connector.think("Hello", steps=2)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = tiny_tied_connector.generate(
+                "Hello", context=ctx, source=tiny_untied_connector,
+                max_new_tokens=10,
+            )
+        assert isinstance(result, str)
+        cross_model_warnings = [
+            x for x in w if "cross_model=True" in str(x.message)
+        ]
+        assert len(cross_model_warnings) == 1
+        assert cross_model_warnings[0].category is UserWarning
+
+    def test_same_model_source_no_warning(self, tiny_tied_connector):
+        """Same-model with source= emits no cross_model warning."""
+        import warnings
+
+        ctx = tiny_tied_connector.think("Hello", steps=2)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            tiny_tied_connector.generate(
+                "Hello", context=ctx, source=tiny_tied_connector,
+                max_new_tokens=10,
+            )
+        cross_model_warnings = [
+            x for x in w if "cross_model" in str(x.message)
+        ]
+        assert len(cross_model_warnings) == 0

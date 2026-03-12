@@ -104,8 +104,10 @@ solver = HuggingFaceConnector.from_pretrained("meta-llama/Llama-3.2-3B-Instruct"
 
 prompt = "Solve step by step: 24 * 17 + 3"
 context = researcher.think(prompt, steps=10)
-answer = solver.generate(prompt, context=context, source=researcher)
+answer = solver.generate(prompt, context=context, source=researcher, cross_model=True)
 ```
+
+> **Experimental.** Cross-model accuracy varies by task — works well on structured tasks (math, code), may degrade on comprehension. See [Benchmarks](docs/BENCHMARKS.md).
 
 Calibration is automatic and one-time per model pair (~0.5-2s), cached to `~/.avp/maps/`.
 
@@ -120,10 +122,11 @@ import avp
 # think + generate in one call
 answer = avp.generate("Solve: 24 * 17 + 3", model="Qwen/Qwen2.5-7B-Instruct")
 
-# cross-model
+# cross-model (experimental)
 answer = avp.generate("Solve: 24 * 17 + 3",
                        model="meta-llama/Llama-3.2-3B-Instruct",
-                       source_model="Qwen/Qwen2.5-7B-Instruct")
+                       source_model="Qwen/Qwen2.5-7B-Instruct",
+                       cross_model=True)
 ```
 
 </details>

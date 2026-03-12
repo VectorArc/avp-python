@@ -540,6 +540,7 @@ class HuggingFaceConnector(EngineConnector):
         prompt: Union[str, List[Dict[str, str]]],
         context: Optional[AVPContext] = None,
         source: Optional["HuggingFaceConnector"] = None,
+        cross_model: bool = False,
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.95,
@@ -554,6 +555,9 @@ class HuggingFaceConnector(EngineConnector):
             source: Optional source HuggingFaceConnector for cross-model projection.
                 When provided and context is from a different model, automatically
                 handles calibration, projection, and KV-cache priming.
+                Requires ``cross_model=True``.
+            cross_model: Must be True to enable cross-model projection.
+                Cross-model (Rosetta Stone) is experimental. Default False.
             max_new_tokens: Maximum tokens to generate.
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
@@ -575,9 +579,21 @@ class HuggingFaceConnector(EngineConnector):
             and context is not None
             and context.model_hash != self._model_hash
         ):
-            context = self._apply_rosetta_projection(
-                source, context, _diagnostics=_diagnostics,
-            )
+            if not cross_model:
+                import warnings as _warnings
+                _warnings.warn(
+                    "Cross-model projection (Rosetta Stone) is experimental. "
+                    "Falling back to text-only generation (ignoring cross-model context). "
+                    "Pass cross_model=True to connector.generate() to enable latent transfer.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                context = None
+                source = None
+            else:
+                context = self._apply_rosetta_projection(
+                    source, context, _diagnostics=_diagnostics,
+                )
 
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)
