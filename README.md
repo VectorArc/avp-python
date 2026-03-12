@@ -50,7 +50,7 @@ answer = connector.generate(prompt, context=context)
 
 A small 3B model sharing its reasoning lifts a 7B solver to 90% on math and 79.3% on code. The projection is vocabulary-mediated – no learned parameters, no training data, works across model families.
 
-Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 8 benchmarks, 5 models, 2 families, reproducible.
+Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 7 benchmarks, 5 models, 2 families, reproducible.
 
 ## How It Works
 
@@ -160,7 +160,7 @@ answer = connector.generate(prompt, context=restored)
 ## Documentation
 
 - **[AVP Specification](https://github.com/VectorArc/avp-spec)** – Binary format, handshake, transport
-- **[Benchmarks](docs/BENCHMARKS.md)** – 8 benchmarks, 5 models, 2 families
+- **[Benchmarks](docs/BENCHMARKS.md)** – 7 benchmarks, 5 models, 2 families
 - **[Framework Integration](docs/FRAMEWORK_INTEGRATION.md)** – LangGraph, CrewAI, PydanticAI, LlamaIndex
 - **[Examples](examples/)** – Quickstart, cross-model, and agent demos
 - **[CHANGELOG](CHANGELOG.md)**

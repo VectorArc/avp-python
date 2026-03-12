@@ -29,7 +29,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 - **vLLM connector (experimental)** — `VLLMConnector` (SDK wrapper) + `AVPKVConnectorV1Dynamic` (KVConnectorBase_V1 plugin). Text generation and identity extraction work. KV-cache transfer plugin has not been validated end-to-end with a real vLLM engine — known issues with PagedAttention format conversion, CUDA graph compatibility, and concurrent request isolation. Use `HuggingFaceConnector` for production latent transfer.
 - **`GenerateMetrics`** — Observability for `generate()`: think + generate durations, context/store flags, debug diagnostics.
 - **`HandshakeMetrics`** — Resolution path, mode, avp_map_id, duration.
-- **8 benchmark suites** — GSM8K (4-agent, 2-agent), HotpotQA, fan-out, MATH 2-agent, HumanEval, ClassEval, DebugBench. Cloud results on all.
+- **7 benchmark suites** — GSM8K (4-agent, 2-agent), HotpotQA, fan-out, MATH 2-agent, HumanEval, DebugBench. Cloud results on all.
 
 ### Changed
 
