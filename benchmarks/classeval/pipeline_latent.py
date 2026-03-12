@@ -12,7 +12,6 @@ of prior methods in the prompt). Each step's prompt only contains the skeleton
 and current method description.
 """
 
-import copy
 import time
 import uuid
 from typing import Any, Dict, List
@@ -73,19 +72,15 @@ def run_latent_pipeline(
         total_output_tokens = 0
 
         generated_methods: Dict[str, str] = {}
-        prior_methods_text = ""  # Accumulated code of prior methods
         past_kv = None  # Accumulated KV-cache across methods
 
         for step_idx, method_info in enumerate(methods_order):
             method_name = method_info["method_name"]
             agent_t0 = time.perf_counter()
 
-            # Build prompt with prior method code as text reference + KV-cache
-            # for reasoning context. The text lets the model reference exact
-            # signatures and attribute names; the KV-cache carries thinking.
+            # Build prompt for this method (no prior text context -- KV-cache has it)
             messages = build_latent_prompt(
                 skeleton, class_description, method_info, import_statement,
-                prior_methods_text=prior_methods_text,
             )
             prompt_text = render_prompt(tokenizer, messages)
             input_ids, attention_mask = tokenize_prompt(
@@ -114,10 +109,6 @@ def run_latent_pipeline(
 
             kv_seq_len = get_past_length(step_past_kv)
 
-            # Deep-copy KV-cache BEFORE generation — model.generate() mutates
-            # DynamicCache in-place, appending generated token entries.
-            past_kv = copy.deepcopy(step_past_kv)
-
             # Generate the method text (we need the actual code for every method)
             method_text, gen_past_kv = generate_text(
                 model, tokenizer, input_ids, attention_mask, device,
@@ -131,15 +122,16 @@ def run_latent_pipeline(
             output_tokens = len(output_encoded["input_ids"])
             total_output_tokens += output_tokens
 
+            # Carry generation KV-cache forward — later methods can attend to
+            # what earlier methods actually produced (code, signatures, etc.),
+            # not just the latent "thinking" context.
+            past_kv = gen_past_kv
+
             agent_time_ms = (time.perf_counter() - agent_t0) * 1000
 
-            # Extract method code and accumulate for next step's prompt
+            # Extract method code
             method_code = extract_method_code(method_text, method_name)
             generated_methods[method_name] = method_code
-            if prior_methods_text:
-                prior_methods_text += "\n\n" + method_code
-            else:
-                prior_methods_text = method_code
 
             agent_traces.append({
                 "step": step_idx,

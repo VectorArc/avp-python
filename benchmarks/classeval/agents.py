@@ -82,22 +82,14 @@ def build_latent_prompt(
     class_description: str,
     method_info: Dict,
     import_statement: str,
-    prior_methods_text: str = "",
 ) -> List[Dict[str, str]]:
     """Build prompt for latent-chain incremental generation.
 
-    Reasoning context is carried via KV-cache. Prior method code is included
-    as text so the model can reference signatures and attribute names.
+    Prior context is carried via KV-cache, so the prompt only contains
+    the skeleton and current method description.
     """
     method_name = method_info["method_name"]
     method_desc = method_info.get("method_description", "")
-
-    prior_section = ""
-    if prior_methods_text.strip():
-        prior_section = (
-            f"\n\n## Already implemented methods:\n"
-            f"```python\n{prior_methods_text}\n```\n"
-        )
 
     user_content = (
         f"You are implementing the class below one method at a time. "
@@ -108,7 +100,6 @@ def build_latent_prompt(
         f"## Required imports:\n{import_statement}\n\n"
         f"## Class skeleton:\n{skeleton}\n\n"
         f"## Method to implement:\n{method_name}: {method_desc}"
-        f"{prior_section}"
     )
     return [
         {"role": "system", "content": SYSTEM_MESSAGE},
