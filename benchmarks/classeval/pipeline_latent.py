@@ -122,10 +122,11 @@ def run_latent_pipeline(
             output_tokens = len(output_encoded["input_ids"])
             total_output_tokens += output_tokens
 
-            # Carry generation KV-cache forward — later methods can attend to
-            # what earlier methods actually produced (code, signatures, etc.),
-            # not just the latent "thinking" context.
-            past_kv = gen_past_kv
+            # Carry KV-cache forward (use post-latent-steps cache, not post-generation)
+            # The generation KV includes the generated tokens which would interfere.
+            # Use the latent-steps KV which captures the "understanding" without
+            # the specific generated text.
+            past_kv = step_past_kv
 
             agent_time_ms = (time.perf_counter() - agent_t0) * 1000
 
