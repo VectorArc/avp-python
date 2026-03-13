@@ -1,6 +1,6 @@
 # Framework Integration Guide
 
-AVP works **alongside** your agent framework, not instead of it. Your framework handles routing, state, and agent lifecycle. AVP handles the LLM call — replacing `llm.invoke()` with `avp.generate()`.
+AVP works **alongside** your agent framework, not instead of it. Your framework handles routing, state, and agent lifecycle. AVP handles the LLM call – replacing `llm.invoke()` with `avp.generate()`.
 
 ## The Pattern: Sidecar
 
@@ -105,7 +105,7 @@ app = graph.compile()
 result = app.invoke({"query": "What is 24 * 17 + 3?"})
 ```
 
-LangGraph checkpoints `State` to its database — all strings, no tensors. The `ContextStore` holds KV-cache in GPU memory with TTL expiry.
+LangGraph checkpoints `State` to its database – all strings, no tensors. The `ContextStore` holds KV-cache in GPU memory with TTL expiry.
 
 ## CrewAI
 
@@ -165,7 +165,7 @@ def solver(state):
     return {"answer": text}
 ```
 
-Cross-model projection is automatic — calibration happens once per model pair (~0.5-2s), cached to `~/.avp/maps/`.
+Cross-model projection is automatic – calibration happens once per model pair (~0.5-2s), cached to `~/.avp/maps/`.
 
 ## What ContextStore Does
 
