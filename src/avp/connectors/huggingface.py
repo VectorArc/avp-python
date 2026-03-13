@@ -251,10 +251,10 @@ class HuggingFaceConnector(EngineConnector):
                 past_key_values=past_key_values,
             )
 
-        # Decode generated tokens (skip prompt tokens)
+        # Decode generated tokens (skip prompt tokens).
+        # model.generate() sequences contain [input_len + generated_len] —
+        # past KV-cache positions are NOT included in the output.
         prompt_len = inputs_embeds.shape[1]
-        if past_key_values is not None:
-            prompt_len += _past_length(past_key_values)
         texts = []
         for seq in outputs.sequences:
             generated_ids = seq[prompt_len:]
@@ -604,6 +604,11 @@ class HuggingFaceConnector(EngineConnector):
         past_kv = None
         cache_position = None
 
+        # prompt_len must be computed BEFORE extending attention_mask with
+        # past KV-cache entries.  model.generate() returns sequences shaped
+        # [input_ids_len + generated_len] — past positions are NOT included.
+        prompt_len = attention_mask.sum(dim=1).tolist()[0]
+
         if context is not None:
             if context.model_hash != self._model_hash:
                 raise IncompatibleModelsError(
@@ -628,19 +633,18 @@ class HuggingFaceConnector(EngineConnector):
                 )
                 attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
 
-        prompt_len = attention_mask.sum(dim=1).tolist()[0]
-
         with torch.no_grad():
             gen_kwargs = dict(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
                 do_sample=do_sample,
                 pad_token_id=self.tokenizer.pad_token_id,
                 return_dict_in_generate=True,
             )
+            if do_sample:
+                gen_kwargs["temperature"] = temperature
+                gen_kwargs["top_p"] = top_p
             if past_kv is not None:
                 gen_kwargs["past_key_values"] = past_kv
                 gen_kwargs["cache_position"] = cache_position

@@ -46,7 +46,7 @@ Token savings are structural — pre-computed KV-cache replaces re-processed tex
 
 | Agents | Benchmark | Token Savings | Speedup |
 |--------|-----------|---------------|---------|
-| 2 | GSM8K, DebugBench, MATH | 46-56% | 1.5-3x |
+| 2 | GSM8K, DebugBench | 46-56% | 1.5-3x |
 | 2 | HumanEval | 14% | 1.2x |
 | 3 | Fan-out | 56-60% | 1.5x |
 | 4 | GSM8K chain | 73-78% | 2-4x |
@@ -73,15 +73,13 @@ Accuracy is bounded by the target model's own capability. Advisory quality gate 
 
 ---
 
-## Where Text Wins
+## Competition Math
 
-Latent transfer doesn't help every task:
+| | Direct | Latent (AVP) | Text |
+|---|--------|--------------|------|
+| **MATH** (Qwen 7B, n=500) | 67.8% | 66.8% | 66.6% |
 
-| | Direct | Latent (AVP) | Text | Why text wins |
-|---|--------|--------------|------|---------------|
-| **MATH** (Qwen 7B, n=500) | 43.2% | 45.0% | **59.4%** | Solver needs to read explicit step-by-step reasoning |
-
-When the downstream agent needs the upstream agent's explicit reasoning chain (step-by-step math solutions, proof structures), text mode wins. The decision rule: if Agent B needs to *read* Agent A's output, use text mode.
+All three modes are statistically identical (p=1.0 latent vs text). Earlier runs at 512 max tokens showed a false text advantage due to solver truncation — with proper token budget (2048), the gap disappears.
 
 ---
 
@@ -91,7 +89,7 @@ When the downstream agent needs the upstream agent's explicit reasoning chain (s
 |-----------|-------|
 | Latent steps | 20 (validated: 10 ≈ 20 > 40 > 80) |
 | Temperature | 0.7 |
-| Max new tokens | 512 |
+| Max new tokens | 512 (MATH: 2048) |
 | Seed | 42 |
 | Hardware | NVIDIA A100 80GB |
 
