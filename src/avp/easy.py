@@ -341,12 +341,30 @@ def generate(
         source_connector = _get_or_create_connector(source_model)
         target_connector = _get_or_create_connector(model)
 
+        # Retrieve prior context from store
+        if prior_key is not None and store is not None:
+            prior = store.get(prior_key)
+            if prior is not None:
+                context = prior
+
+        # Use caller-provided context, or think to create one
         t_think = _time.perf_counter()
-        source_context = source_connector.think(
-            content, steps=steps,
-            _diagnostics=diagnostics,
-        )
+        if context is not None:
+            source_context = context
+        elif steps > 0:
+            source_context = source_connector.think(
+                content, steps=steps,
+                _diagnostics=diagnostics,
+            )
+        else:
+            source_context = None
         think_duration = _time.perf_counter() - t_think
+
+        # Store context
+        stored = False
+        if store_key is not None and store is not None and source_context is not None:
+            store.store(store_key, source_context)
+            stored = True
 
         t_gen = _time.perf_counter()
         text = target_connector.generate(
@@ -380,8 +398,8 @@ def generate(
             metrics = GenerateMetrics(
                 model=model,
                 steps=steps,
-                has_prior_context=False,
-                stored=False,
+                has_prior_context=context is not None,
+                stored=stored,
                 duration_s=_time.perf_counter() - t_start,
                 think_duration_s=think_duration,
                 generate_duration_s=generate_duration,
