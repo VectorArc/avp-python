@@ -1,6 +1,6 @@
 # AVP Benchmarks
 
-> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** — 7 benchmarks, 5 models, 2 families.
+> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** – 7 benchmarks, 5 models, 2 families.
 
 ---
 
@@ -42,7 +42,7 @@ All modes within noise. Latent's advantage here is purely efficiency.
 
 ## Efficiency
 
-Token savings are structural — pre-computed KV-cache replaces re-processed text. Savings hold across every benchmark, every model.
+Token savings are structural – pre-computed KV-cache replaces re-processed text. Savings hold across every benchmark, every model.
 
 | Agents | Benchmark | Token Savings | Speedup |
 |--------|-----------|---------------|---------|
@@ -57,11 +57,11 @@ Text prompts grow **O(n²)** with agent count. Latent stays **O(n)**.
 
 ---
 
-## Cross-Model (Rosetta Stone) — Experimental
+## Cross-Model (Rosetta Stone) – Experimental
 
-> **Experimental.** Cross-model projection requires `cross_model=True`. Accuracy varies by task type — works well on structured tasks (math, code), degrades on comprehension.
+> **Experimental.** Cross-model projection requires `cross_model=True`. Accuracy varies by task type – works well on structured tasks (math, code), degrades on comprehension.
 
-Different models communicate via vocabulary-mediated projection. Zero training — uses existing embedding matrices. Wire size: 3-7 KB.
+Different models communicate via vocabulary-mediated projection. Zero training – uses existing embedding matrices. Wire size: 3-7 KB.
 
 | Source → Target | GSM8K (n=200) | HumanEval (n=164) |
 |-----------------|---------------|-------------------|
@@ -79,7 +79,7 @@ Accuracy is bounded by the target model's own capability. Advisory quality gate 
 |---|--------|--------------|------|
 | **MATH** (Qwen 7B, n=500) | 67.8% | 66.8% | 66.6% |
 
-All three modes are statistically identical (p=1.0 latent vs text). Earlier runs at 512 max tokens showed a false text advantage due to solver truncation — with proper token budget (2048), the gap disappears.
+All three modes are statistically identical (p=1.0 latent vs text). Earlier runs at 512 max tokens showed a false text advantage due to solver truncation – with proper token budget (2048), the gap disappears.
 
 ---
 
@@ -97,10 +97,10 @@ All three modes are statistically identical (p=1.0 latent vs text). Earlier runs
 
 ## Limitations
 
-- **Self-hosted only** — requires direct KV-cache access (cloud APIs don't expose this)
-- **Single-embedding bottleneck** — cross-model transfers one vector; fails on long comprehension tasks
-- **Multi-hop coherence** — KV-cache across 4+ sequential hops loses signal
-- **1B-7B models tested** — larger models may behave differently
+- **Self-hosted only** – requires direct KV-cache access (cloud APIs don't expose this)
+- **Single-embedding bottleneck** – cross-model transfers one vector; fails on long comprehension tasks
+- **Multi-hop coherence** – KV-cache across 4+ sequential hops loses signal
+- **1B-7B models tested** – larger models may behave differently
 
 ---
 

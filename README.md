@@ -5,8 +5,9 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.3-blue.svg)](https://github.com/VectorArc/avp-spec)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/VectorArc/avp-python/blob/main/notebooks/avp_quick_start.ipynb)
 
-When LLM agents hand off work as text, the next agent re-processes everything from scratch. AVP transfers the actual computation – KV-cache, hidden states, attention – so the receiving agent picks up where the sender left off. Zero tokens between agents, 2-3x faster pipelines, same or better accuracy. Built on [LatentMAS](https://arxiv.org/abs/2511.20639), extended with cross-model vocabulary-mediated projection (novel — zero training, works across model families).
+When LLM agents hand off work as text, the next agent re-processes everything from scratch. AVP transfers the actual computation – KV-cache, hidden states, attention – so the receiving agent picks up where the sender left off. Zero tokens between agents, 2-3x faster pipelines, same or better accuracy. Built on [LatentMAS](https://arxiv.org/abs/2511.20639), extended with cross-model vocabulary-mediated projection (novel – zero training, works across model families).
 
 ```bash
 pip install avp
@@ -20,13 +21,12 @@ pip install avp
 from avp import HuggingFaceConnector
 
 connector = HuggingFaceConnector.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-prompt = "Analyze this math problem: 24 * 17 + 3"
 
 # Agent A thinks (builds KV-cache, no text output)
-context = connector.think(prompt, steps=20)
+context = connector.think("Analyze this math problem: 24 * 17 + 3", steps=20)
 
-# Agent B generates with Agent A's context
-answer = connector.generate(prompt, context=context)
+# Agent B generates using Agent A's KV-cache
+answer = connector.generate("Solve step by step: 24 * 17 + 3", context=context)
 ```
 
 ## Results
@@ -40,7 +40,7 @@ answer = connector.generate(prompt, context=context)
 | **DebugBench** (Qwen 7B, n=100) | 50.0% | 51.0% | 49.0% |
 | **GSM8K** (Llama 3B, n=200) | 74.5% | 76.0% | 79.0% |
 
-HumanEval: +12.4pp vs text across 4 seeds (p=0.004). GSM8K and DebugBench: neutral across all modes, but the pipeline runs 3x faster (7.6s vs 22.8s end-to-end on DebugBench). Llama 3B: text wins on GSM8K — latent overhead has more impact on smaller models. All benchmarks used `steps=20` on NVIDIA A100.
+HumanEval: +12.4pp vs text across 4 seeds (p=0.004). GSM8K and DebugBench: neutral across all modes, but the pipeline runs 3x faster (7.6s vs 22.8s end-to-end on DebugBench). Llama 3B: text wins on GSM8K – latent overhead has more impact on smaller models. All benchmarks used `steps=20` on NVIDIA A100.
 
 **Trade-off:** 20 latent steps add ~0.9s fixed cost on A100. Breaks even when Agent A would otherwise produce ~22+ tokens of text.
 
@@ -51,7 +51,7 @@ HumanEval: +12.4pp vs text across 4 seeds (p=0.004). GSM8K and DebugBench: neutr
 | Qwen 7B | Llama 3B | 77.0% | 47.0% |
 | Llama 3B | Qwen 7B | **90.0%** | **79.3%** |
 
-Cross-model accuracy depends on the target — a weaker model's reasoning can push a stronger solver past its text-chain baseline (Llama 3B → Qwen 7B: 90.0% vs 87.0% text), but the reverse direction underperforms text. The projection is vocabulary-mediated – no learned parameters, no training data, works across model families.
+Cross-model accuracy depends on the target – a weaker model's reasoning can push a stronger solver past its text-chain baseline (Llama 3B → Qwen 7B: 90.0% vs 87.0% text), but the reverse direction underperforms text. The projection is vocabulary-mediated – no learned parameters, no training data, works across model families.
 
 Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 7 benchmarks, 5 models, 2 families, reproducible.
 
@@ -111,7 +111,7 @@ context = researcher.think(prompt, steps=20)
 answer = solver.generate(prompt, context=context, source=researcher, cross_model=True)
 ```
 
-> **Experimental.** Cross-model accuracy varies by task — works well on structured tasks (math, code), may degrade on comprehension. See [Benchmarks](docs/BENCHMARKS.md).
+> **Experimental.** Cross-model accuracy varies by task – works well on structured tasks (math, code), may degrade on comprehension. See [Benchmarks](docs/BENCHMARKS.md).
 
 Calibration is automatic and one-time per model pair (~0.5-2s), cached to `~/.avp/maps/`.
 

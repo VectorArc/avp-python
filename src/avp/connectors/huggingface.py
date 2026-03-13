@@ -659,7 +659,7 @@ class HuggingFaceConnector(EngineConnector):
             _warnings.warn(
                 f"AVP: generate() produced empty output (prompt_len={prompt_len}, "
                 f"context={'yes' if context is not None else 'no'}). "
-                "Common cause: prompt mismatch between think() and generate().",
+                "Check max_new_tokens and input prompt.",
                 RuntimeWarning, stacklevel=2,
             )
 
