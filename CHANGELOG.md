@@ -8,7 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ### Added
 
-- **Colab quickstart notebook** – `notebooks/avp_quick_start.ipynb`. Runs on a free T4 GPU in ~3 minutes. Compares direct, latent (AVP), and text chain on 10 GSM8K problems.
+- **Colab quickstart notebook** – `notebooks/avp_quick_start.ipynb`. Runs on a free T4 GPU in ~8 minutes. Compares direct, latent (AVP), and text chain on 10 GSM8K problems.
 - **Open in Colab badge** in README.
 
 ### Changed
