@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         choices=["latent", "text", "direct", "rosetta", "logit_guided",
-                 "mid_layer", "text_cross_model", "both", "all"],
+                 "mid_layer", "trained", "text_cross_model", "both", "all"],
         default="all",
         help="Pipeline(s) to run (default: all)",
     )
@@ -120,12 +120,13 @@ def run_benchmark(config: dict) -> dict:
     run_rosetta = mode in ("rosetta", "all")
     run_logit_guided = mode in ("logit_guided", "all")
     run_mid_layer = mode in ("mid_layer", "all")
+    run_trained = mode in ("trained",)  # not in "all" — requires training
     run_text_cross_model = mode in ("text_cross_model", "all")
 
     print(f"Device: {device}")
     print(f"Mode: {mode}")
     print(f"Model A: {model_name}")
-    if run_rosetta or run_logit_guided or run_mid_layer or run_text_cross_model:
+    if run_rosetta or run_logit_guided or run_mid_layer or run_trained or run_text_cross_model:
         print(f"Model B: {model_b_name}")
     print(f"Samples: {max_samples}")
     print(f"Latent steps: {latent_steps}")
@@ -134,7 +135,8 @@ def run_benchmark(config: dict) -> dict:
     print(f"Seed: {seed}")
     print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, "
           f"rosetta={run_rosetta}, logit_guided={run_logit_guided}, "
-          f"mid_layer={run_mid_layer}, text_cross_model={run_text_cross_model}")
+          f"mid_layer={run_mid_layer}, trained={run_trained}, "
+          f"text_cross_model={run_text_cross_model}")
     print()
 
     dataset = load_dataset(max_samples)
@@ -146,6 +148,7 @@ def run_benchmark(config: dict) -> dict:
     rosetta_results = None
     logit_guided_results = None
     mid_layer_results = None
+    trained_results = None
     text_cross_model_results = None
 
     if run_direct:
@@ -194,7 +197,7 @@ def run_benchmark(config: dict) -> dict:
 
     # Load model B if needed for cross-model modes
     model_b = tokenizer_b = connector_b = identity_b = None
-    if run_rosetta or run_logit_guided or run_mid_layer or run_text_cross_model:
+    if run_rosetta or run_logit_guided or run_mid_layer or run_trained or run_text_cross_model:
         model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
 
     if run_text_cross_model:
@@ -314,6 +317,48 @@ def run_benchmark(config: dict) -> dict:
             temperature=temperature, top_p=top_p, verbose=verbose,
         )
 
+    if run_trained:
+        from benchmarks.gsm8k_2agent.pipeline_trained import run_trained_benchmark
+        from avp.rosetta.train import train_projector, TrainConfig
+
+        print("\n" + "=" * 50)
+        print("Running TRAINED (per-layer learned projection) pipeline...")
+        print(f"  Model A (Researcher): {model_name}")
+        print(f"  Model B (Solver):     {model_b_name}")
+        print("=" * 50)
+
+        # Training phase
+        train_config = TrainConfig(
+            num_samples=config.get("train_samples", 2000),
+            batch_size=config.get("train_batch_size", 4),
+            num_epochs=config.get("train_epochs", 2),
+            learning_rate=config.get("train_lr", 1e-4),
+        )
+        print(f"Training projector: {train_config.num_samples} samples, "
+              f"{train_config.num_epochs} epochs...")
+
+        trained_map = train_projector(
+            source_model=model,
+            target_model=model_b,
+            source_tokenizer=tokenizer,
+            target_tokenizer=tokenizer_b,
+            device=device,
+            config=train_config,
+        )
+        active = [i for i, g in enumerate(trained_map.layer_gates) if g > 0.01]
+        print(f"Training complete. Active layers: {len(active)}/{len(trained_map.layer_gates)}")
+        print(f"Validation score: {trained_map.validation_score:.4f}")
+
+        set_seed(seed)
+
+        trained_results = run_trained_benchmark(
+            conn_a=connector, model_a=model, tokenizer_a=tokenizer,
+            identity_a=identity, model_b=model_b, tokenizer_b=tokenizer_b,
+            device=device, avp_map=trained_map, dataset=dataset,
+            latent_steps=latent_steps, max_new_tokens=max_new_tokens,
+            temperature=temperature, top_p=top_p, verbose=verbose,
+        )
+
     # Free model B to reclaim GPU memory
     if model_b is not None:
         del model_b, tokenizer_b, connector_b, identity_b
@@ -337,6 +382,8 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Logit-Guided", 13, logit_guided_results))
     if mid_layer_results is not None:
         modes.append(("Mid-Layer", 13, mid_layer_results))
+    if trained_results is not None:
+        modes.append(("Trained", 13, trained_results))
     if text_cross_model_results is not None:
         modes.append(("Text Cross-Model", 16, text_cross_model_results))
 
@@ -354,6 +401,8 @@ def run_benchmark(config: dict) -> dict:
         available["logit_guided"] = logit_guided_results
     if mid_layer_results is not None:
         available["mid_layer"] = mid_layer_results
+    if trained_results is not None:
+        available["trained"] = trained_results
     if text_cross_model_results is not None:
         available["text_cross_model"] = text_cross_model_results
     agreement_data = compute_agreement(available) if len(available) > 1 else None
@@ -376,7 +425,7 @@ def run_benchmark(config: dict) -> dict:
         "config": {
             "benchmark": "gsm8k_2agent",
             "model_a": model_name,
-            "model_b": model_b_name if (run_rosetta or run_logit_guided or run_mid_layer or run_text_cross_model) else None,
+            "model_b": model_b_name if (run_rosetta or run_logit_guided or run_mid_layer or run_trained or run_text_cross_model) else None,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
@@ -416,6 +465,11 @@ def run_benchmark(config: dict) -> dict:
         output_data["mid_layer"] = {
             "summary": compute_stats(mid_layer_results),
             "samples": mid_layer_results,
+        }
+    if trained_results is not None:
+        output_data["trained"] = {
+            "summary": compute_stats(trained_results),
+            "samples": trained_results,
         }
     if text_cross_model_results is not None:
         output_data["text_cross_model"] = {

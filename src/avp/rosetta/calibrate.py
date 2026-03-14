@@ -42,6 +42,10 @@ class AVPMap:
     tgt_indices: Optional[Any] = None   # LongTensor [N_shared] — target token IDs
     overlap_count: int = 0
     overlap_ratio: float = 0.0
+    # Trained translator fields (per-layer projections)
+    layer_weights: Optional[List[Any]] = None   # List of Tensor [D_src, D_tgt] per layer
+    layer_biases: Optional[List[Any]] = None    # List of Tensor [D_tgt] per layer
+    layer_gates: Optional[List[float]] = None   # List of float gate values per layer
 
     def __post_init__(self) -> None:
         if isinstance(self.method, str):

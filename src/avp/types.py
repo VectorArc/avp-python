@@ -60,6 +60,7 @@ class ProjectionMethod(enum.Enum):
     PROCRUSTES = "procrustes"
     VOCAB_MEDIATED = "vocab_mediated"
     VOCAB_OVERLAP = "vocab_overlap"
+    TRAINED = "trained"
 
 
 class DataType(enum.IntEnum):

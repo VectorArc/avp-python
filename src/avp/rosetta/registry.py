@@ -56,6 +56,11 @@ def save_map(avp_map: AVPMap, map_dir: Optional[Path] = None) -> Path:
         "overlap_count": avp_map.overlap_count,
         "overlap_ratio": avp_map.overlap_ratio,
     }
+    # Trained translator fields (per-layer projections)
+    if avp_map.layer_weights is not None:
+        data["layer_weights"] = [w.cpu() for w in avp_map.layer_weights]
+        data["layer_biases"] = [b.cpu() for b in avp_map.layer_biases]
+        data["layer_gates"] = avp_map.layer_gates
     torch.save(data, path)
     return path
 
@@ -101,6 +106,9 @@ def load_map(
         tgt_indices=data.get("tgt_indices"),
         overlap_count=data.get("overlap_count", 0),
         overlap_ratio=data.get("overlap_ratio", 0.0),
+        layer_weights=data.get("layer_weights"),
+        layer_biases=data.get("layer_biases"),
+        layer_gates=data.get("layer_gates"),
     )
 
 

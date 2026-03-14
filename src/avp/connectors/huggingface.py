@@ -620,6 +620,12 @@ class HuggingFaceConnector(EngineConnector):
                 )
                 # Don't use KV-cache priming — injection happens via hook
                 context = None
+            elif cross_model_method == "trained":
+                mid_layer_hook_ctx = self._prepare_trained_injection(
+                    source, context, _diagnostics=_diagnostics,
+                )
+                # Don't use KV-cache priming — injection happens via per-layer hooks
+                context = None
             else:
                 context = self._apply_rosetta_projection(
                     source, context, _diagnostics=_diagnostics,
@@ -875,6 +881,81 @@ class HuggingFaceConnector(EngineConnector):
             model=self.model,
             injection_layer=injection_layer,
             projected_hidden=projected,
+        )
+
+    # --- Cross-model trained projection ---
+
+    def _prepare_trained_injection(
+        self,
+        source: "HuggingFaceConnector",
+        context: AVPContext,
+        _diagnostics: Optional[Any] = None,
+    ) -> Any:
+        """Prepare per-layer trained projection hooks for cross-model generation.
+
+        Uses a trained AVPMap with per-layer linear projections + learned gates.
+        Each layer's forward hook adds the projected source hidden state
+        (scaled by the learned gate) to the target layer's output.
+
+        Args:
+            source: Source model connector.
+            context: AVPContext from source's think().
+            _diagnostics: Internal diagnostics object.
+
+        Returns:
+            Context manager (trained_multi_layer_hook) ready to wrap generate().
+        """
+        import torch
+
+        if context.last_hidden_state is None:
+            raise ValueError(
+                "Trained projection requires context with last_hidden_state. "
+                "Use think() to produce the context."
+            )
+
+        avp_map = self._get_or_calibrate_map(source)
+
+        if avp_map.layer_weights is None:
+            raise ValueError(
+                "AVPMap does not contain trained per-layer projections. "
+                "Use train_projector() to train a projection first, or "
+                "use cross_model_method='rosetta' for zero-training projection."
+            )
+
+        # Source hidden state [1, D_src] or [D_src]
+        src_hidden = context.last_hidden_state.float()
+        if src_hidden.dim() == 1:
+            src_hidden = src_hidden.unsqueeze(0)  # [1, D_src]
+
+        # Pre-compute per-layer projections
+        layer_projections = []
+        active_count = 0
+        for i, (w, b, gate) in enumerate(
+            zip(avp_map.layer_weights, avp_map.layer_biases, avp_map.layer_gates)
+        ):
+            if gate < 0.01:
+                layer_projections.append(None)
+                continue
+            # w: [D_tgt, D_src], b: [D_tgt]
+            projected = torch.nn.functional.linear(
+                src_hidden, w.to(src_hidden.device), b.to(src_hidden.device)
+            )  # [1, D_tgt]
+            layer_projections.append((projected, gate))
+            active_count += 1
+
+        if _diagnostics is not None:
+            _diagnostics.transfer_mode = "trained"
+            _diagnostics.projection_method = "TRAINED"
+
+        logger.info(
+            "Trained injection: %d/%d active layers (gate > 0.01)",
+            active_count, len(avp_map.layer_gates),
+        )
+
+        from ..rosetta.trained_hooks import trained_multi_layer_hook
+        return trained_multi_layer_hook(
+            model=self.model,
+            layer_projections=layer_projections,
         )
 
     # --- Cross-model rosetta projection ---
