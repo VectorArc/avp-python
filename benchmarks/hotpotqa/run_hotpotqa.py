@@ -272,6 +272,7 @@ def run_benchmark(config: dict) -> dict:
     output_dir = config.get("output_dir")
     projection_temperature = config.get("projection_temperature", 1.0)
     num_transfer_states = config.get("num_transfer_states", 1)
+    hybrid_k = config.get("hybrid_k", 0)
 
     model_b_name = config.get("model_b", "")
 
@@ -383,6 +384,7 @@ def run_benchmark(config: dict) -> dict:
             temperature=temperature, top_p=top_p, verbose=verbose,
             projection_temperature=projection_temperature,
             num_transfer_states=num_transfer_states,
+            hybrid_k=hybrid_k,
         )
 
         del model_b, tokenizer_b, connector_b, identity_b

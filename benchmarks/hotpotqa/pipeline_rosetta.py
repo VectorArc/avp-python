@@ -18,6 +18,43 @@ from .agents import AGENTS_2, build_latent_prompt, format_paragraphs
 from .evaluate import exact_match, extract_answer, token_f1
 
 
+def extract_key_tokens(
+    attention_weights: Any,
+    input_ids: Any,
+    tokenizer: Any,
+    prompt_tokens: int,
+    k: int = 64,
+) -> str:
+    """Extract top-K important tokens from attention weights.
+
+    Uses attention from the final token (over the full KV-cache) to score
+    input token importance. Returns decoded text of the top-K tokens.
+
+    Args:
+        attention_weights: Last layer attention, shape [batch, heads, 1, seq_len]
+        input_ids: Original input token IDs, shape [1, prompt_tokens]
+        tokenizer: Source model tokenizer
+        prompt_tokens: Number of original prompt tokens (before latent steps)
+        k: Number of tokens to extract
+    """
+    # Average across heads: [seq_len]
+    attn_scores = attention_weights[0, :, -1, :].mean(dim=0)
+
+    # Only score the original prompt tokens (not latent step positions)
+    prompt_scores = attn_scores[:prompt_tokens]
+
+    # Select top-K by attention (capped at available tokens)
+    k = min(k, prompt_tokens)
+    topk_indices = prompt_scores.topk(k).indices
+    # Sort by position to maintain reading order
+    topk_indices = topk_indices.sort().values
+
+    # Extract and decode
+    key_ids = input_ids[0, topk_indices]
+    key_text = tokenizer.decode(key_ids, skip_special_tokens=True)
+    return key_text
+
+
 def run_rosetta_pipeline(
     conn_a: Any,
     model_a: Any,
@@ -37,6 +74,7 @@ def run_rosetta_pipeline(
     verbose: bool = False,
     projection_temperature: float = 1.0,
     num_transfer_states: int = 1,
+    hybrid_k: int = 0,
 ) -> Dict:
     """Run the 2-agent cross-model pipeline on a single HotpotQA problem.
 
@@ -66,6 +104,8 @@ def run_rosetta_pipeline(
         total_latent_steps += latent_steps
 
         attention_entropy = None
+        key_text = None
+        hybrid_text_tokens = 0
         if num_transfer_states > 1:
             # Multi-embedding: collect hidden states from all latent steps
             past_kv, hidden_states = conn_a.generate_latent_steps(
@@ -113,6 +153,16 @@ def run_rosetta_pipeline(
                 attn_ent = -(last_attn * attn_log).sum(dim=-1)  # [batch, heads]
                 attention_entropy = float(attn_ent.mean())
 
+            # Extract key tokens for hybrid mode
+            key_text = None
+            if hybrid_k > 0 and out.attentions:
+                key_text = extract_key_tokens(
+                    out.attentions[-1], input_ids, tokenizer_a,
+                    prompt_tokens=prompt_tokens, k=hybrid_k,
+                )
+                if verbose:
+                    print(f"  [Hybrid] Extracted {hybrid_k} key tokens: {key_text[:100]}...")
+
             # Project to target model space
             projected, proj_metrics = conn_a.project_hidden_for_cross_model(
                 last_hidden, avp_map, temperature=projection_temperature,
@@ -150,6 +200,18 @@ def run_rosetta_pipeline(
         # --- Agent 2: Answerer on model B (inject projected embed, generate) ---
         inject_t0 = time.perf_counter()
         embed_input = rosetta_embeds.to(device).to(model_b.dtype)
+
+        # Hybrid: prepend key text tokens as embeddings before latent
+        hybrid_text_tokens = 0
+        if key_text:
+            key_ids_b = tokenizer_b.encode(key_text, add_special_tokens=False)
+            if key_ids_b:
+                key_ids_tensor = torch.tensor([key_ids_b], device=device)
+                key_embeds = model_b.get_input_embeddings()(key_ids_tensor)  # [1, K, D_tgt]
+                key_embeds = key_embeds.to(model_b.dtype)
+                embed_input = torch.cat([key_embeds, embed_input], dim=1)  # [1, K+1, D_tgt]
+                hybrid_text_tokens = len(key_ids_b)
+
         embed_mask = torch.ones(
             (1, embed_input.shape[1]), dtype=torch.long, device=device,
         )
@@ -230,8 +292,11 @@ def run_rosetta_pipeline(
         "hidden_state_norm": float(proj_metrics["hidden_state_norm"].mean()) if "hidden_state_norm" in proj_metrics else None,
         "nearest_cos_sim": float(proj_metrics["nearest_cos_sim"].mean()) if "nearest_cos_sim" in proj_metrics else None,
         "attention_entropy": attention_entropy,
+        "hybrid_k": hybrid_k,
+        "hybrid_text_tokens": hybrid_text_tokens if hybrid_k > 0 else 0,
+        "hybrid_key_text": key_text if hybrid_k > 0 else None,
         "agents": agent_traces,
-        "mode": "rosetta",
+        "mode": "hybrid" if hybrid_k > 0 else "rosetta",
     }
 
 
@@ -252,12 +317,14 @@ def run_rosetta_benchmark(
     verbose: bool = False,
     projection_temperature: float = 1.0,
     num_transfer_states: int = 1,
+    hybrid_k: int = 0,
 ) -> List[Dict]:
     """Run rosetta-mode pipeline on HotpotQA samples."""
     results = []
+    mode_label = f"Hybrid K={hybrid_k}" if hybrid_k > 0 else "Rosetta"
     for i, sample in enumerate(dataset):
         if verbose:
-            print(f"\n[Rosetta] Sample {i + 1}/{len(dataset)}: {sample['question'][:80]}...")
+            print(f"\n[{mode_label}] Sample {i + 1}/{len(dataset)}: {sample['question'][:80]}...")
 
         result = run_rosetta_pipeline(
             conn_a, model_a, tokenizer_a, identity_a,
@@ -272,6 +339,7 @@ def run_rosetta_benchmark(
             verbose=verbose,
             projection_temperature=projection_temperature,
             num_transfer_states=num_transfer_states,
+            hybrid_k=hybrid_k,
         )
         results.append(result)
 
@@ -285,7 +353,7 @@ def run_rosetta_benchmark(
             correct = sum(1 for r in results if r["exact_match"])
             f1s = [r["f1"] for r in results]
             mean_f1 = sum(f1s) / len(f1s)
-            print(f"  [Rosetta] {i + 1}/{len(dataset)} "
+            print(f"  [{mode_label}] {i + 1}/{len(dataset)} "
                   f"(EM={correct}/{i + 1}, F1={mean_f1:.2f}, {result['wall_time']:.1f}s)",
                   flush=True)
 
