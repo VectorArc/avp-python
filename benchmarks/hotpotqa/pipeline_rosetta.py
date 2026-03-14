@@ -18,6 +18,26 @@ from .agents import AGENTS_2, build_latent_prompt, format_paragraphs
 from .evaluate import exact_match, extract_answer, token_f1
 
 
+def find_content_start(input_ids: Any, tokenizer: Any) -> int:
+    """Find the token position where paragraph content begins.
+
+    Searches for "## Paragraphs:" or "Paragraphs:" marker in the tokenized prompt.
+    Falls back to skipping the first 20% of tokens (covers system + instruction).
+    """
+    # Decode to find the marker position in text, then map back to tokens
+    full_text = tokenizer.decode(input_ids[0], skip_special_tokens=False)
+    for marker in ["## Paragraphs:", "Paragraphs:", "## paragraphs:"]:
+        marker_pos = full_text.find(marker)
+        if marker_pos >= 0:
+            # Count tokens up to the marker (+ marker itself)
+            prefix = full_text[:marker_pos + len(marker)]
+            prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
+            return len(prefix_tokens)
+
+    # Fallback: skip first 20% of tokens (system + instruction)
+    return int(input_ids.shape[-1] * 0.2)
+
+
 def extract_key_tokens(
     attention_weights: Any,
     input_ids: Any,
@@ -28,7 +48,8 @@ def extract_key_tokens(
     """Extract top-K important tokens from attention weights.
 
     Uses attention from the final token (over the full KV-cache) to score
-    input token importance. Returns decoded text of the top-K tokens.
+    input token importance. Skips system prompt and instruction tokens to
+    avoid attention sinks. Returns decoded text of the top-K tokens.
 
     Args:
         attention_weights: Last layer attention, shape [batch, heads, 1, seq_len]
@@ -40,11 +61,14 @@ def extract_key_tokens(
     # Average across heads: [seq_len]
     attn_scores = attention_weights[0, :, -1, :].mean(dim=0)
 
-    # Only score the original prompt tokens (not latent step positions)
-    prompt_scores = attn_scores[:prompt_tokens]
+    # Only score content tokens (skip system prompt + instruction to avoid attention sinks)
+    content_start = find_content_start(input_ids, tokenizer)
+    prompt_scores = attn_scores[:prompt_tokens].clone()
+    prompt_scores[:content_start] = -float("inf")  # Zero out template tokens
 
-    # Select top-K by attention (capped at available tokens)
-    k = min(k, prompt_tokens)
+    # Select top-K by attention (capped at available content tokens)
+    content_tokens = prompt_tokens - content_start
+    k = min(k, max(content_tokens, 1))
     topk_indices = prompt_scores.topk(k).indices
     # Sort by position to maintain reading order
     topk_indices = topk_indices.sort().values
