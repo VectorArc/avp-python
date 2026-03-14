@@ -293,8 +293,8 @@ def train_projector(
     # Get model info
     src_identity = extract_model_identity(source_model, source_tokenizer)
     tgt_identity = extract_model_identity(target_model, target_tokenizer)
-    src_hash = compute_model_hash(src_identity)
-    tgt_hash = compute_model_hash(tgt_identity)
+    src_hash = compute_model_hash(source_model.config.to_dict())
+    tgt_hash = compute_model_hash(target_model.config.to_dict())
 
     source_dim = src_identity.hidden_dim
     target_dim = tgt_identity.hidden_dim
