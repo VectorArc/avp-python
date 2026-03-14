@@ -6,7 +6,7 @@ enabling latent communication across model architectures.
 
 from .calibrate import AVPMap, DEFAULT_ANCHORS, calibrate
 from .project import apply_cross_model_projection, vocab_overlap_projection, vocabulary_mediated_projection
-from .quality import TransferQualityConfig, TransferQualityResult, assess_transfer
+from .quality import TaskClassification, TransferQualityConfig, TransferQualityResult, assess_transfer, classify_task
 from .registry import find_map, load_map, map_id, save_map
 from .validate import ValidationConfig, ValidationResult, validate_projection
 
@@ -22,7 +22,9 @@ __all__ = [
     # Quality gate
     "TransferQualityConfig",
     "TransferQualityResult",
+    "TaskClassification",
     "assess_transfer",
+    "classify_task",
     # Registry
     "save_map",
     "load_map",

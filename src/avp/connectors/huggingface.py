@@ -586,6 +586,7 @@ class HuggingFaceConnector(EngineConnector):
         import torch
 
         logit_bias_processor = None
+        mid_layer_hook_ctx = None
 
         # Cross-model: auto-project when source connector is provided
         if (
@@ -612,6 +613,12 @@ class HuggingFaceConnector(EngineConnector):
                     _diagnostics=_diagnostics,
                 )
                 # Don't use context for KV-cache priming in logit-guided mode
+                context = None
+            elif cross_model_method == "mid_layer":
+                mid_layer_hook_ctx = self._prepare_mid_layer_injection(
+                    source, context, _diagnostics=_diagnostics,
+                )
+                # Don't use KV-cache priming — injection happens via hook
                 context = None
             else:
                 context = self._apply_rosetta_projection(
@@ -676,7 +683,11 @@ class HuggingFaceConnector(EngineConnector):
                 gen_kwargs["logits_processor"] = LogitsProcessorList(
                     [logit_bias_processor]
                 )
-            outputs = self.model.generate(**gen_kwargs)
+            if mid_layer_hook_ctx is not None:
+                with mid_layer_hook_ctx:
+                    outputs = self.model.generate(**gen_kwargs)
+            else:
+                outputs = self.model.generate(**gen_kwargs)
 
         generated_ids = outputs.sequences[0, prompt_len:]
         text = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
@@ -776,6 +787,94 @@ class HuggingFaceConnector(EngineConnector):
             bias=bias,
             alpha=alpha,
             confidence_threshold=confidence_threshold,
+        )
+
+    # --- Cross-model mid-layer injection ---
+
+    def _prepare_mid_layer_injection(
+        self,
+        source: "HuggingFaceConnector",
+        context: AVPContext,
+        _diagnostics: Optional[Any] = None,
+    ) -> Any:
+        """Prepare mid-layer injection hook for cross-model generation.
+
+        Projects the source hidden state to target space (same as rosetta)
+        but installs a forward hook to inject at an intermediate layer
+        (~75% depth) instead of priming KV-cache at layer 0.
+
+        Args:
+            source: Source model connector.
+            context: AVPContext from source's think().
+            _diagnostics: Internal diagnostics object.
+
+        Returns:
+            Context manager (mid_layer_injection_hook) ready to wrap generate().
+        """
+        if context.last_hidden_state is None:
+            raise ValueError(
+                "Mid-layer injection requires context with last_hidden_state. "
+                "Use think() to produce the context."
+            )
+
+        avp_map = self._get_or_calibrate_map(source)
+
+        # Project source hidden state to target space
+        use_metrics = _diagnostics is not None
+        result = source.project_hidden_for_cross_model(
+            context.last_hidden_state, avp_map,
+            return_metrics=use_metrics,
+        )
+        if use_metrics and isinstance(result, tuple):
+            projected, proj_metrics = result
+            if _diagnostics is not None and proj_metrics:
+                _diagnostics.hidden_state_norm = (
+                    float(proj_metrics["hidden_state_norm"].mean())
+                    if "hidden_state_norm" in proj_metrics else None
+                )
+                _diagnostics.nearest_cos_sim = (
+                    float(proj_metrics["nearest_cos_sim"].mean())
+                    if "nearest_cos_sim" in proj_metrics else None
+                )
+        else:
+            projected = result
+
+        # Ensure [1, D] shape
+        if projected.dim() == 1:
+            projected = projected.unsqueeze(0)
+        if projected.dim() == 3:
+            projected = projected.squeeze(0)  # [1, N, D] -> [N, D], take last
+            projected = projected[-1:, :]
+
+        from ..rosetta.mid_layer import (
+            compute_injection_layer,
+            mid_layer_injection_hook,
+        )
+
+        # Compute injection point
+        target_num_layers = self._identity.num_layers
+        injection_layer = compute_injection_layer(target_num_layers)
+
+        method = getattr(avp_map, "method", None)
+        method_name = method.name if hasattr(method, "name") else str(method or "")
+
+        if _diagnostics is not None:
+            _diagnostics.transfer_mode = "mid_layer"
+            _diagnostics.projection_method = method_name
+
+        logger.info(
+            "Mid-layer injection: target layer %d/%d (%.0f%% depth), "
+            "projected shape %s",
+            injection_layer, target_num_layers,
+            100 * injection_layer / target_num_layers,
+            tuple(projected.shape),
+        )
+
+        # Return the context manager — caller wraps model.generate() with it
+        return mid_layer_injection_hook(
+            model=self.model,
+            injection_layer=injection_layer,
+            projected_hidden=projected,
         )
 
     # --- Cross-model rosetta projection ---

@@ -84,7 +84,9 @@ _ROSETTA_NAMES = {
     "validate_projection",
     "TransferQualityConfig",
     "TransferQualityResult",
+    "TaskClassification",
     "assess_transfer",
+    "classify_task",
 }
 
 # Transport classes are lazy-loaded because httpx is an optional dependency.
@@ -178,7 +180,9 @@ __all__ = [
     "validate_projection",
     "TransferQualityConfig",
     "TransferQualityResult",
+    "TaskClassification",
     "assess_transfer",
+    "classify_task",
     # Errors
     "AVPError",
     "IncompatibleModelsError",
