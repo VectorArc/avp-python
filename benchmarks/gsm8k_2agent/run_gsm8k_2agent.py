@@ -333,6 +333,8 @@ def run_benchmark(config: dict) -> dict:
             batch_size=config.get("train_batch_size", 4),
             num_epochs=config.get("train_epochs", 2),
             learning_rate=config.get("train_lr", 1e-4),
+            gate_init=config.get("train_gate_init", -5.0),
+            gate_reg_weight=config.get("train_gate_reg", 0.01),
         )
         print(f"Training projector: {train_config.num_samples} samples, "
               f"{train_config.num_epochs} epochs...")
