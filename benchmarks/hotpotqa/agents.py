@@ -63,10 +63,12 @@ def build_latent_prompt(
     role: str,
     question: str,
     paragraphs_text: str = "",
+    key_context: str = "",
 ) -> List[Dict[str, str]]:
     """Build chat messages for latent mode agents.
 
     In latent mode, prior context is carried via KV-cache.
+    key_context: optional key tokens extracted by attention for hybrid mode.
     """
     if role == "finder":
         user_prompt = (
@@ -80,15 +82,28 @@ def build_latent_prompt(
     elif role == "answerer":
         # In latent mode, the Answerer gets the question but NOT the paragraphs.
         # The Finder's KV-cache carries the model's understanding of the context.
-        user_prompt = (
-            f"You are an Answerer Agent. A Finder agent has already analyzed "
-            f"the relevant paragraphs for you. Use their analysis to answer "
-            f"the question.\n\n"
-            f"## Question: {question}\n\n"
-            f"Based on the analysis provided, give a short, precise answer "
-            f"(a few words at most).\n\n"
-            f"Answer:"
-        )
+        if key_context:
+            # Hybrid mode: include key tokens as context
+            user_prompt = (
+                f"You are an Answerer Agent. A Finder agent has already analyzed "
+                f"the relevant paragraphs for you. Use their analysis and the "
+                f"key context below to answer the question.\n\n"
+                f"## Key Context: {key_context}\n\n"
+                f"## Question: {question}\n\n"
+                f"Based on the analysis and context provided, give a short, precise answer "
+                f"(a few words at most).\n\n"
+                f"Answer:"
+            )
+        else:
+            user_prompt = (
+                f"You are an Answerer Agent. A Finder agent has already analyzed "
+                f"the relevant paragraphs for you. Use their analysis to answer "
+                f"the question.\n\n"
+                f"## Question: {question}\n\n"
+                f"Based on the analysis provided, give a short, precise answer "
+                f"(a few words at most).\n\n"
+                f"Answer:"
+            )
     elif role == "decomposer":
         user_prompt = (
             f"You are a Decomposer Agent. Break the following multi-hop question "

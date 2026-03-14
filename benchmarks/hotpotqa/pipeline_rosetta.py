@@ -201,17 +201,6 @@ def run_rosetta_pipeline(
         inject_t0 = time.perf_counter()
         embed_input = rosetta_embeds.to(device).to(model_b.dtype)
 
-        # Hybrid: prepend key text tokens as embeddings before latent
-        hybrid_text_tokens = 0
-        if key_text:
-            key_ids_b = tokenizer_b.encode(key_text, add_special_tokens=False)
-            if key_ids_b:
-                key_ids_tensor = torch.tensor([key_ids_b], device=device)
-                key_embeds = model_b.get_input_embeddings()(key_ids_tensor)  # [1, K, D_tgt]
-                key_embeds = key_embeds.to(model_b.dtype)
-                embed_input = torch.cat([key_embeds, embed_input], dim=1)  # [1, K+1, D_tgt]
-                hybrid_text_tokens = len(key_ids_b)
-
         embed_mask = torch.ones(
             (1, embed_input.shape[1]), dtype=torch.long, device=device,
         )
@@ -225,7 +214,15 @@ def run_rosetta_pipeline(
         past_kv_b = prime_out.past_key_values
         injection_ms = (time.perf_counter() - inject_t0) * 1000
 
-        messages = build_latent_prompt(answerer.role, question)
+        # Hybrid: inject key text as context in Agent B's prompt (via input_ids)
+        hybrid_text_tokens = 0
+        if key_text:
+            hybrid_text_tokens = len(tokenizer_b.encode(key_text, add_special_tokens=False))
+            messages = build_latent_prompt(
+                answerer.role, question, key_context=key_text,
+            )
+        else:
+            messages = build_latent_prompt(answerer.role, question)
         prompt_text = render_prompt(tokenizer_b, messages)
         input_ids, attention_mask = tokenize_prompt(tokenizer_b, prompt_text, device)
 
