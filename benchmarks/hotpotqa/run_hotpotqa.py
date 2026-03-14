@@ -298,7 +298,9 @@ def run_benchmark(config: dict) -> dict:
     print()
 
     dataset = load_dataset(max_samples, max_context_tokens)
-    model, tokenizer, connector, identity = load_model(model_name, device)
+    # Hybrid mode needs eager attention for output_attentions (SDPA silently ignores it)
+    attn_impl = "eager" if hybrid_k > 0 else None
+    model, tokenizer, connector, identity = load_model(model_name, device, attn_implementation=attn_impl)
 
     direct_results = None
     latent_results = None

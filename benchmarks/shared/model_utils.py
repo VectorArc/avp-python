@@ -30,8 +30,13 @@ def auto_device(device: Optional[str]) -> str:
     return "cpu"
 
 
-def load_model(model_name: str, device: str):
-    """Load model and tokenizer, return (model, tokenizer, connector, identity)."""
+def load_model(model_name: str, device: str, attn_implementation: Optional[str] = None):
+    """Load model and tokenizer, return (model, tokenizer, connector, identity).
+
+    Args:
+        attn_implementation: Override attention implementation (e.g. "eager" for
+            output_attentions support — SDPA silently ignores it).
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from avp.connectors.huggingface import HuggingFaceConnector
@@ -45,7 +50,11 @@ def load_model(model_name: str, device: str):
         dtype = torch.float16
     else:
         dtype = torch.float32
-    model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype)
+    kwargs = {}
+    if attn_implementation is not None:
+        kwargs["attn_implementation"] = attn_implementation
+        print(f"  Using attention implementation: {attn_implementation}")
+    model = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype, **kwargs)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model.to(device)
     model.eval()

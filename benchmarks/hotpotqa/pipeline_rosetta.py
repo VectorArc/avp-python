@@ -136,17 +136,6 @@ def run_rosetta_pipeline(
             eos_id = tokenizer_a.eos_token_id or 0
             dummy_ids = torch.tensor([[eos_id]], device=device)
 
-            # SDPA doesn't support output_attentions — switch to eager temporarily
-            need_attentions = hybrid_k > 0
-            original_attn_impl = None
-            if need_attentions and hasattr(model_a, 'config'):
-                original_attn_impl = getattr(model_a.config, '_attn_implementation', None)
-                model_a.config._attn_implementation = 'eager'
-                # Also update all attention layers
-                for module in model_a.modules():
-                    if hasattr(module, '_attn_implementation'):
-                        module._attn_implementation = 'eager'
-
             with torch.no_grad():
                 out = model_a(
                     input_ids=dummy_ids,
@@ -156,13 +145,6 @@ def run_rosetta_pipeline(
                     output_attentions=True,
                     return_dict=True,
                 )
-
-            # Restore original attention implementation
-            if original_attn_impl is not None:
-                model_a.config._attn_implementation = original_attn_impl
-                for module in model_a.modules():
-                    if hasattr(module, '_attn_implementation'):
-                        module._attn_implementation = original_attn_impl
 
             last_hidden = out.hidden_states[-1][:, -1, :]  # [1, D_src]
 
