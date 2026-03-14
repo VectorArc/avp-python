@@ -62,13 +62,13 @@ class TrainConfig:
     learning_rate: float = 1e-4
     num_epochs: int = 2
     gate_reg_weight: float = 0.01
-    gate_init: float = -5.0  # sigmoid(-5) ~ 0.007 — near zero to avoid corrupting target
+    gate_init: float = -3.0  # sigmoid(-3) ~ 0.05 — warm enough for gradient signal
     max_seq_len: int = 256
     extraction_layer_ratio: float = 0.75
     warmup_steps: int = 100
     seed: int = 42
     mse_aux_weight: float = 0.1  # Weight for MSE auxiliary loss (0 = NTP only)
-    use_ntp_loss: bool = True  # Use next-token prediction as primary loss
+    use_ntp_loss: bool = False  # MSE-only is sufficient (NTP adds no accuracy, doubles compute)
 
 
 class LayerProjector:
