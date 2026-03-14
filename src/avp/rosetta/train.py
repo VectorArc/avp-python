@@ -129,21 +129,27 @@ class LayerProjector:
         for proj in self.layer_projections:
             proj.eval()
 
-    def forward(self, source_hidden):
+    def forward(self, source_hidden, return_gate_tensors: bool = False):
         """Project source hidden state to each target layer.
 
         Args:
             source_hidden: [B, D_src] from source model.
+            return_gate_tensors: If True, return gate as tensor (for training
+                gradient flow). If False, return gate as float (for inference).
 
         Returns:
-            List of (projected_hidden [B, D_tgt], gate_value float) per layer.
+            List of (projected_hidden [B, D_tgt], gate_value) per layer.
+            gate_value is a float (inference) or tensor (training).
         """
         torch = _require_torch()
         results = []
         for proj, gate_logit in zip(self.layer_projections, self.layer_gates):
             projected = proj(source_hidden)           # [B, D_tgt]
-            gate = torch.sigmoid(gate_logit).item()   # scalar in [0, 1]
-            results.append((projected, gate))
+            gate_tensor = torch.sigmoid(gate_logit)   # scalar tensor in [0, 1]
+            if return_gate_tensors:
+                results.append((projected, gate_tensor))
+            else:
+                results.append((projected, gate_tensor.item()))
         return results
 
     def get_active_layers(self, threshold: float = 0.01) -> List[int]:
@@ -367,12 +373,13 @@ def train_projector(
                 )
                 tgt_hidden_states = tgt_out.hidden_states  # tuple of [B, seq, D_tgt]
 
-            # Project and compute loss
-            projections = projector.forward(src_hidden.float())
+            # Project and compute loss (return_gate_tensors=True for gradient flow)
+            projections = projector.forward(src_hidden.float(), return_gate_tensors=True)
 
             loss = torch.tensor(0.0, device=device, requires_grad=True)
             for layer_idx, (proj_h, gate) in enumerate(projections):
-                if gate < 0.001:
+                gate_val = gate.item()
+                if gate_val < 0.001:
                     continue  # Skip nearly-zero gates for efficiency
 
                 # Reference: target hidden state at this layer's last token
@@ -380,7 +387,7 @@ def train_projector(
                 ref_idx = min(layer_idx + 1, len(tgt_hidden_states) - 1)
                 ref_h = tgt_hidden_states[ref_idx][:, -1, :].float()  # [B, D_tgt]
 
-                # MSE loss weighted by gate
+                # MSE loss weighted by gate (gate is tensor for gradient flow)
                 layer_loss = F.mse_loss(proj_h, ref_h)
                 loss = loss + gate * layer_loss
 
