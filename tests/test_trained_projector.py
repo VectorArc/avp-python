@@ -25,10 +25,12 @@ class TestTrainConfig:
         assert config.learning_rate == 1e-4
         assert config.num_epochs == 2
         assert config.gate_reg_weight == 0.01
-        assert config.gate_init == -3.0
+        assert config.gate_init == -5.0
         assert config.max_seq_len == 256
         assert config.warmup_steps == 100
         assert config.seed == 42
+        assert config.mse_aux_weight == 0.1
+        assert config.use_ntp_loss is True
 
     def test_custom_values(self):
         config = TrainConfig(num_samples=100, batch_size=8, learning_rate=1e-3)

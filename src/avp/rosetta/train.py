@@ -62,11 +62,13 @@ class TrainConfig:
     learning_rate: float = 1e-4
     num_epochs: int = 2
     gate_reg_weight: float = 0.01
-    gate_init: float = -3.0  # sigmoid(-3) ~ 0.05
+    gate_init: float = -5.0  # sigmoid(-5) ~ 0.007 — near zero to avoid corrupting target
     max_seq_len: int = 256
     extraction_layer_ratio: float = 0.75
     warmup_steps: int = 100
     seed: int = 42
+    mse_aux_weight: float = 0.1  # Weight for MSE auxiliary loss (0 = NTP only)
+    use_ntp_loss: bool = True  # Use next-token prediction as primary loss
 
 
 class LayerProjector:
@@ -364,32 +366,74 @@ def train_projector(
                 extract_idx = min(extract_idx, len(src_hidden_states) - 1)
                 src_hidden = src_hidden_states[extract_idx][:, -1, :]  # [B, D_src]
 
-            # Target forward pass -> reference hidden states at each layer
-            with torch.no_grad():
-                tgt_out = target_model(
-                    **tgt_encoded,
-                    output_hidden_states=True,
-                    return_dict=True,
-                )
-                tgt_hidden_states = tgt_out.hidden_states  # tuple of [B, seq, D_tgt]
-
-            # Project and compute loss (return_gate_tensors=True for gradient flow)
+            # Project source hidden state through all layers
             projections = projector.forward(src_hidden.float(), return_gate_tensors=True)
 
-            loss = torch.tensor(0.0, device=device, requires_grad=True)
-            for layer_idx, (proj_h, gate) in enumerate(projections):
+            # Build per-layer projections for hooks
+            layer_proj_for_hooks = []
+            for proj_h, gate in projections:
                 gate_val = gate.item()
                 if gate_val < 0.001:
-                    continue  # Skip nearly-zero gates for efficiency
+                    layer_proj_for_hooks.append(None)
+                else:
+                    layer_proj_for_hooks.append((proj_h, gate))
 
-                # Reference: target hidden state at this layer's last token
-                # tgt_hidden_states has (num_layers + 1) entries
-                ref_idx = min(layer_idx + 1, len(tgt_hidden_states) - 1)
-                ref_h = tgt_hidden_states[ref_idx][:, -1, :].float()  # [B, D_tgt]
+            loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-                # MSE loss weighted by gate (gate is tensor for gradient flow)
-                layer_loss = F.mse_loss(proj_h, ref_h)
-                loss = loss + gate * layer_loss
+            # Reference forward pass (unhooked, no grad) for MSE auxiliary
+            ref_hidden_states = None
+            if config.mse_aux_weight > 0:
+                with torch.no_grad():
+                    ref_out = target_model(
+                        **tgt_encoded,
+                        output_hidden_states=True,
+                        return_dict=True,
+                    )
+                ref_hidden_states = ref_out.hidden_states
+
+            # Primary loss: NTP through target model with injected projections
+            if config.use_ntp_loss:
+                from .trained_hooks import trained_multi_layer_hook
+                tgt_input_ids = tgt_encoded["input_ids"]
+                labels = tgt_input_ids[:, 1:].contiguous()  # shift right
+
+                with trained_multi_layer_hook(target_model, layer_proj_for_hooks):
+                    tgt_out = target_model(
+                        **tgt_encoded,
+                        output_hidden_states=True,
+                        return_dict=True,
+                    )
+                logits = tgt_out.logits[:, :-1, :].contiguous()  # [B, seq-1, vocab]
+                ntp_loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1),
+                    ignore_index=target_tokenizer.pad_token_id or -100,
+                )
+                loss = loss + ntp_loss
+            elif config.mse_aux_weight > 0:
+                pass  # ref_hidden_states already computed above
+            else:
+                # Neither NTP nor MSE — nothing to train on
+                with torch.no_grad():
+                    ref_out = target_model(
+                        **tgt_encoded,
+                        output_hidden_states=True,
+                        return_dict=True,
+                    )
+                ref_hidden_states = ref_out.hidden_states
+
+            # Auxiliary loss: MSE between projected and unhooked reference hidden states
+            if config.mse_aux_weight > 0 and ref_hidden_states is not None:
+                mse_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                for layer_idx, (proj_h, gate) in enumerate(projections):
+                    gate_val = gate.item()
+                    if gate_val < 0.001:
+                        continue
+                    ref_idx = min(layer_idx + 1, len(ref_hidden_states) - 1)
+                    ref_h = ref_hidden_states[ref_idx][:, -1, :].float().detach()
+                    layer_loss = F.mse_loss(proj_h, ref_h)
+                    mse_loss = mse_loss + gate * layer_loss
+                loss = loss + config.mse_aux_weight * mse_loss
 
             # Gate sparsity regularization (encourage most gates to be ~0)
             gate_sum = sum(
@@ -422,7 +466,8 @@ def train_projector(
                 progress_callback(step, total_steps, loss_val)
 
             # Free intermediate tensors
-            del src_out, tgt_out, projections, loss
+            del src_out, projections, loss
+            ref_hidden_states = None
             if device == "cuda":
                 torch.cuda.empty_cache()
 
