@@ -400,7 +400,7 @@ def train_projector(
                 with trained_multi_layer_hook(target_model, layer_proj_for_hooks):
                     tgt_out = target_model(
                         **tgt_encoded,
-                        output_hidden_states=True,
+                        output_hidden_states=False,
                         return_dict=True,
                     )
                 logits = tgt_out.logits[:, :-1, :].contiguous()  # [B, seq-1, vocab]
