@@ -541,10 +541,13 @@ class HuggingFaceConnector(EngineConnector):
         context: Optional[AVPContext] = None,
         source: Optional["HuggingFaceConnector"] = None,
         cross_model: bool = False,
+        cross_model_method: str = "rosetta",
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.95,
         do_sample: bool = True,
+        logit_bias_alpha: float = 0.5,
+        logit_bias_confidence_threshold: float = 0.8,
         _diagnostics: Optional[Any] = None,
     ) -> str:
         """Generate text, optionally conditioned on latent context from think().
@@ -558,10 +561,19 @@ class HuggingFaceConnector(EngineConnector):
                 Requires ``cross_model=True``.
             cross_model: Must be True to enable cross-model projection.
                 Cross-model (Rosetta Stone) is experimental. Default False.
+            cross_model_method: Cross-model method to use. Options:
+                - ``"rosetta"`` (default): Project hidden state to target embedding
+                  space and prime KV-cache with a single virtual token.
+                - ``"logit_guided"``: Map source vocabulary distribution to target
+                  vocabulary as additive logit bias during generation.
             max_new_tokens: Maximum tokens to generate.
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
             do_sample: Whether to use sampling (True) or greedy decoding (False).
+            logit_bias_alpha: Scaling factor for logit-guided bias (0.0-2.0).
+                Only used when cross_model_method="logit_guided". Default 0.5.
+            logit_bias_confidence_threshold: When target model's max softmax
+                probability exceeds this, skip bias for that step. Default 0.8.
             _diagnostics: Internal. Pre-created TransferDiagnostics to populate.
 
         Returns:
@@ -572,6 +584,8 @@ class HuggingFaceConnector(EngineConnector):
                 and no source connector is provided.
         """
         import torch
+
+        logit_bias_processor = None
 
         # Cross-model: auto-project when source connector is provided
         if (
@@ -590,6 +604,15 @@ class HuggingFaceConnector(EngineConnector):
                 )
                 context = None
                 source = None
+            elif cross_model_method == "logit_guided":
+                logit_bias_processor = self._compute_logit_bias_processor(
+                    source, context,
+                    alpha=logit_bias_alpha,
+                    confidence_threshold=logit_bias_confidence_threshold,
+                    _diagnostics=_diagnostics,
+                )
+                # Don't use context for KV-cache priming in logit-guided mode
+                context = None
             else:
                 context = self._apply_rosetta_projection(
                     source, context, _diagnostics=_diagnostics,
@@ -648,6 +671,11 @@ class HuggingFaceConnector(EngineConnector):
             if past_kv is not None:
                 gen_kwargs["past_key_values"] = past_kv
                 gen_kwargs["cache_position"] = cache_position
+            if logit_bias_processor is not None:
+                from transformers import LogitsProcessorList
+                gen_kwargs["logits_processor"] = LogitsProcessorList(
+                    [logit_bias_processor]
+                )
             outputs = self.model.generate(**gen_kwargs)
 
         generated_ids = outputs.sequences[0, prompt_len:]
@@ -672,6 +700,83 @@ class HuggingFaceConnector(EngineConnector):
                 _diagnostics.transfer_mode = "latent"
 
         return text
+
+    # --- Cross-model logit-guided decoding ---
+
+    def _compute_logit_bias_processor(
+        self,
+        source: "HuggingFaceConnector",
+        context: AVPContext,
+        alpha: float = 0.5,
+        confidence_threshold: float = 0.8,
+        _diagnostics: Optional[Any] = None,
+    ) -> Any:
+        """Compute logit bias processor for cross-model guided decoding.
+
+        Uses the source model's last hidden state (from think()) to compute
+        a vocabulary distribution, maps it through vocab overlap to the target
+        vocabulary, and returns a LogitsProcessor that applies it as additive
+        bias during generation.
+
+        Args:
+            source: Source model connector.
+            context: AVPContext from source's think() — must have last_hidden_state.
+            alpha: Bias scaling factor.
+            confidence_threshold: Skip bias when target is this confident.
+            _diagnostics: Internal diagnostics object.
+
+        Returns:
+            CrossModelLogitBias processor instance.
+        """
+        if context.last_hidden_state is None:
+            raise ValueError(
+                "Logit-guided decoding requires context with last_hidden_state. "
+                "Use think() to produce the context."
+            )
+
+        avp_map = self._get_or_calibrate_map(source)
+
+        # Get source lm_head
+        source_lm_head = source.model.get_output_embeddings()
+        if source_lm_head is None:
+            source_lm_head = getattr(source.model, "lm_head", None)
+        if source_lm_head is None or not hasattr(source_lm_head, "weight"):
+            raise RealignmentError(
+                "Cannot get source output embeddings (lm_head) for "
+                "logit-guided decoding."
+            )
+
+        from ..rosetta.logit_guided import (
+            CrossModelLogitBias,
+            compute_cross_model_logit_bias,
+        )
+
+        target_vocab_size = self.model.config.vocab_size
+        bias = compute_cross_model_logit_bias(
+            source_hidden_state=context.last_hidden_state,
+            source_lm_head_weight=source_lm_head.weight,
+            avp_map=avp_map,
+            target_vocab_size=target_vocab_size,
+        )
+
+        if _diagnostics is not None:
+            method = getattr(avp_map, "method", None)
+            method_name = method.name if hasattr(method, "name") else str(method or "")
+            _diagnostics.transfer_mode = "logit_guided"
+            _diagnostics.projection_method = method_name
+
+        logger.info(
+            "Logit-guided decoding: alpha=%.2f, confidence_threshold=%.2f, "
+            "bias nonzero=%d/%d",
+            alpha, confidence_threshold,
+            int((bias != 0).sum()), target_vocab_size,
+        )
+
+        return CrossModelLogitBias(
+            bias=bias,
+            alpha=alpha,
+            confidence_threshold=confidence_threshold,
+        )
 
     # --- Cross-model rosetta projection ---
 

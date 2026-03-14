@@ -47,6 +47,7 @@ def generate_text(
     max_new_tokens: int = 256,
     temperature: float = 0.7,
     top_p: float = 0.95,
+    logits_processor: Optional[Any] = None,
 ) -> Tuple[str, Optional[Any]]:
     """Generate text from input_ids, optionally with a pre-filled KV-cache.
 
@@ -81,7 +82,7 @@ def generate_text(
             )
             attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
 
-    outputs = model.generate(
+    gen_kwargs = dict(
         input_ids=input_ids,
         attention_mask=attention_mask,
         max_new_tokens=max_new_tokens,
@@ -93,6 +94,9 @@ def generate_text(
         past_key_values=past_key_values,
         cache_position=cache_position,
     )
+    if logits_processor is not None:
+        gen_kwargs["logits_processor"] = logits_processor
+    outputs = model.generate(**gen_kwargs)
 
     generated_ids = outputs.sequences[0, prompt_len:]
     text = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()

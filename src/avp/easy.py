@@ -252,6 +252,7 @@ def generate(
     model: str,
     source_model: Optional[str] = None,
     cross_model: bool = False,
+    cross_model_method: str = "rosetta",
     steps: int = 20,
     context: Optional["AVPContext"] = None,
     store: Optional[Any] = None,
@@ -259,6 +260,7 @@ def generate(
     prior_key: Optional[str] = None,
     max_new_tokens: int = 512,
     temperature: float = 0.7,
+    logit_bias_alpha: float = 0.5,
     collect_metrics: bool = False,
     debug_config: Optional["DebugConfig"] = None,
 ) -> Union[str, Tuple[str, "GenerateMetrics"]]:
@@ -372,8 +374,10 @@ def generate(
             context=source_context,
             source=source_connector,
             cross_model=True,
+            cross_model_method=cross_model_method,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
+            logit_bias_alpha=logit_bias_alpha,
             _diagnostics=diagnostics,
         )
         generate_duration = _time.perf_counter() - t_gen

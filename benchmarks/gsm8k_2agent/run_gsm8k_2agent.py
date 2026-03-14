@@ -39,7 +39,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "direct", "rosetta", "text_cross_model", "both", "all"],
+        choices=["latent", "text", "direct", "rosetta", "logit_guided",
+                 "text_cross_model", "both", "all"],
         default="all",
         help="Pipeline(s) to run (default: all)",
     )
@@ -64,6 +65,10 @@ def parse_args() -> argparse.Namespace:
                         help="Softmax temperature for cross-model projection (default: 1.0)")
     parser.add_argument("--num_transfer_states", type=int, default=1,
                         help="Number of hidden states to transfer in rosetta mode (default: 1)")
+    parser.add_argument("--logit_bias_alpha", type=float, default=0.5,
+                        help="Logit bias scaling factor for logit_guided mode (default: 0.5)")
+    parser.add_argument("--logit_bias_confidence_threshold", type=float, default=0.8,
+                        help="Confidence threshold for logit bias gating (default: 0.8)")
     return parser.parse_args()
 
 
@@ -104,6 +109,8 @@ def run_benchmark(config: dict) -> dict:
     output_dir = config.get("output_dir")
     projection_temperature = config.get("projection_temperature", 1.0)
     num_transfer_states = config.get("num_transfer_states", 1)
+    logit_bias_alpha = config.get("logit_bias_alpha", 0.5)
+    logit_bias_confidence_threshold = config.get("logit_bias_confidence_threshold", 0.8)
 
     model_b_name = config.get("model_b", "Qwen/Qwen2.5-0.5B-Instruct")
 
@@ -111,12 +118,13 @@ def run_benchmark(config: dict) -> dict:
     run_latent = mode in ("latent", "both", "all")
     run_text = mode in ("text", "both", "all")
     run_rosetta = mode in ("rosetta", "all")
+    run_logit_guided = mode in ("logit_guided", "all")
     run_text_cross_model = mode in ("text_cross_model", "all")
 
     print(f"Device: {device}")
     print(f"Mode: {mode}")
     print(f"Model A: {model_name}")
-    if run_rosetta or run_text_cross_model:
+    if run_rosetta or run_logit_guided or run_text_cross_model:
         print(f"Model B: {model_b_name}")
     print(f"Samples: {max_samples}")
     print(f"Latent steps: {latent_steps}")
@@ -124,7 +132,8 @@ def run_benchmark(config: dict) -> dict:
     print(f"Temperature: {temperature}")
     print(f"Seed: {seed}")
     print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, "
-          f"rosetta={run_rosetta}, text_cross_model={run_text_cross_model}")
+          f"rosetta={run_rosetta}, logit_guided={run_logit_guided}, "
+          f"text_cross_model={run_text_cross_model}")
     print()
 
     dataset = load_dataset(max_samples)
@@ -134,6 +143,7 @@ def run_benchmark(config: dict) -> dict:
     latent_results = None
     text_results = None
     rosetta_results = None
+    logit_guided_results = None
     text_cross_model_results = None
 
     if run_direct:
@@ -182,7 +192,7 @@ def run_benchmark(config: dict) -> dict:
 
     # Load model B if needed for cross-model modes
     model_b = tokenizer_b = connector_b = identity_b = None
-    if run_rosetta or run_text_cross_model:
+    if run_rosetta or run_logit_guided or run_text_cross_model:
         model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
 
     if run_text_cross_model:
@@ -235,6 +245,41 @@ def run_benchmark(config: dict) -> dict:
             num_transfer_states=num_transfer_states,
         )
 
+    if run_logit_guided:
+        from benchmarks.gsm8k_2agent.pipeline_logit_guided import run_logit_guided_benchmark
+        from avp.rosetta.calibrate import calibrate
+
+        print("\n" + "=" * 50)
+        print("Running LOGIT-GUIDED (cross-model logit bias) pipeline...")
+        print(f"  Model A (Researcher): {model_name}")
+        print(f"  Model B (Solver):     {model_b_name}")
+        print(f"  Alpha: {logit_bias_alpha}")
+        print(f"  Confidence threshold: {logit_bias_confidence_threshold}")
+        print("=" * 50)
+        set_seed(seed)
+
+        # Calibrate (reuse if already done for rosetta)
+        if 'avp_map' not in dir() or avp_map is None:
+            print("Calibrating Rosetta Stone projection...")
+            avp_map = calibrate(
+                source_model=model, target_model=model_b,
+                source_tokenizer=tokenizer, target_tokenizer=tokenizer_b,
+                device=device,
+            )
+            print(f"  Method: {avp_map.method.value}, "
+                  f"validation_score: {avp_map.validation_score:.4f}, "
+                  f"{avp_map.source_dim}d → {avp_map.target_dim}d")
+
+        logit_guided_results = run_logit_guided_benchmark(
+            conn_a=connector, model_a=model, tokenizer_a=tokenizer,
+            identity_a=identity, model_b=model_b, tokenizer_b=tokenizer_b,
+            device=device, avp_map=avp_map, dataset=dataset,
+            latent_steps=latent_steps, max_new_tokens=max_new_tokens,
+            temperature=temperature, top_p=top_p, verbose=verbose,
+            logit_bias_alpha=logit_bias_alpha,
+            logit_bias_confidence_threshold=logit_bias_confidence_threshold,
+        )
+
     # Free model B to reclaim GPU memory
     if model_b is not None:
         del model_b, tokenizer_b, connector_b, identity_b
@@ -254,6 +299,8 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Text", 13, text_results))
     if rosetta_results is not None:
         modes.append(("Rosetta", 13, rosetta_results))
+    if logit_guided_results is not None:
+        modes.append(("Logit-Guided", 13, logit_guided_results))
     if text_cross_model_results is not None:
         modes.append(("Text Cross-Model", 16, text_cross_model_results))
 
@@ -267,6 +314,8 @@ def run_benchmark(config: dict) -> dict:
         available["latent"] = latent_results
     if rosetta_results is not None:
         available["rosetta"] = rosetta_results
+    if logit_guided_results is not None:
+        available["logit_guided"] = logit_guided_results
     if text_cross_model_results is not None:
         available["text_cross_model"] = text_cross_model_results
     agreement_data = compute_agreement(available) if len(available) > 1 else None
@@ -289,7 +338,7 @@ def run_benchmark(config: dict) -> dict:
         "config": {
             "benchmark": "gsm8k_2agent",
             "model_a": model_name,
-            "model_b": model_b_name if (run_rosetta or run_text_cross_model) else None,
+            "model_b": model_b_name if (run_rosetta or run_logit_guided or run_text_cross_model) else None,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
@@ -319,6 +368,11 @@ def run_benchmark(config: dict) -> dict:
         output_data["rosetta"] = {
             "summary": compute_stats(rosetta_results),
             "samples": rosetta_results,
+        }
+    if logit_guided_results is not None:
+        output_data["logit_guided"] = {
+            "summary": compute_stats(logit_guided_results),
+            "samples": logit_guided_results,
         }
     if text_cross_model_results is not None:
         output_data["text_cross_model"] = {
