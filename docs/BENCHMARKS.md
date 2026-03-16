@@ -1,6 +1,6 @@
 # AVP Benchmarks
 
-> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** – 8 benchmarks, 5 models, 2 families. Cross-model rosetta across 4 model pairs.
+> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** – 6 benchmarks, 5 models, 2 families. Cross-model rosetta across 4 model pairs.
 
 ---
 

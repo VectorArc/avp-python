@@ -53,7 +53,7 @@ HumanEval: +12.4pp vs text across 4 seeds (p=0.004). GSM8K and DebugBench: neutr
 
 Cross-model accuracy depends on the target – a weaker model's reasoning can push a stronger solver past its text-chain baseline (Llama 3B → Qwen 7B: 90.0% vs 87.0% text), but the reverse direction underperforms text. The projection is vocabulary-mediated – no learned parameters, no training data, works across model families.
 
-Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 7 benchmarks, 5 models, 2 families, reproducible.
+Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 6 benchmarks, 5 models, 2 families, reproducible.
 
 ## How It Works
 
@@ -89,7 +89,6 @@ Replace `llm.invoke()` with `avp.generate()`. Your framework sees text in, text 
 |-----------|-------------------|
 | **HuggingFace** | Full latent pipeline (KV-cache + hidden states) |
 | **LangGraph** | Graph node replaces LLM call |
-| **CrewAI** | `BaseLLM.call()` override |
 | **PydanticAI** | `FunctionModel` callback |
 | **LlamaIndex** | `CustomLLM.complete()` override |
 | **A2A / MCP** | Complementary – AVP handles tensor transfer, they handle routing |
@@ -160,8 +159,8 @@ answer = connector.generate(prompt, context=restored)
 ## Documentation
 
 - **[AVP Specification](https://github.com/VectorArc/avp-spec)** – Binary format, handshake, transport
-- **[Benchmarks](docs/BENCHMARKS.md)** – 7 benchmarks, 5 models, 2 families
-- **[Framework Integration](docs/FRAMEWORK_INTEGRATION.md)** – LangGraph, CrewAI, PydanticAI, LlamaIndex
+- **[Benchmarks](docs/BENCHMARKS.md)** – 6 benchmarks, 5 models, 2 families
+- **[Framework Integration](docs/FRAMEWORK_INTEGRATION.md)** – LangGraph, PydanticAI, LlamaIndex
 - **[Examples](examples/)** – Quickstart, cross-model, and agent demos
 - **[CHANGELOG](CHANGELOG.md)**
 

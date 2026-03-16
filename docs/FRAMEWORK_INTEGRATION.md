@@ -107,36 +107,6 @@ result = app.invoke({"query": "What is 24 * 17 + 3?"})
 
 LangGraph checkpoints `State` to its database – all strings, no tensors. The `ContextStore` holds KV-cache in GPU memory with TTL expiry.
 
-## CrewAI
-
-```python
-from crewai import Agent, Task, Crew
-import avp
-
-MODEL = "Qwen/Qwen2.5-7B-Instruct"
-store = avp.ContextStore(default_ttl=300)
-
-def avp_llm_call(prompt: str, store_key: str, prior_key: str = None) -> str:
-    return avp.generate(
-        prompt, model=MODEL, store=store,
-        store_key=store_key, prior_key=prior_key,
-    )
-
-researcher = Agent(
-    role="Researcher",
-    goal="Analyze math problems",
-    llm=lambda prompt: avp_llm_call(prompt, store_key="researcher"),
-)
-
-solver = Agent(
-    role="Solver",
-    goal="Solve math problems",
-    llm=lambda prompt: avp_llm_call(prompt, store_key="solver", prior_key="researcher"),
-)
-```
-
-CrewAI serializes agent output as text through its JSON message bus. AVP's latent context bypasses this entirely via the side-channel store.
-
 ## Cross-Model
 
 The same pattern works across models. Agent A thinks on a larger model, Agent B generates on a smaller one:
