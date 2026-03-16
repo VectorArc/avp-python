@@ -42,7 +42,7 @@ answer = connector.generate("Solve step by step: 24 * 17 + 3", context=context)
 
 HumanEval: +12.4pp vs text across 4 seeds (p=0.004). GSM8K and DebugBench: neutral across all modes, but the pipeline runs 3x faster (7.6s vs 22.8s end-to-end on DebugBench). Llama 3B: text wins on GSM8K – latent overhead has more impact on smaller models. All benchmarks used `steps=20` on NVIDIA A100.
 
-**Trade-off:** 20 latent steps add ~0.9s fixed cost on A100. Breaks even when Agent A would otherwise produce ~22+ tokens of text.
+**Trade-off:** 20 latent steps cost ~0.9s on A100. If Agent A would normally generate 22+ tokens of text, latent is faster.
 
 **Cross-model (zero training):**
 
