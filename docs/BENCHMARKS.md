@@ -81,6 +81,8 @@ Accuracy is bounded by the target model's own capability. Advisory quality gate 
 
 | Direction | Benchmark | Rosetta | Text | Delta |
 |-----------|-----------|---------|------|-------|
+| Qwen 7B → Qwen 3B | GSM8K | 82.5% | **88.5%** | text +6.0pp |
+| Qwen 7B → Qwen 3B | HumanEval | **66.5%** | 62.2% | rosetta +4.3pp |
 | Qwen 7B → Llama 3B | GSM8K | 77.0% | **86.5%** | text +9.5pp |
 | Llama 3B → Qwen 7B | GSM8K | **90.0%** | 82.0% | rosetta +8.0pp |
 | Qwen 7B → Llama 3B | HumanEval | 47.0% | **57.9%** | text +10.9pp |
@@ -88,7 +90,7 @@ Accuracy is bounded by the target model's own capability. Advisory quality gate 
 | Qwen 7B → Llama 3B | DebugBench | 34.0% | **44.0%** | text +10.0pp |
 | Llama 3B → Qwen 7B | DebugBench | **45.0%** | 40.0% | rosetta +5.0pp |
 
-Direction matters: rosetta beats text when the stronger model is the solver. Text wins when the weaker model is the solver.
+Direction matters: rosetta beats text when the stronger model is the solver. Text wins when the weaker model is the solver. On code generation (HumanEval), rosetta wins in both directions.
 
 ---
 
