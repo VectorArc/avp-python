@@ -46,17 +46,15 @@ HumanEval: +12.4pp vs text across 4 seeds (p=0.004). GSM8K and DebugBench: neutr
 
 **Cross-model (zero training):**
 
-| Source → Target | Mode | GSM8K | HumanEval |
-|-----------------|------|-------|-----------|
-| Qwen 7B → Qwen 3B | Rosetta (same-family) | 82.5% | 66.5% |
-| Qwen 7B → Llama 3B | Rosetta | 77.0% | 47.0% |
-| Qwen 7B → Llama 3B | Text chain | 86.5% | 57.9% |
-| Llama 3B → Qwen 7B | Rosetta | **90.0%** | **79.3%** |
-| Llama 3B → Qwen 7B | Text chain | 82.0% | 61.6% |
+| Source → Target | GSM8K (Rosetta / Text) | HumanEval (Rosetta / Text) |
+|-----------------|------------------------|----------------------------|
+| Qwen 7B → Qwen 3B | 82.5% / – | 66.5% / – |
+| Qwen 7B → Llama 3B | 77.0% / **86.5%** | 47.0% / **57.9%** |
+| Llama 3B → Qwen 7B | **90.0%** / 82.0% | **79.3%** / 61.6% |
 
 Target solo baselines: Qwen 3B = 82.5% / 61.0%, Llama 3B = 76.0% / 50.6%, Qwen 7B = 91.0% / 58.5%.
 
-Same-family projection matches the target model's own accuracy. Cross-family direction matters – rosetta beats text when the stronger model is the solver (GSM8K +8pp, HumanEval +17.7pp). When the weaker model solves, text wins. Vocabulary-mediated – no learned parameters, works across model families.
+Direction matters – rosetta beats text when the stronger model is the solver (GSM8K +8pp, HumanEval +17.7pp). When the weaker model solves, text wins. Vocabulary-mediated projection – no learned parameters, works across model families.
 
 Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 6 benchmarks, 5 models, 2 families, reproducible.
 
