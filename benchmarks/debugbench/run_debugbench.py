@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["latent", "text", "direct", "both", "all"],
+        choices=["latent", "text", "direct", "rosetta", "text_cross_model", "both", "all"],
         default="all",
         help="Pipeline(s) to run (default: all)",
     )
@@ -61,6 +61,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--verbose", action="store_true", help="Print per-sample details")
     parser.add_argument("--output_dir", type=str, default=None, help="Results directory")
+    parser.add_argument(
+        "--model_b", type=str, default="Qwen/Qwen2.5-0.5B-Instruct",
+        help="Second model for rosetta/text_cross_model mode (default: Qwen/Qwen2.5-0.5B-Instruct)",
+    )
+    parser.add_argument("--projection_temperature", type=float, default=1.0,
+                        help="Softmax temperature for cross-model projection (default: 1.0)")
+    parser.add_argument("--num_transfer_states", type=int, default=1,
+                        help="Number of hidden states to transfer in rosetta mode (default: 1)")
     parser.add_argument(
         "--level", type=str, default=None,
         choices=["easy", "medium", "hard"],
@@ -189,9 +197,16 @@ def run_benchmark(config: dict) -> dict:
     level = config.get("level")
     category = config.get("category")
 
+    projection_temperature = config.get("projection_temperature", 1.0)
+    num_transfer_states = config.get("num_transfer_states", 1)
+
+    model_b_name = config.get("model_b", "Qwen/Qwen2.5-0.5B-Instruct")
+
     run_direct = mode in ("direct", "all")
     run_latent = mode in ("latent", "both", "all")
     run_text = mode in ("text", "both", "all")
+    run_rosetta = mode in ("rosetta", "all")
+    run_text_cross_model = mode in ("text_cross_model", "all")
 
     print(f"Device: {device}")
     print(f"Mode: {mode}")
@@ -205,7 +220,10 @@ def run_benchmark(config: dict) -> dict:
         print(f"Level filter: {level}")
     if category:
         print(f"Category filter: {category}")
-    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}")
+    if run_rosetta or run_text_cross_model:
+        print(f"Model B: {model_b_name}")
+    print(f"Pipelines: direct={run_direct}, text={run_text}, latent={run_latent}, "
+          f"rosetta={run_rosetta}, text_cross_model={run_text_cross_model}")
     print()
 
     dataset = load_dataset(max_samples, level=level, category=category)
@@ -218,6 +236,8 @@ def run_benchmark(config: dict) -> dict:
     direct_results = None
     latent_results = None
     text_results = None
+    rosetta_results = None
+    text_cross_model_results = None
 
     if run_direct:
         from benchmarks.debugbench.pipeline_direct import run_direct_benchmark
@@ -263,6 +283,67 @@ def run_benchmark(config: dict) -> dict:
             top_p=top_p, verbose=verbose,
         )
 
+    # Load model B if needed for cross-model modes
+    model_b = tokenizer_b = connector_b = identity_b = None
+    if run_rosetta or run_text_cross_model:
+        model_b, tokenizer_b, connector_b, identity_b = load_model(model_b_name, device)
+
+    if run_text_cross_model:
+        from benchmarks.debugbench.pipeline_text_cross_model import run_text_cross_model_benchmark
+
+        print("\n" + "=" * 50)
+        print("Running TEXT CROSS-MODEL (A generates text -> B reads text) pipeline...")
+        print(f"  Model A (Detector): {model_name}")
+        print(f"  Model B (Fixer):    {model_b_name}")
+        print("=" * 50)
+        set_seed(seed)
+
+        text_cross_model_results = run_text_cross_model_benchmark(
+            model_a=model, tokenizer_a=tokenizer,
+            model_b=model_b, tokenizer_b=tokenizer_b,
+            device=device, dataset=dataset,
+            max_new_tokens=max_new_tokens, temperature=temperature,
+            top_p=top_p, verbose=verbose,
+        )
+
+    if run_rosetta:
+        from benchmarks.debugbench.pipeline_rosetta import run_rosetta_benchmark
+        from avp.rosetta.calibrate import calibrate
+
+        print("\n" + "=" * 50)
+        print("Running ROSETTA (cross-model projection) pipeline...")
+        print(f"  Model A (Detector): {model_name}")
+        print(f"  Model B (Fixer):    {model_b_name}")
+        print("=" * 50)
+        set_seed(seed)
+
+        print("Calibrating Rosetta Stone projection...")
+        avp_map = calibrate(
+            source_model=model, target_model=model_b,
+            source_tokenizer=tokenizer, target_tokenizer=tokenizer_b,
+            device=device,
+        )
+        print(f"  Method: {avp_map.method.value}, "
+              f"validation_score: {avp_map.validation_score:.4f}, "
+              f"{avp_map.source_dim}d -> {avp_map.target_dim}d")
+
+        rosetta_results = run_rosetta_benchmark(
+            conn_a=connector, model_a=model, tokenizer_a=tokenizer,
+            identity_a=identity, model_b=model_b, tokenizer_b=tokenizer_b,
+            device=device, avp_map=avp_map, dataset=dataset,
+            latent_steps=latent_steps, max_new_tokens=max_new_tokens,
+            temperature=temperature, top_p=top_p, verbose=verbose,
+            projection_temperature=projection_temperature,
+            num_transfer_states=num_transfer_states,
+        )
+
+    # Free model B to reclaim GPU memory
+    if model_b is not None:
+        del model_b, tokenizer_b, connector_b, identity_b
+        if device == "cuda":
+            import torch
+            torch.cuda.empty_cache()
+
     # Print summary
     from benchmarks.debugbench.evaluate import compute_accuracy
     from benchmarks.shared.evaluate_common import print_summary, compute_stats, compute_agreement
@@ -274,6 +355,10 @@ def run_benchmark(config: dict) -> dict:
         modes.append(("Latent (AVP)", 13, latent_results))
     if text_results is not None:
         modes.append(("Text", 13, text_results))
+    if rosetta_results is not None:
+        modes.append(("Rosetta", 13, rosetta_results))
+    if text_cross_model_results is not None:
+        modes.append(("Text Cross-Model", 16, text_cross_model_results))
 
     # Compute agreement across available modes
     available = {}
@@ -283,6 +368,10 @@ def run_benchmark(config: dict) -> dict:
         available["text"] = text_results
     if latent_results is not None:
         available["latent"] = latent_results
+    if rosetta_results is not None:
+        available["rosetta"] = rosetta_results
+    if text_cross_model_results is not None:
+        available["text_cross_model"] = text_cross_model_results
     agreement_data = compute_agreement(available) if len(available) > 1 else None
 
     print_summary(
@@ -324,7 +413,8 @@ def run_benchmark(config: dict) -> dict:
     output_data = {
         "config": {
             "benchmark": "debugbench",
-            "model": model_name,
+            "model_a": model_name,
+            "model_b": model_b_name if (run_rosetta or run_text_cross_model) else None,
             "device": device,
             "mode": mode,
             "max_samples": max_samples,
@@ -351,6 +441,16 @@ def run_benchmark(config: dict) -> dict:
         output_data["text"] = {
             "summary": compute_stats(text_results),
             "samples": text_results,
+        }
+    if rosetta_results is not None:
+        output_data["rosetta"] = {
+            "summary": compute_stats(rosetta_results),
+            "samples": rosetta_results,
+        }
+    if text_cross_model_results is not None:
+        output_data["text_cross_model"] = {
+            "summary": compute_stats(text_cross_model_results),
+            "samples": text_cross_model_results,
         }
     if agreement_data is not None:
         output_data["agreement"] = agreement_data
