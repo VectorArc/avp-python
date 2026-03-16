@@ -1,6 +1,6 @@
 # AVP Benchmarks
 
-> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** – 7 benchmarks, 5 models, 2 families.
+> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** – 8 benchmarks, 5 models, 2 families. Cross-model rosetta across 4 model pairs.
 
 ---
 
@@ -13,15 +13,16 @@ Same-model latent transfer matches or improves accuracy on structured tasks. Tes
 | | Direct | Latent (AVP) | Text |
 |---|--------|--------------|------|
 | **HumanEval** (Qwen 7B, n=164) | 58.5% | **67.1%** | 53.0% |
+| **HumanEval** (Llama 3B, n=164) | 50.6% | **54.3%** | 44.5% |
 
-Latent vs text: p=0.004. Text chains introduce formatting noise that disrupts code structure.
+Latent vs text (Qwen 7B): p=0.004. Validated across 4 seeds at T=0.01 (70.0%±0.3% latent vs 57.6%±0.3% text). Replicated on Llama 3B.
 
 ### Math Reasoning
 
 | | Direct | Latent (AVP) | Text |
 |---|--------|--------------|------|
 | **GSM8K** (Qwen 7B, n=200) | 91.0% | 90.5% | 87.0% |
-| **GSM8K** (Llama 3B, n=50) | 76.0% | 76.0% | 74.0% |
+| **GSM8K** (Llama 3B, n=200) | 74.5% | 76.0% | 79.0% |
 
 ### Bug Fixing
 
@@ -59,17 +60,35 @@ Text prompts grow **O(n²)** with agent count. Latent stays **O(n)**.
 
 ## Cross-Model (Rosetta Stone) – Experimental
 
-> **Experimental.** Cross-model projection requires `cross_model=True`. Accuracy varies by task type – works well on structured tasks (math, code), degrades on comprehension.
+> **Experimental.** Cross-model projection requires `cross_model=True`. Accuracy varies by task type – works well on structured tasks (math, code), degrades on comprehension and bug fixing.
 
-Different models communicate via vocabulary-mediated projection. Zero training – uses existing embedding matrices. Wire size: 3-7 KB.
+Different models communicate via vocabulary-mediated projection. Zero training – uses existing embedding matrices.
 
-| Source → Target | GSM8K (n=200) | HumanEval (n=164) |
-|-----------------|---------------|-------------------|
-| Qwen 7B → Llama 3B | **77.0%** | **47.0%** |
-| Llama 3B → Qwen 7B | **90.0%** | **79.3%** |
-| Qwen 7B → Qwen 1.5B | 58.5% | 42.1% |
+### Rosetta Accuracy
+
+| Source → Target | GSM8K (n=200) | HumanEval (n=164) | DebugBench (n=100) |
+|-----------------|---------------|-------------------|--------------------|
+| Qwen 7B → Qwen 3B | 82.5% | 66.5% | – |
+| Qwen 7B → Llama 3B | 77.0% | 47.0% | 34.0% |
+| Llama 3B → Qwen 7B | 90.0% | 79.3% | 45.0% |
+| Qwen 7B → Qwen 1.5B | 58.5% | 42.1% | 26.0% |
+
+Target model solo baselines: Qwen 7B = 91.0% / 58.5% / 50.0%. Qwen 3B = 82.5% / 61.0%. Llama 3B = 76.0% / 50.6% / 31.0%. Qwen 1.5B = 62.0%.
 
 Accuracy is bounded by the target model's own capability. Advisory quality gate included for prompts >300 tokens where projection degrades.
+
+### Rosetta vs Text Cross-Model
+
+| Direction | Benchmark | Rosetta | Text | Delta |
+|-----------|-----------|---------|------|-------|
+| Qwen 7B → Llama 3B | GSM8K | 77.0% | **86.5%** | text +9.5pp |
+| Llama 3B → Qwen 7B | GSM8K | **90.0%** | 82.0% | rosetta +8.0pp |
+| Qwen 7B → Llama 3B | HumanEval | 47.0% | **57.9%** | text +10.9pp |
+| Llama 3B → Qwen 7B | HumanEval | **79.3%** | 61.6% | rosetta +17.7pp |
+| Qwen 7B → Llama 3B | DebugBench | 34.0% | **44.0%** | text +10.0pp |
+| Llama 3B → Qwen 7B | DebugBench | **45.0%** | 40.0% | rosetta +5.0pp |
+
+Direction matters: rosetta beats text when the stronger model is the solver. Text wins when the weaker model is the solver.
 
 ---
 
