@@ -302,13 +302,20 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 device=original_meta.seq_lens.device,
             )
 
+            # Clone tensors to avoid corrupting original metadata.
+            # Flash attention may modify seq_lens in-place, and the original
+            # metadata is still used by the model runner after our forward()
+            # returns (e.g., for KV connector stats, scheduler updates).
+            seq_lens_clone = original_meta.seq_lens.clone()
+            block_table_clone = original_meta.block_table.clone()
+
             return FlashAttentionMetadata(
-                num_actual_tokens=num_reqs,
+                num_actual_tokens=1,  # single token per step
                 max_query_len=1,
                 query_start_loc=query_start_loc,
-                max_seq_len=int(original_meta.seq_lens.max().item()),
-                seq_lens=original_meta.seq_lens,
-                block_table=original_meta.block_table,
+                max_seq_len=int(seq_lens_clone.max().item()),
+                seq_lens=seq_lens_clone,
+                block_table=block_table_clone,
                 slot_mapping=slot_mapping_1tok,
                 use_cascade=False,
                 common_prefix_len=0,
