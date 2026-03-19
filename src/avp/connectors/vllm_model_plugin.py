@@ -244,7 +244,13 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     logger.info("AVP: profiling phase complete, latent steps enabled")
                 else:
                     return False
-            return seq_len > _PREFILL_SEQ_LEN_THRESHOLD
+            should = seq_len > _PREFILL_SEQ_LEN_THRESHOLD
+            if not should and self._avp_forward_count < 20:
+                logger.info(
+                    "AVP _should_think: seq_len=%d, threshold=%d, result=%s",
+                    seq_len, _PREFILL_SEQ_LEN_THRESHOLD, should,
+                )
+            return should
 
         def forward(
             self,
