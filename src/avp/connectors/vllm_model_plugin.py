@@ -82,7 +82,6 @@ def _make_latent_model_cls(base_cls: type) -> type:
     class _AVPLatentModel(base_cls):
 
         def __init__(self, *, vllm_config=None, prefix: str = "", **kwargs):
-            self._avp_initialized = False
             self._num_latent_steps = int(
                 os.environ.get("AVP_LATENT_STEPS", str(_DEFAULT_LATENT_STEPS))
             )
@@ -109,7 +108,6 @@ def _make_latent_model_cls(base_cls: type) -> type:
             self._w_realign = None
             self._target_norm = None
 
-            self._avp_initialized = True
             logger.info(
                 "AVPLatentModel(%s) initialized with %d latent steps, block_size=%d",
                 base_cls.__name__, self._num_latent_steps, self._block_size,
@@ -392,6 +390,21 @@ def _make_latent_model_cls(base_cls: type) -> type:
             # Extract original attention metadata from first layer
             first_layer_name = next(iter(attn_metadata))
             original_meta = attn_metadata[first_layer_name]
+
+            # Guard: skip latent steps for multi-request batches.
+            # In vLLM v1, mixed prefill+decode batches are common. Our latent
+            # loop only handles single-request prefill correctly -- positions[-1]
+            # and hidden_states[-1:] would refer to the wrong request, and
+            # block_table[0] would reference a different request's KV slots.
+            num_reqs = getattr(original_meta, "num_actual_tokens", None)
+            meta_seq_lens = original_meta.seq_lens
+            actual_num_reqs = int((meta_seq_lens > 0).sum().item()) if meta_seq_lens is not None else 1
+            if actual_num_reqs > 1:
+                logger.debug(
+                    "Skipping latent steps: batch has %d requests (only single-request supported)",
+                    actual_num_reqs,
+                )
+                return hidden_states
 
             # Overwrite position: last token's position (reuse same KV slot)
             last_position = positions[-1]

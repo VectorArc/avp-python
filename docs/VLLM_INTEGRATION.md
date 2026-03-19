@@ -82,7 +82,7 @@ During prefill, the model plugin runs N additional forward passes after the init
 3. Feed the projected embedding as the next input at the same position (overwrite pattern)
 4. Repeat N times
 
-This builds reasoning state in the KV-cache without generating text tokens. The overwrite pattern means the KV-cache grows by N entries (one per step).
+This builds reasoning state in the KV-cache without generating text tokens. The overwrite pattern refines the last position's KV-cache entry N times without growing the sequence length.
 
 The model plugin is registered as `AVPLatentQwen2ForCausalLM` via the `vllm.general_plugins` entry point. It wraps vLLM's `Qwen2ForCausalLM` with the latent loop.
 

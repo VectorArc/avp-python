@@ -245,77 +245,6 @@ def _extract_kv_from_layer(tensor: Any) -> Tuple[Any, Any]:
         )
 
 
-def _inject_kv_into_layer(
-    kv_cache: Any,
-    layer_idx: int,
-    k_tensor: Any,
-    v_tensor: Any,
-    slot_mapping: Optional[Any] = None,
-) -> None:
-    """Inject K and V tensors into a vLLM KV cache layer.
-
-    Args:
-        kv_cache: The vLLM KV cache tensor for this layer.
-        layer_idx: Layer index (for logging).
-        k_tensor: Key tensor [num_kv_heads, seq_len, head_dim].
-        v_tensor: Value tensor [num_kv_heads, seq_len, head_dim].
-        slot_mapping: Optional slot mapping for PagedAttention injection.
-    """
-    import torch
-
-    if slot_mapping is not None:
-        # PagedAttention: scatter into correct slots
-        # kv_cache shape depends on backend, but typically:
-        # [num_blocks, block_size, num_kv_heads, head_dim] for each of K and V
-        # or [num_blocks, 2, num_kv_heads, block_size, head_dim]
-        layout = _detect_kv_layout(kv_cache)
-
-        seq_len = k_tensor.shape[1] if k_tensor.dim() == 3 else k_tensor.shape[0]
-        device = kv_cache.device
-
-        k_src = k_tensor.to(device)
-        v_src = v_tensor.to(device)
-        mapping = slot_mapping.to(device)
-
-        # Ensure mapping covers our sequence
-        effective_len = min(seq_len, mapping.shape[0])
-
-        for i in range(effective_len):
-            slot = mapping[i].item()
-            if slot < 0:
-                continue
-
-            if layout == "stacked_5d":
-                block_idx = slot // kv_cache.shape[3]
-                offset = slot % kv_cache.shape[3]
-                if k_src.dim() == 3:
-                    kv_cache[block_idx, 0, :, offset, :] = k_src[:, i, :]
-                    kv_cache[block_idx, 1, :, offset, :] = v_src[:, i, :]
-            else:
-                logger.warning(
-                    "Unsupported KV cache layout for slot injection at layer %d",
-                    layer_idx,
-                )
-                return
-    else:
-        # Direct copy (contiguous buffer)
-        layout = _detect_kv_layout(kv_cache)
-        if layout == "stacked_5d" and kv_cache.shape[0] == 1:
-            device = kv_cache.device
-            seq_len = k_tensor.shape[1] if k_tensor.dim() == 3 else k_tensor.shape[0]
-            kv_cache[0, 0, :, :seq_len, :] = k_tensor.to(device)
-            kv_cache[0, 1, :, :seq_len, :] = v_tensor.to(device)
-        elif layout == "stacked_4d":
-            device = kv_cache.device
-            seq_len = k_tensor.shape[1] if k_tensor.dim() == 3 else k_tensor.shape[0]
-            kv_cache[0, :, :seq_len, :] = k_tensor.to(device)
-            kv_cache[1, :, :seq_len, :] = v_tensor.to(device)
-        else:
-            logger.warning(
-                "Cannot inject into KV cache with layout %s at layer %d",
-                layout, layer_idx,
-            )
-
 
 # ---------------------------------------------------------------------------
 # Main connector
@@ -425,11 +354,13 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             # vLLM 0.17 passes the entire paged KV buffer for the layer,
             # not a per-request slice. We cannot extract per-request data
             # without the block table. Log and skip.
-            logger.debug(
-                "Skipping save for %s: unrecognized layout shape=%s "
-                "(likely full paged KV buffer)",
-                layer_name, kv_tensor.shape,
-            )
+            if not getattr(self, "_unknown_layout_warned", False):
+                logger.warning(
+                    "Skipping KV save: unrecognized layout shape=%s "
+                    "(likely full paged KV buffer, per-request extraction not implemented)",
+                    kv_tensor.shape,
+                )
+                self._unknown_layout_warned = True
             return
 
         request_id = self._derive_store_key(attn_metadata)
@@ -556,16 +487,27 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             Tuple of (should_free_blocks, metadata).
             should_free_blocks=False: we may want to keep KV for consumers.
         """
+        # Try both key derivation paths to handle the mismatch between
+        # save_kv_layer (uses attn_metadata → often request_id) and
+        # request_finished (uses request → often prompt_token_ids hash).
         store_key = self._derive_store_key(request)
+        request_id = self._extract_request_id(request)
 
-        # Flush any pending save data
+        # Collect keys to flush outside the lock (avoid holding lock during I/O)
+        keys_to_flush = []
         with self._lock:
-            if store_key in self._pending_saves:
-                self._flush_to_store(store_key)
+            for key in (store_key, request_id):
+                if key in self._pending_saves:
+                    keys_to_flush.append(key)
+
+        for key in keys_to_flush:
+            self._flush_to_store(key)
 
         # Clean up loaded state
         with self._lock:
             self._loaded_keys.pop(store_key, None)
+            if request_id != store_key:
+                self._loaded_keys.pop(request_id, None)
 
         return (False, None)
 
