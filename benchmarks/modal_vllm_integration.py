@@ -20,8 +20,10 @@ image = (
         "transformers>=4.36",
     )
     # Install avp from the engine_integration branch
+    # Cache bust: bump this comment to force re-install: v5
     .pip_install(
-        "git+https://github.com/VectorArc/avp-python.git@engine_integration"
+        "git+https://github.com/VectorArc/avp-python.git@engine_integration",
+        force_build=True,
     )
 )
 

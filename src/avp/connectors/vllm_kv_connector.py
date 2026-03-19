@@ -412,12 +412,27 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             kv_tensor: The KV tensor for this layer.
             attn_metadata: vLLM attention metadata (contains request info).
         """
-        request_id = self._derive_store_key(attn_metadata)
         layer_idx = _parse_layer_index(layer_name)
 
         if layer_idx is None:
-            logger.warning("Cannot parse layer index from %r — skipping save", layer_name)
+            logger.warning("Cannot parse layer index from %r -- skipping save", layer_name)
             return
+
+        # Detect tensor layout
+        layout = _detect_kv_layout(kv_tensor)
+
+        if layout == "unknown":
+            # vLLM 0.17 passes the entire paged KV buffer for the layer,
+            # not a per-request slice. We cannot extract per-request data
+            # without the block table. Log and skip.
+            logger.debug(
+                "Skipping save for %s: unrecognized layout shape=%s "
+                "(likely full paged KV buffer)",
+                layer_name, kv_tensor.shape,
+            )
+            return
+
+        request_id = self._derive_store_key(attn_metadata)
 
         try:
             with self._lock:
@@ -426,7 +441,6 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                 self._pending_saves[request_id][layer_idx] = kv_tensor.clone()
 
                 # Track sequence length from tensor shape
-                layout = _detect_kv_layout(kv_tensor)
                 if layout == "stacked_5d":
                     seq_len = kv_tensor.shape[3]
                     if kv_tensor.shape[0] > 1:
@@ -643,14 +657,13 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         """Return block IDs that failed to load (none for Phase 1)."""
         return set()
 
-    def get_kv_connector_stats(self, **kwargs) -> Dict[str, Any]:
-        """Return connector statistics."""
-        with self._lock:
-            return {
-                "pending_saves": len(self._pending_saves),
-                "loaded_requests": len(self._loaded_keys),
-                "store_dir": str(self._store._dir),
-            }
+    def get_kv_connector_stats(self, **kwargs) -> Any:
+        """Return connector statistics.
+
+        vLLM 0.17 expects KVConnectorStats | None. Returning None
+        opts out of stats aggregation.
+        """
+        return None
 
     # ----- Helpers -----
 

@@ -419,13 +419,10 @@ class TestRequestFinished:
 
 
 class TestStats:
-    def test_get_stats(self, connector):
+    def test_get_stats_returns_none(self, connector):
+        """get_kv_connector_stats returns None (vLLM 0.17 KVConnectorStats compat)."""
         stats = connector.get_kv_connector_stats()
-        assert "pending_saves" in stats
-        assert "loaded_requests" in stats
-        assert "store_dir" in stats
-        assert stats["pending_saves"] == 0
-        assert stats["loaded_requests"] == 0
+        assert stats is None
 
 
 class TestStubMethods:
