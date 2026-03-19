@@ -355,7 +355,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             self._role = role
 
         # Bridge latent steps config to model plugin via env var
-        latent_steps = self._extra_config.get("avp_latent_steps", 10)
+        latent_steps = self._extra_config.get("avp_latent_steps", 20)
         os.environ["AVP_LATENT_STEPS"] = str(latent_steps)
 
         # Initialize store

@@ -21,7 +21,7 @@ engine = LLM(
     kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
     kv_role="kv_both",
     kv_connector_extra_config={
-        "avp_latent_steps": 10,     # number of latent thinking steps
+        "avp_latent_steps": 20,     # number of latent thinking steps
         "avp_store_dir": "/tmp/avp_kv_store",  # KV file store location
     },
 )
@@ -46,7 +46,7 @@ All configuration is passed via `kv_connector_extra_config`:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `avp_latent_steps` | `10` | Number of latent thinking steps during prefill. Set to `0` to disable. |
+| `avp_latent_steps` | `20` | Number of latent thinking steps during prefill. Set to `0` to disable. |
 | `avp_store_dir` | `/tmp/avp_kv_store` | Directory for file-based KV store. |
 
 The `avp_latent_steps` value is bridged to the model plugin via the `AVP_LATENT_STEPS` environment variable.
@@ -113,7 +113,7 @@ AVPKVConnectorV1Dynamic initialized: store=/tmp/avp_kv_store, latent_steps=10
 Latent step timing is logged at DEBUG level:
 
 ```
-Latent thinking: 10 steps in 45.2ms (4.5ms/step)
+Latent thinking: 20 steps in 90.4ms (4.5ms/step)
 ```
 
 ## Running Integration Tests

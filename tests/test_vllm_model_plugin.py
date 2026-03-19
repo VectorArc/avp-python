@@ -269,4 +269,4 @@ class TestRegistration:
 
         from avp.connectors.vllm_model_plugin import _DEFAULT_LATENT_STEPS
 
-        assert _DEFAULT_LATENT_STEPS == 10
+        assert _DEFAULT_LATENT_STEPS == 20

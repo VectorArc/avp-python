@@ -304,7 +304,7 @@ def test_latent_thinking_end_to_end():
             kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
             kv_role="kv_both",
             kv_connector_extra_config={
-                "avp_latent_steps": 5,
+                "avp_latent_steps": 20,
                 "avp_store_dir": tmpdir,
             },
         )
