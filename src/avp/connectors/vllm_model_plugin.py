@@ -152,7 +152,11 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 embed = self._get_embed_weight()
                 if embed is not None:
                     self._embed_weight = embed.detach()
-                    self._target_norm = embed.detach().to(torch.float32).norm(dim=1).mean()
+                    # Compute target norm on CPU to avoid GPU OOM
+                    self._target_norm = (
+                        embed.detach().to(device="cpu", dtype=torch.float32)
+                        .norm(dim=1).mean().to(device=str(embed.device))
+                    )
                 else:
                     logger.warning("Cannot access embedding weights -- latent steps disabled")
                     self._num_latent_steps = 0
@@ -161,9 +165,11 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     embed_in = self._get_embed_weight()
                     lm_head_weight = self._get_lm_head_weight()
                     if embed_in is not None and lm_head_weight is not None:
-                        device = str(embed_in.device)
-                        in_w = embed_in.detach().to(device=device, dtype=torch.float32)
-                        out_w = lm_head_weight.detach().to(device=device, dtype=torch.float32)
+                        # Compute realignment on CPU to avoid GPU OOM.
+                        # For 7B, the float32 matmuls need ~2 GB transient.
+                        gpu_device = str(embed_in.device)
+                        in_w = embed_in.detach().to(device="cpu", dtype=torch.float32)
+                        out_w = lm_head_weight.detach().to(device="cpu", dtype=torch.float32)
                         min_vocab = min(in_w.shape[0], out_w.shape[0])
                         in_w = in_w[:min_vocab]
                         out_w = out_w[:min_vocab]
@@ -173,8 +179,10 @@ def _make_latent_model_cls(base_cls: type) -> type:
                         )
                         gram = gram + reg
                         rhs = torch.matmul(out_w.T, in_w)
-                        self._w_realign = torch.linalg.solve(gram, rhs)
-                        self._target_norm = in_w.norm(dim=1).mean().detach()
+                        w_realign = torch.linalg.solve(gram, rhs)
+                        # Move result back to GPU (small: hidden_dim x hidden_dim)
+                        self._w_realign = w_realign.to(device=gpu_device)
+                        self._target_norm = in_w.norm(dim=1).mean().detach().to(device=gpu_device)
                     else:
                         logger.warning("Cannot access embedding/lm_head weights -- disabled")
                         self._num_latent_steps = 0
@@ -390,6 +398,8 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     self._num_latent_steps = 0
                     return hidden_states
 
+            # Re-read N after projection setup (setup may have disabled steps on OOM)
+            N = self._num_latent_steps
             if N <= 0:
                 return hidden_states
 

@@ -142,7 +142,7 @@ def run_gsm8k_benchmark(n_problems: int = 50, latent_steps: int = 20):
             model=MODEL,
             enforce_eager=True,
             max_model_len=2048,
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=0.85,
             kv_transfer_config=ktc,
         )
 
@@ -209,7 +209,7 @@ def run_gsm8k_benchmark(n_problems: int = 50, latent_steps: int = 20):
             model=MODEL,
             enforce_eager=True,
             max_model_len=2048,
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=0.85,
             kv_transfer_config=ktc,
             hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
         )
