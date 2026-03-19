@@ -279,43 +279,42 @@ def _make_latent_model_cls(base_cls: type) -> type:
             return self._is_prefill()
 
         def _build_latent_attn_metadata(
-            self, original_meta: Any, slot_mapping_1tok: Any
+            self, original_meta: Any, slot_mapping_1tok: Any, num_reqs: int = 1,
         ) -> Any:
             """Build decode-like FlashAttentionMetadata for a single-token step.
 
-            Reuses block_table and seq_lens from the original prefill metadata,
-            but sets max_query_len=1 and uses the overwrite slot_mapping.
+            Creates metadata for exactly ``num_reqs`` requests (default 1),
+            each with 1 query token (decode-like). Uses block_table and
+            seq_lens from the original prefill, sliced to ``num_reqs``.
             """
             import torch
 
             try:
                 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
             except ImportError:
-                # If flash_attn backend not available, try to copy the original
-                logger.warning("FlashAttentionMetadata not importable -- cannot build latent metadata")
+                logger.warning("FlashAttentionMetadata not importable")
                 return None
 
-            num_reqs = original_meta.seq_lens.shape[0]
-            # query_start_loc for decode: [0, 1, 2, ..., num_reqs]
+            device = original_meta.seq_lens.device
+
+            # query_start_loc for decode: [0, 1, ..., num_reqs]
             query_start_loc = torch.arange(
-                num_reqs + 1, dtype=torch.int32,
-                device=original_meta.seq_lens.device,
+                num_reqs + 1, dtype=torch.int32, device=device,
             )
 
-            # Clone tensors to avoid corrupting original metadata.
-            # Flash attention may modify seq_lens in-place, and the original
-            # metadata is still used by the model runner after our forward()
-            # returns (e.g., for KV connector stats, scheduler updates).
-            seq_lens_clone = original_meta.seq_lens.clone()
-            block_table_clone = original_meta.block_table.clone()
+            # Slice and clone to avoid padding and in-place corruption.
+            # vLLM pads seq_lens/block_table to num_reqs_padded, but we
+            # only process num_reqs actual requests.
+            seq_lens = original_meta.seq_lens[:num_reqs].clone()
+            block_table = original_meta.block_table[:num_reqs].clone()
 
             return FlashAttentionMetadata(
-                num_actual_tokens=1,  # single token per step
+                num_actual_tokens=num_reqs,  # 1 token per request
                 max_query_len=1,
                 query_start_loc=query_start_loc,
-                max_seq_len=int(seq_lens_clone.max().item()),
-                seq_lens=seq_lens_clone,
-                block_table=block_table_clone,
+                max_seq_len=int(seq_lens.max().item()),
+                seq_lens=seq_lens,
+                block_table=block_table,
                 slot_mapping=slot_mapping_1tok,
                 use_cascade=False,
                 common_prefix_len=0,
@@ -405,8 +404,11 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 [slot_idx], dtype=torch.int64, device=positions.device,
             )
 
-            # Build decode-like attention metadata for latent steps
-            latent_meta = self._build_latent_attn_metadata(original_meta, slot_mapping_1tok)
+            # Build decode-like attention metadata for latent steps.
+            # Currently single-request only (num_reqs=1).
+            latent_meta = self._build_latent_attn_metadata(
+                original_meta, slot_mapping_1tok, num_reqs=1,
+            )
             if latent_meta is None:
                 return hidden_states
 
@@ -417,8 +419,12 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             num_tokens = hidden_states.shape[0]
             logger.info(
-                "Latent thinking: num_tokens=%d, overwrite_pos=%d, slot=%d",
+                "Latent thinking: num_tokens=%d, overwrite_pos=%d, slot=%d, "
+                "meta.num_actual_tokens=%s, meta.seq_lens=%s, meta.seq_lens.shape=%s",
                 num_tokens, int(last_position), slot_idx,
+                getattr(original_meta, "num_actual_tokens", "?"),
+                original_meta.seq_lens[:4].tolist(),
+                original_meta.seq_lens.shape,
             )
 
             # Save original hidden states -- we'll replace only the last position
