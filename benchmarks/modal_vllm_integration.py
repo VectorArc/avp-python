@@ -68,6 +68,7 @@ def run_vllm_integration_tests():
                 max_model_len=256,
                 gpu_memory_utilization=0.5,
                 kv_transfer_config=ktc,
+                hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
             )
 
             params = vllm.SamplingParams(max_tokens=100, temperature=0.0)
@@ -183,6 +184,7 @@ def run_vllm_integration_tests():
                 max_model_len=256,
                 gpu_memory_utilization=0.5,
                 kv_transfer_config=ktc_multi,
+                hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
             )
 
             params = vllm.SamplingParams(max_tokens=50, temperature=0.0)

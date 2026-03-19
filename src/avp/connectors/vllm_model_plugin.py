@@ -25,8 +25,14 @@ _PREFILL_SEQ_LEN_THRESHOLD = 2  # seq_len > this triggers thinking (skip decode)
 def register():
     """Entry point called by vLLM's plugin system.
 
-    Registers AVPLatentQwen2ForCausalLM as a model override. This function
-    is referenced in pyproject.toml under ``[project.entry-points."vllm.general_plugins"]``.
+    Registers AVPLatentQwen2ForCausalLM in two ways:
+
+    1. Always registers under ``"AVPLatentQwen2ForCausalLM"`` so users can
+       activate via ``hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]}``.
+
+    2. If ``AVP_OVERRIDE_QWEN2=1``, also overrides the built-in
+       ``"Qwen2ForCausalLM"`` entry so all Qwen2 models automatically use
+       latent thinking without any ``hf_overrides``.
 
     Uses string-form registration ("module:ClassName") for lazy loading to
     avoid CUDA re-initialization issues in vLLM worker processes.
@@ -37,15 +43,20 @@ def register():
         logger.warning("vLLM ModelRegistry not available -- AVP model plugin not registered")
         return
 
-    # Use string form for lazy loading (avoids CUDA re-init in workers)
-    ModelRegistry.register_model(
-        "AVPLatentQwen2ForCausalLM",
-        "avp.connectors.vllm_model_plugin:AVPLatentQwen2ForCausalLM",
-    )
+    _cls_path = "avp.connectors.vllm_model_plugin:AVPLatentQwen2ForCausalLM"
+
+    # Always register under custom name (activated via hf_overrides)
+    ModelRegistry.register_model("AVPLatentQwen2ForCausalLM", _cls_path)
+
+    # Optionally override built-in Qwen2 (opt-in via env var)
+    override_qwen2 = os.environ.get("AVP_OVERRIDE_QWEN2", "0") == "1"
+    if override_qwen2:
+        ModelRegistry.register_model("Qwen2ForCausalLM", _cls_path)
+
     logger.info(
-        "AVP latent model plugin registered: AVPLatentQwen2ForCausalLM "
-        "(latent_steps=%s)",
+        "AVP latent model plugin registered (latent_steps=%s, override_qwen2=%s)",
         os.environ.get("AVP_LATENT_STEPS", str(_DEFAULT_LATENT_STEPS)),
+        override_qwen2,
     )
 
 

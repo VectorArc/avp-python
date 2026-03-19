@@ -30,6 +30,8 @@ engine = LLM(
     model="Qwen/Qwen2.5-7B-Instruct",
     enforce_eager=True,  # recommended for initial use
     kv_transfer_config=ktc,
+    # Activate latent thinking model wrapper
+    hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
 )
 
 params = SamplingParams(max_tokens=256, temperature=0.7)
@@ -41,6 +43,17 @@ Or via CLI:
 
 ```bash
 vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --enforce-eager \
+  --kv-connector AVPKVConnectorV1Dynamic \
+  --kv-connector-module-path avp.connectors.vllm_kv_connector \
+  --kv-connector-extra-config '{"avp_latent_steps": 20}' \
+  --hf-overrides '{"architectures": ["AVPLatentQwen2ForCausalLM"]}'
+```
+
+Alternatively, set `AVP_OVERRIDE_QWEN2=1` to override all Qwen2 model loads globally (no `hf_overrides` needed):
+
+```bash
+AVP_OVERRIDE_QWEN2=1 vllm serve Qwen/Qwen2.5-7B-Instruct \
   --enforce-eager \
   --kv-connector AVPKVConnectorV1Dynamic \
   --kv-connector-module-path avp.connectors.vllm_kv_connector \
