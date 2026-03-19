@@ -218,10 +218,18 @@ def run_gsm8k_benchmark(n_problems: int = 50, latent_steps: int = 20):
             max_tokens=512, temperature=0.7, top_p=0.95, seed=42,
         )
 
-        # Run latent
+        # Run latent -- ONE request at a time to ensure latent steps fire.
+        # vLLM batches concurrent requests, and our latent loop only handles
+        # single-request batches. Processing sequentially ensures every
+        # request gets its latent steps.
         t0 = time.time()
-        prompts = [vllm.TokensPrompt(prompt_token_ids=ids) for ids in padded_ids]
-        outputs = engine.generate(prompts, params)
+        outputs = []
+        for i, ids in enumerate(padded_ids):
+            prompt = vllm.TokensPrompt(prompt_token_ids=ids)
+            out = engine.generate([prompt], params)
+            outputs.extend(out)
+            if (i + 1) % 10 == 0:
+                print(f"  Latent progress: {i + 1}/{len(padded_ids)}")
         latent_time = time.time() - t0
 
         latent_mem_peak = torch.cuda.max_memory_allocated() / 1e9
