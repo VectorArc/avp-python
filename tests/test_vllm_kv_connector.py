@@ -518,3 +518,62 @@ class TestExtractRequestId:
         """DBO mode passes attn_metadata as list."""
         items = [MockAttnMetadata("req-dbo")]
         assert connector._extract_request_id(items) == "req-dbo"
+
+
+class TestDeriveStoreKey:
+    def test_uses_prompt_token_ids_when_available(self, connector):
+        """Store key is derived from prompt tokens, not request_id."""
+        from avp.connectors.vllm_kv_connector import compute_request_hash
+
+        req = MockRequest("req-123", prompt_token_ids=[10, 20, 30])
+        key = connector._derive_store_key(req)
+        assert key == compute_request_hash([10, 20, 30])
+        assert key != "req-123"
+
+    def test_falls_back_to_request_id(self, connector):
+        """Without prompt_token_ids, falls back to request_id."""
+        req = MockRequest("req-fallback")
+        key = connector._derive_store_key(req)
+        assert key == "req-fallback"
+
+    def test_producer_consumer_keys_match(self, connector):
+        """Producer and consumer derive the same key for same prompt."""
+        from avp.connectors.vllm_kv_connector import compute_request_hash
+
+        prompt_ids = [1, 2, 3, 4, 5]
+        expected_key = compute_request_hash(prompt_ids)
+
+        # Producer side (attn_metadata with prompt_token_ids)
+        producer_meta = MockRequest("req-prod", prompt_token_ids=prompt_ids)
+        producer_key = connector._derive_store_key(producer_meta)
+
+        # Consumer side (request with same prompt_token_ids)
+        consumer_req = MockRequest("req-cons", prompt_token_ids=prompt_ids)
+        consumer_key = connector._derive_store_key(consumer_req)
+
+        assert producer_key == expected_key
+        assert consumer_key == expected_key
+        assert producer_key == consumer_key
+
+
+class TestMultiBlockExtraction:
+    def test_multi_block_5d_data_integrity(self):
+        """Multi-block extraction preserves data correctly."""
+        from avp.connectors.vllm_kv_connector import _extract_kv_from_layer
+
+        # 3 blocks, 2 (K/V), 4 heads, 8 tokens per block, 16 head_dim
+        num_blocks, num_heads, tokens_per_block, head_dim = 3, 4, 8, 16
+        t = torch.randn(num_blocks, 2, num_heads, tokens_per_block, head_dim)
+
+        k, v = _extract_kv_from_layer(t)
+
+        # Shape: [num_heads, total_tokens, head_dim]
+        assert k.shape == (num_heads, num_blocks * tokens_per_block, head_dim)
+        assert v.shape == (num_heads, num_blocks * tokens_per_block, head_dim)
+
+        # Verify data from each block is in the correct position
+        for block_idx in range(num_blocks):
+            start = block_idx * tokens_per_block
+            end = start + tokens_per_block
+            assert torch.allclose(k[:, start:end, :], t[block_idx, 0])
+            assert torch.allclose(v[:, start:end, :], t[block_idx, 1])

@@ -219,10 +219,13 @@ def _extract_kv_from_layer(tensor: Any) -> Tuple[Any, Any]:
             k = tensor[0, 0]  # [num_kv_heads, tokens, head_dim]
             v = tensor[0, 1]
         else:
-            # Multiple blocks: concatenate along token dimension
-            k = tensor[:, 0].reshape(-1, tensor.shape[2], tensor.shape[4])
-            # Reshape: [blocks * tokens, kv_heads, head_dim] -> wrong
-            # Actually: [blocks, kv_heads, tokens, head_dim] -> [kv_heads, blocks*tokens, head_dim]
+            # Multiple blocks: concatenate along token dimension.
+            # NOTE: assumes blocks are in logical (not physical) order.
+            # In vLLM's paged attention, the caller must reorder blocks
+            # via block_table before passing to this function.
+            # tensor[:, 0] -> [blocks, kv_heads, tokens, head_dim]
+            # permute(1,0,2,3) -> [kv_heads, blocks, tokens, head_dim]
+            # reshape -> [kv_heads, blocks*tokens, head_dim]
             k = tensor[:, 0].permute(1, 0, 2, 3).reshape(
                 tensor.shape[2], -1, tensor.shape[4]
             )
@@ -405,7 +408,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             kv_tensor: The KV tensor for this layer.
             attn_metadata: vLLM attention metadata (contains request info).
         """
-        request_id = self._extract_request_id(attn_metadata)
+        request_id = self._derive_store_key(attn_metadata)
         layer_idx = _parse_layer_index(layer_name)
 
         if layer_idx is None:
@@ -486,13 +489,12 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         if forward_context is None:
             return
 
-        request_id = self._extract_request_id(forward_context)
-        if not request_id:
+        store_key = self._derive_store_key(forward_context)
+        if not store_key:
             return
 
-        store_key = request_id
-
         if self._store.has_key(store_key):
+            request_id = self._extract_request_id(forward_context)
             with self._lock:
                 self._loaded_keys[request_id] = store_key
             logger.debug("Found KV data for request %s (key=%s)", request_id, store_key)
@@ -536,16 +538,16 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             Tuple of (should_free_blocks, metadata).
             should_free_blocks=False: we may want to keep KV for consumers.
         """
-        request_id = self._extract_request_id(request)
+        store_key = self._derive_store_key(request)
 
         # Flush any pending save data
         with self._lock:
-            if request_id in self._pending_saves:
-                self._flush_to_store(request_id)
+            if store_key in self._pending_saves:
+                self._flush_to_store(store_key)
 
         # Clean up loaded state
         with self._lock:
-            self._loaded_keys.pop(request_id, None)
+            self._loaded_keys.pop(store_key, None)
 
         return (False, None)
 
@@ -663,7 +665,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             if hasattr(first, "request_id"):
                 return str(first.request_id)
 
-        # FRAGILE(vllm): F5 — DBO mode attn_metadata as list
+        # FRAGILE(vllm): F5 -- DBO mode attn_metadata as list
         if isinstance(obj, list) and obj:
             return self._extract_request_id(obj[0])
 
@@ -672,6 +674,28 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             return obj
 
         return "default"
+
+    def _derive_store_key(self, obj: Any) -> str:
+        """Derive a consistent store key from a vLLM object.
+
+        Uses prompt_token_ids hash when available (content-addressable),
+        falls back to request_id. Both producer and consumer must use
+        this method to ensure matching keys.
+        """
+        # Try prompt_token_ids for content-addressable lookup
+        prompt_ids = getattr(obj, "prompt_token_ids", None)
+        if prompt_ids:
+            return compute_request_hash(prompt_ids)
+
+        # Forward context with requests list
+        if hasattr(obj, "requests") and obj.requests:
+            first = obj.requests[0]
+            prompt_ids = getattr(first, "prompt_token_ids", None)
+            if prompt_ids:
+                return compute_request_hash(prompt_ids)
+
+        # Fall back to request_id
+        return self._extract_request_id(obj)
 
 
 # ---------------------------------------------------------------------------
