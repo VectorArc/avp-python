@@ -48,6 +48,9 @@ dev = [
     "grpcio-tools>=1.59",
 ]
 
+[project.entry-points."vllm.general_plugins"]
+avp_latent = "avp.connectors.vllm_model_plugin:register"
+
 [tool.hatch.version]
 path = "src/avp/version.py"
 
