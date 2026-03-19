@@ -413,7 +413,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 (meta_seq_lens > 0).sum().item()
             ) if meta_seq_lens is not None else 1
             if actual_num_reqs > 1:
-                logger.debug(
+                logger.info(
                     "Skipping latent steps: batch has %d requests",
                     actual_num_reqs,
                 )
@@ -427,6 +427,10 @@ def _make_latent_model_cls(base_cls: type) -> type:
             # entries we'll overwrite with latent computation.
             # If num_tokens <= N, the prompt is too short for padding -- skip.
             if num_tokens <= N:
+                logger.info(
+                    "Skipping latent: num_tokens=%d <= N=%d (prompt not padded?)",
+                    num_tokens, N,
+                )
                 return hidden_states
 
             L = num_tokens - N  # real prompt length
@@ -438,7 +442,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
             # Extract block_table for slot computation
             block_table = original_meta.block_table
 
-            logger.debug(
+            logger.info(
                 "Latent thinking (extend): L=%d, N=%d, total=%d",
                 L, N, num_tokens,
             )
@@ -513,7 +517,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             if steps_completed > 0:
-                logger.debug(
+                logger.info(
                     "Latent thinking (extend): %d steps in %.1fms (%.1fms/step)",
                     steps_completed, elapsed_ms,
                     elapsed_ms / steps_completed,
