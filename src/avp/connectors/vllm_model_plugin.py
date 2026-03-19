@@ -94,6 +94,13 @@ def _make_latent_model_cls(base_cls: type) -> type:
             self._w_realign = None
             self._target_norm = None
 
+            # Skip latent steps during vLLM profiling (profile_run).
+            # Profiling runs forward() with dummy inputs to measure GPU memory.
+            # The latent loop on garbage inputs corrupts CUDA state.
+            # Set to True after the first real forward pass succeeds.
+            self._avp_profiling_done = False
+            self._avp_forward_count = 0
+
             self._avp_initialized = True
             logger.info(
                 "AVPLatentModel(%s) initialized with %d latent steps",
@@ -218,9 +225,25 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 )
 
         def _should_think(self, seq_len: int) -> bool:
-            """Only think during prefill (seq_len > threshold), not decode."""
+            """Only think during prefill (seq_len > threshold), not decode.
+
+            Also skips latent steps during vLLM's profiling phase.
+            vLLM calls forward() with dummy inputs during _initialize_kv_caches
+            to measure GPU memory. Running the latent loop on garbage inputs
+            corrupts CUDA state. We skip the first few forward calls to avoid
+            this. After profiling completes, vLLM starts real inference.
+            """
             if self._num_latent_steps <= 0:
                 return False
+            if not self._avp_profiling_done:
+                self._avp_forward_count += 1
+                # vLLM profiling typically runs 1-3 forward passes.
+                # After 5 calls, assume profiling is done.
+                if self._avp_forward_count > 5:
+                    self._avp_profiling_done = True
+                    logger.info("AVP: profiling phase complete, latent steps enabled")
+                else:
+                    return False
             return seq_len > _PREFILL_SEQ_LEN_THRESHOLD
 
         def forward(
@@ -372,6 +395,10 @@ class _AVPLatentStub:
         self._embed_weight = None
         self._w_realign = None
         self._target_norm = None
+
+        # Stub skips profiling guard (tests represent real inference)
+        self._avp_profiling_done = True
+        self._avp_forward_count = 0
 
     def _setup_projection(self):
         """Detect tied/untied weights and cache projection state."""
