@@ -272,9 +272,15 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 **kwargs,
             )
 
-            # Determine sequence length for prefill detection
+            # Determine sequence length for prefill detection.
+            # vLLM v1 passes 1D input_ids (flattened across sequences).
+            # shape[-1] gives total tokens. For prefill, this is >> 1.
+            # For decode, this is the number of active sequences (1 token each).
             if input_ids is not None:
-                seq_len = input_ids.shape[-1] if hasattr(input_ids, "shape") else 1
+                if hasattr(input_ids, "shape"):
+                    seq_len = input_ids.shape[0] if input_ids.dim() == 1 else input_ids.shape[-1]
+                else:
+                    seq_len = 1
             elif inputs_embeds is not None:
                 seq_len = inputs_embeds.shape[-2] if hasattr(inputs_embeds, "shape") else 1
             else:
@@ -282,6 +288,11 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             if not self._should_think(seq_len):
                 return hidden_states
+
+            logger.info(
+                "Latent thinking triggered: seq_len=%d, input_ids.shape=%s",
+                seq_len, input_ids.shape if input_ids is not None else "None",
+            )
 
             # Lazy projection setup
             if not self._projection_ready:
