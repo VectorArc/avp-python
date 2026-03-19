@@ -277,13 +277,15 @@ def _make_latent_model_cls(base_cls: type) -> type:
             return self._is_prefill()
 
         def _build_latent_attn_metadata(
-            self, original_meta: Any, slot_mapping_1tok: Any, num_reqs: int = 1,
+            self, original_meta: Any, slot_mapping_1tok: Any,
+            seq_len_override: int = 0,
         ) -> Any:
             """Build decode-like FlashAttentionMetadata for a single-token step.
 
-            Creates metadata for exactly ``num_reqs`` requests (default 1),
-            each with 1 query token (decode-like). Uses block_table and
-            seq_lens from the original prefill, sliced to ``num_reqs``.
+            Creates metadata for 1 request with 1 query token (decode-like).
+            Uses block_table from the original prefill. If ``seq_len_override``
+            is provided, uses that as the sequence length (for extend pattern
+            where seq_lens grows each step).
             """
             import torch
 
@@ -295,19 +297,21 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             device = original_meta.seq_lens.device
 
-            # query_start_loc for decode: [0, 1, ..., num_reqs]
-            query_start_loc = torch.arange(
-                num_reqs + 1, dtype=torch.int32, device=device,
-            )
+            # query_start_loc for decode with 1 request: [0, 1]
+            query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
 
-            # Slice and clone to avoid padding and in-place corruption.
-            # vLLM pads seq_lens/block_table to num_reqs_padded, but we
-            # only process num_reqs actual requests.
-            seq_lens = original_meta.seq_lens[:num_reqs].clone()
-            block_table = original_meta.block_table[:num_reqs].clone()
+            # Use override seq_len if provided, otherwise from original metadata
+            if seq_len_override > 0:
+                seq_lens = torch.tensor(
+                    [seq_len_override], dtype=original_meta.seq_lens.dtype, device=device,
+                )
+            else:
+                seq_lens = original_meta.seq_lens[:1].clone()
+
+            block_table = original_meta.block_table[:1].clone()
 
             return FlashAttentionMetadata(
-                num_actual_tokens=num_reqs,  # 1 token per request
+                num_actual_tokens=1,
                 max_query_len=1,
                 query_start_loc=query_start_loc,
                 max_seq_len=int(seq_lens.max().item()),
@@ -340,17 +344,29 @@ def _make_latent_model_cls(base_cls: type) -> type:
             inputs_embeds: Optional[Any] = None,
             **kwargs,
         ) -> Any:
-            """Forward pass with optional latent thinking steps.
+            """Forward pass with optional latent thinking steps (extend pattern).
 
-            On prefill, runs N additional forward passes using the overwrite
-            pattern. Between steps, sets a new ForwardContext with decode-like
-            attention metadata so the attention kernels see consistent shapes.
+            The prompt must be padded with N dummy tokens before submission.
+            The scheduler then allocates KV blocks for L+N positions, and
+            ``seq_lens = L+N`` during decode -- so ALL decode tokens attend
+            to ALL latent entries.
 
-            CRITICAL: Output shape must match input shape. vLLM's model runner
-            indexes hidden_states using logit_indices. The latent loop enriches
-            the last position in-place and returns the original shape.
+            The extend pattern:
+            1. Initial prefill processes L real + N dummy tokens. Causal mask
+               means position L-1's hidden state is unaffected by dummy tokens.
+            2. For each latent step k (0..N-1):
+               - Project hidden state to embedding space
+               - Forward at position L+k (overwrites dummy KV at that slot)
+               - Attention sees prompt (0..L-1) + prior latent steps (L..L+k-1)
+               - This creates the causal chain matching HuggingFace extend
+            3. Replace hidden_states at position L+N-1 (last dummy) with
+               the enriched hidden state for logits computation.
+
+            CRITICAL: Output shape must match input shape [num_tokens, D].
             """
             import torch
+
+            N = self._num_latent_steps
 
             # Initial forward pass (uses existing ForwardContext from model runner)
             hidden_states = base_cls.forward(
@@ -374,7 +390,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     self._num_latent_steps = 0
                     return hidden_states
 
-            if self._num_latent_steps <= 0:
+            if N <= 0:
                 return hidden_states
 
             # Get current ForwardContext for metadata extraction
@@ -391,75 +407,91 @@ def _make_latent_model_cls(base_cls: type) -> type:
             first_layer_name = next(iter(attn_metadata))
             original_meta = attn_metadata[first_layer_name]
 
-            # Guard: skip latent steps for multi-request batches.
-            # In vLLM v1, mixed prefill+decode batches are common. Our latent
-            # loop only handles single-request prefill correctly -- positions[-1]
-            # and hidden_states[-1:] would refer to the wrong request, and
-            # block_table[0] would reference a different request's KV slots.
-            num_reqs = getattr(original_meta, "num_actual_tokens", None)
+            # Guard: skip for multi-request batches (single-request only)
             meta_seq_lens = original_meta.seq_lens
-            actual_num_reqs = int((meta_seq_lens > 0).sum().item()) if meta_seq_lens is not None else 1
+            actual_num_reqs = int(
+                (meta_seq_lens > 0).sum().item()
+            ) if meta_seq_lens is not None else 1
             if actual_num_reqs > 1:
                 logger.debug(
-                    "Skipping latent steps: batch has %d requests (only single-request supported)",
+                    "Skipping latent steps: batch has %d requests",
                     actual_num_reqs,
                 )
                 return hidden_states
 
-            # Overwrite position: last token's position (reuse same KV slot)
-            last_position = positions[-1]
+            num_tokens = hidden_states.shape[0]
 
-            # Compute the physical KV-cache slot for the overwrite position
-            slot_idx = self._compute_overwrite_slot(
-                last_position, original_meta.block_table, req_idx=0,
-            )
-            slot_mapping_1tok = torch.tensor(
-                [slot_idx], dtype=torch.int64, device=positions.device,
-            )
-
-            # Build decode-like attention metadata for latent steps.
-            # Currently single-request only (num_reqs=1).
-            latent_meta = self._build_latent_attn_metadata(
-                original_meta, slot_mapping_1tok, num_reqs=1,
-            )
-            if latent_meta is None:
+            # Determine L (real prompt length) and N (latent steps).
+            # If the prompt was padded with N dummy tokens, num_tokens = L + N.
+            # The last N positions in the prefill are dummy tokens whose KV
+            # entries we'll overwrite with latent computation.
+            # If num_tokens <= N, the prompt is too short for padding -- skip.
+            if num_tokens <= N:
                 return hidden_states
 
-            # Per-layer metadata dict (all layers use the same decode-like metadata)
-            per_layer_meta = {name: latent_meta for name in attn_metadata}
-            # Per-layer slot_mapping dict (for KV cache update via ForwardContext)
-            per_layer_slots = {name: slot_mapping_1tok for name in attn_metadata}
+            L = num_tokens - N  # real prompt length
+
+            # Position L-1's hidden state is identical to HF (causal mask
+            # ensures dummy tokens at positions L..L+N-1 don't affect it)
+            last_hidden = hidden_states[L - 1 : L, :]  # [1, hidden_dim]
+
+            # Extract block_table for slot computation
+            block_table = original_meta.block_table
 
             logger.debug(
-                "Latent thinking: num_tokens=%d, overwrite_pos=%d, slot=%d",
-                hidden_states.shape[0], int(last_position), slot_idx,
+                "Latent thinking (extend): L=%d, N=%d, total=%d",
+                L, N, num_tokens,
             )
 
-            # Save original hidden states -- we'll replace only the last position
+            # Save original hidden states for shape preservation
             original_hidden = hidden_states
 
-            # Extract last hidden state to start the latent loop
-            last_hidden = hidden_states[-1:, :]  # [1, hidden_dim]
-
-            # Latent thinking loop with proper ForwardContext per step
+            # Latent thinking loop (extend pattern)
             t0 = time.monotonic()
             steps_completed = 0
-            for step in range(self._num_latent_steps):
+            for step in range(N):
                 # NaN safety check
                 if torch.isnan(last_hidden).any():
                     logger.warning(
-                        "NaN at latent step %d/%d -- stopping",
-                        step + 1, self._num_latent_steps,
+                        "NaN at latent step %d/%d -- stopping", step + 1, N,
                     )
                     break
 
                 # Project back to embedding space + normalize
                 projected = self._project_hidden(last_hidden)
                 if projected.dim() == 1:
-                    projected = projected.unsqueeze(0)  # [hidden_dim] -> [1, hidden_dim]
+                    projected = projected.unsqueeze(0)
                 projected = projected.to(dtype=hidden_states.dtype)
 
-                # Forward with new ForwardContext (decode-like, single token)
+                # Position for this latent step: L + step
+                step_position = L + step
+                step_pos_tensor = torch.tensor(
+                    [step_position], dtype=positions.dtype, device=positions.device,
+                )
+
+                # Compute KV slot for this position
+                slot_idx = self._compute_overwrite_slot(
+                    step_position, block_table, req_idx=0,
+                )
+                slot_mapping_1tok = torch.tensor(
+                    [slot_idx], dtype=torch.int64, device=positions.device,
+                )
+
+                # Build attention metadata for this step.
+                # seq_len = L + step + 1: attend to prompt (0..L-1) + all
+                # prior latent steps (L..L+step-1) + this step (L+step).
+                current_seq_len = L + step + 1
+                latent_meta = self._build_latent_attn_metadata(
+                    original_meta, slot_mapping_1tok,
+                    seq_len_override=current_seq_len,
+                )
+                if latent_meta is None:
+                    break
+
+                per_layer_meta = {name: latent_meta for name in attn_metadata}
+                per_layer_slots = {name: slot_mapping_1tok for name in attn_metadata}
+
+                # Forward with new ForwardContext
                 with set_forward_context(
                     per_layer_meta,
                     self._vllm_config,
@@ -469,26 +501,29 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     step_hidden = base_cls.forward(
                         self,
                         input_ids=None,
-                        positions=last_position.unsqueeze(0) if last_position.dim() == 0 else last_position[:1],
+                        positions=step_pos_tensor,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=projected,
                         **kwargs,
                     )
 
-                # Extract last hidden for next iteration
+                # Extract hidden for next iteration
                 last_hidden = step_hidden[-1:, :] if step_hidden.dim() == 2 else step_hidden
                 steps_completed = step + 1
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             if steps_completed > 0:
                 logger.debug(
-                    "Latent thinking: %d steps in %.1fms (%.1fms/step)",
+                    "Latent thinking (extend): %d steps in %.1fms (%.1fms/step)",
                     steps_completed, elapsed_ms,
                     elapsed_ms / steps_completed,
                 )
 
-            # Replace last position with enriched hidden state.
-            # Preserves output shape [num_tokens, hidden_dim].
+            # Replace the last position's hidden state (the last dummy token)
+            # with the enriched hidden state for logits computation.
+            # vLLM's model runner uses logit_indices to select hidden_states
+            # for compute_logits(). For a single request, logit_indices points
+            # to the last position (num_tokens - 1 = L + N - 1).
             if steps_completed > 0:
                 original_hidden = original_hidden.clone()
                 original_hidden[-1:, :] = last_hidden
