@@ -13,13 +13,13 @@ app = modal.App("avp-vllm-integration")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git")
     .pip_install(
         "vllm>=0.17.0",
         "torch>=2.0",
         "transformers>=4.36",
     )
-    .pip_install("avp[vllm]")
-    # Install from the branch to pick up latest changes
+    # Install avp from the engine_integration branch
     .pip_install(
         "git+https://github.com/VectorArc/avp-python.git@engine_integration"
     )
@@ -28,7 +28,7 @@ image = (
 
 @app.function(
     image=image,
-    gpu=modal.gpu.A100(size="40GB"),
+    gpu="A100-40GB",
     timeout=1800,
 )
 def run_vllm_integration_tests():
@@ -48,19 +48,23 @@ def run_vllm_integration_tests():
 
     try:
         import vllm
+        from vllm.config import KVTransferConfig
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            engine = vllm.LLM(
-                model="Qwen/Qwen2.5-0.5B-Instruct",
-                enforce_eager=True,
-                max_model_len=256,
-                gpu_memory_utilization=0.5,
+            ktc = KVTransferConfig(
                 kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
                 kv_role="kv_both",
                 kv_connector_extra_config={
                     "avp_latent_steps": 20,
                     "avp_store_dir": tmpdir,
                 },
+            )
+            engine = vllm.LLM(
+                model="Qwen/Qwen2.5-0.5B-Instruct",
+                enforce_eager=True,
+                max_model_len=256,
+                gpu_memory_utilization=0.5,
+                kv_transfer_config=ktc,
             )
 
             params = vllm.SamplingParams(max_tokens=100, temperature=0.0)
@@ -111,17 +115,20 @@ def run_vllm_integration_tests():
 
         # Restart without latent steps
         with tempfile.TemporaryDirectory() as tmpdir2:
-            engine_baseline = vllm.LLM(
-                model="Qwen/Qwen2.5-0.5B-Instruct",
-                enforce_eager=True,
-                max_model_len=256,
-                gpu_memory_utilization=0.5,
+            ktc_baseline = KVTransferConfig(
                 kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
                 kv_role="kv_both",
                 kv_connector_extra_config={
                     "avp_latent_steps": 0,
                     "avp_store_dir": tmpdir2,
                 },
+            )
+            engine_baseline = vllm.LLM(
+                model="Qwen/Qwen2.5-0.5B-Instruct",
+                enforce_eager=True,
+                max_model_len=256,
+                gpu_memory_utilization=0.5,
+                kv_transfer_config=ktc_baseline,
             )
 
             params = vllm.SamplingParams(max_tokens=100, temperature=0.0)
@@ -157,17 +164,20 @@ def run_vllm_integration_tests():
         import vllm
 
         with tempfile.TemporaryDirectory() as tmpdir3:
-            engine_multi = vllm.LLM(
-                model="Qwen/Qwen2.5-0.5B-Instruct",
-                enforce_eager=True,
-                max_model_len=256,
-                gpu_memory_utilization=0.5,
+            ktc_multi = KVTransferConfig(
                 kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
                 kv_role="kv_both",
                 kv_connector_extra_config={
                     "avp_latent_steps": 20,
                     "avp_store_dir": tmpdir3,
                 },
+            )
+            engine_multi = vllm.LLM(
+                model="Qwen/Qwen2.5-0.5B-Instruct",
+                enforce_eager=True,
+                max_model_len=256,
+                gpu_memory_utilization=0.5,
+                kv_transfer_config=ktc_multi,
             )
 
             params = vllm.SamplingParams(max_tokens=50, temperature=0.0)

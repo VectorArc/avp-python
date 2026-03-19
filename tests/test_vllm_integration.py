@@ -295,18 +295,23 @@ def test_kv_connector_file_roundtrip():
 
 def test_latent_thinking_end_to_end():
     """Model plugin adds latent steps and produces non-degenerate output."""
+    from vllm.config import KVTransferConfig
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        engine = vllm.LLM(
-            model=MODEL_ID,
-            enforce_eager=True,
-            max_model_len=256,
-            gpu_memory_utilization=0.5,
+        ktc = KVTransferConfig(
             kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
             kv_role="kv_both",
             kv_connector_extra_config={
                 "avp_latent_steps": 20,
                 "avp_store_dir": tmpdir,
             },
+        )
+        engine = vllm.LLM(
+            model=MODEL_ID,
+            enforce_eager=True,
+            max_model_len=256,
+            gpu_memory_utilization=0.5,
+            kv_transfer_config=ktc,
         )
 
         params = vllm.SamplingParams(max_tokens=50, temperature=0.0)

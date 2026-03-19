@@ -14,16 +14,21 @@ Both plugins are auto-discovered via the `vllm.general_plugins` entry point when
 
 ```python
 from vllm import LLM, SamplingParams
+from vllm.config import KVTransferConfig
 
-engine = LLM(
-    model="Qwen/Qwen2.5-7B-Instruct",
-    enforce_eager=True,  # recommended for initial use
+ktc = KVTransferConfig(
     kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
     kv_role="kv_both",
     kv_connector_extra_config={
         "avp_latent_steps": 20,     # number of latent thinking steps
         "avp_store_dir": "/tmp/avp_kv_store",  # KV file store location
     },
+)
+
+engine = LLM(
+    model="Qwen/Qwen2.5-7B-Instruct",
+    enforce_eager=True,  # recommended for initial use
+    kv_transfer_config=ktc,
 )
 
 params = SamplingParams(max_tokens=256, temperature=0.7)
