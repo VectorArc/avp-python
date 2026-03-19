@@ -339,7 +339,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         avp_store_dir: Directory for KV-cache files (default: /tmp/avp_kv_store)
     """
 
-    def __init__(self, vllm_config=None, role=None, **kwargs):
+    def __init__(self, vllm_config=None, role=None, kv_cache_config=None, **kwargs):
         # Extract extra_config before calling super
         self._extra_config: Dict[str, Any] = {}
         if vllm_config is not None:
@@ -348,7 +348,11 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                 self._extra_config = getattr(kv_config, "kv_connector_extra_config", {}) or {}
 
         if HAS_VLLM and vllm_config is not None:
-            super().__init__(vllm_config=vllm_config, role=role, **kwargs)
+            # vLLM 0.17 passes (vllm_config, role, kv_cache_config) positionally
+            init_kwargs = dict(vllm_config=vllm_config, role=role, **kwargs)
+            if kv_cache_config is not None:
+                init_kwargs["kv_cache_config"] = kv_cache_config
+            super().__init__(**init_kwargs)
             self._role = role
         else:
             # Stub mode (testing without vLLM runtime)
