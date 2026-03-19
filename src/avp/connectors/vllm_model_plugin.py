@@ -346,10 +346,10 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 )
 
             elapsed_ms = (time.monotonic() - t0) * 1000
-            logger.debug(
+            logger.info(
                 "Latent thinking: %d steps in %.1fms (%.1fms/step)",
-                self._num_latent_steps, elapsed_ms,
-                elapsed_ms / max(self._num_latent_steps, 1),
+                step + 1, elapsed_ms,
+                elapsed_ms / max(step + 1, 1),
             )
 
             return hidden_states
