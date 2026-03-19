@@ -417,14 +417,9 @@ def _make_latent_model_cls(base_cls: type) -> type:
             # Per-layer slot_mapping dict (for KV cache update via ForwardContext)
             per_layer_slots = {name: slot_mapping_1tok for name in attn_metadata}
 
-            num_tokens = hidden_states.shape[0]
-            logger.info(
-                "Latent thinking: num_tokens=%d, overwrite_pos=%d, slot=%d, "
-                "meta.num_actual_tokens=%s, meta.seq_lens=%s, meta.seq_lens.shape=%s",
-                num_tokens, int(last_position), slot_idx,
-                getattr(original_meta, "num_actual_tokens", "?"),
-                original_meta.seq_lens[:4].tolist(),
-                original_meta.seq_lens.shape,
+            logger.debug(
+                "Latent thinking: num_tokens=%d, overwrite_pos=%d, slot=%d",
+                hidden_states.shape[0], int(last_position), slot_idx,
             )
 
             # Save original hidden states -- we'll replace only the last position
@@ -473,7 +468,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             if steps_completed > 0:
-                logger.info(
+                logger.debug(
                     "Latent thinking: %d steps in %.1fms (%.1fms/step)",
                     steps_completed, elapsed_ms,
                     elapsed_ms / steps_completed,
