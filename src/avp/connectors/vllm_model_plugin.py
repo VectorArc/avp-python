@@ -8,6 +8,11 @@ without generating text tokens.
 Registered via the ``vllm.general_plugins`` entry point so it is auto-discovered
 by all vLLM processes (including workers spawned via multiprocessing).
 
+The latent loop uses the overwrite pattern: each step reuses the last prefill
+position's KV-cache slot. Between steps, a new ForwardContext is set with
+decode-like attention metadata (max_query_len=1), following the same pattern
+used by vLLM's EAGLE speculative decoding proposer.
+
 FRAGILE(vllm): F8 -- Qwen2ForCausalLM import path, F9 -- ModelRegistry API.
 """
 
@@ -84,8 +89,18 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             base_cls.__init__(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
 
+            # Store vllm_config for set_forward_context calls during latent steps
+            self._vllm_config = vllm_config
+
             # Check for TP/PP and disable latent steps if needed
             self._check_parallelism(vllm_config)
+
+            # Extract block_size from cache config for slot computation
+            self._block_size = 16  # default
+            if vllm_config is not None:
+                cache_config = getattr(vllm_config, "cache_config", None)
+                if cache_config is not None:
+                    self._block_size = getattr(cache_config, "block_size", 16)
 
             # Projection state (lazily initialized on first forward)
             self._projection_ready = False
@@ -96,17 +111,12 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             self._avp_initialized = True
             logger.info(
-                "AVPLatentModel(%s) initialized with %d latent steps",
-                base_cls.__name__, self._num_latent_steps,
+                "AVPLatentModel(%s) initialized with %d latent steps, block_size=%d",
+                base_cls.__name__, self._num_latent_steps, self._block_size,
             )
 
         def _check_parallelism(self, vllm_config: Any) -> None:
-            """Disable latent steps under tensor/pipeline parallelism.
-
-            With TP, embed_tokens.weight is sharded -- softmax projection
-            through a partial vocabulary produces wrong results. With PP,
-            only the first/last rank has embed_tokens/lm_head.
-            """
+            """Disable latent steps under tensor/pipeline parallelism."""
             if vllm_config is None:
                 return
             parallel_config = getattr(vllm_config, "parallel_config", None)
@@ -116,14 +126,12 @@ def _make_latent_model_cls(base_cls: type) -> type:
             pp = getattr(parallel_config, "pipeline_parallel_size", 1)
             if tp > 1:
                 logger.warning(
-                    "Tensor parallelism (TP=%d) detected -- latent steps disabled. "
-                    "Softmax projection requires full embedding table.", tp,
+                    "Tensor parallelism (TP=%d) detected -- latent steps disabled.", tp,
                 )
                 self._num_latent_steps = 0
             if pp > 1:
                 logger.warning(
-                    "Pipeline parallelism (PP=%d) detected -- latent steps disabled. "
-                    "Latent loop requires embed_tokens and lm_head on same rank.", pp,
+                    "Pipeline parallelism (PP=%d) detected -- latent steps disabled.", pp,
                 )
                 self._num_latent_steps = 0
 
@@ -158,11 +166,9 @@ def _make_latent_model_cls(base_cls: type) -> type:
                         device = str(embed_in.device)
                         in_w = embed_in.detach().to(device=device, dtype=torch.float32)
                         out_w = lm_head_weight.detach().to(device=device, dtype=torch.float32)
-
                         min_vocab = min(in_w.shape[0], out_w.shape[0])
                         in_w = in_w[:min_vocab]
                         out_w = out_w[:min_vocab]
-
                         gram = torch.matmul(out_w.T, out_w)
                         reg = 1e-5 * torch.eye(
                             gram.shape[0], device=gram.device, dtype=gram.dtype
@@ -172,14 +178,10 @@ def _make_latent_model_cls(base_cls: type) -> type:
                         self._w_realign = torch.linalg.solve(gram, rhs)
                         self._target_norm = in_w.norm(dim=1).mean().detach()
                     else:
-                        logger.warning(
-                            "Cannot access embedding/lm_head weights -- latent steps disabled"
-                        )
+                        logger.warning("Cannot access embedding/lm_head weights -- disabled")
                         self._num_latent_steps = 0
                 except Exception as e:
-                    logger.warning(
-                        "Realignment computation failed: %s -- latent steps disabled", e
-                    )
+                    logger.warning("Realignment failed: %s -- latent steps disabled", e)
                     self._num_latent_steps = 0
 
             self._projection_ready = True
@@ -207,11 +209,9 @@ def _make_latent_model_cls(base_cls: type) -> type:
         def _project_hidden(self, hidden_state: Any) -> Any:
             """Project last hidden state back to embedding space.
 
-            After projection, normalizes to target_norm to match the
-            scale of real input embeddings. Without this, the projected
-            vector is ~2000x too small (softmax-weighted average of
-            embeddings has much smaller norm than individual embeddings),
-            causing NaN in subsequent layers.
+            After projection, normalizes to target_norm. Without this,
+            softmax-weighted average has norm ~0.05 while real embeddings
+            have norm ~100, causing NaN in bfloat16 attention.
             """
             from ..realign import (
                 apply_realignment,
@@ -223,55 +223,39 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 projected = project_to_embedding_space(
                     hidden_state, self._embed_weight, temperature=1.0
                 )
+                # Tied: project_to_embedding_space doesn't normalize
+                if self._target_norm is not None:
+                    projected = normalize_to_target(projected, self._target_norm)
             else:
+                # Untied: apply_realignment already normalizes to target_norm
                 projected = apply_realignment(
                     hidden_state, self._w_realign, self._target_norm
                 )
-
-            # Normalize to target embedding norm. The softmax projection
-            # produces vectors with norm ~0.05 while real embeddings have
-            # norm ~100. This mismatch causes NaN in bfloat16 attention.
-            if self._target_norm is not None:
-                projected = normalize_to_target(projected, self._target_norm)
 
             return projected
 
         def _is_profiling(self) -> bool:
             """Detect vLLM's profiling/dummy-run phase via forward context.
 
-            During profile_run() and CUDA graph capture, vLLM sets
-            attn_metadata=None in the forward context.  Attention layers
-            see this and return output.fill_(0), so the latent loop would
-            operate on zeros and -- critically -- change hidden_states shape
-            from [N, hidden_dim] to [1, hidden_dim], causing an out-of-bounds
-            index crash in _dummy_run's logit_indices post-processing.
-
-            This replaces the fragile forward-call counter with a deterministic
-            check on the actual profiling signal.
+            During profile_run(), attn_metadata is None. Running the latent
+            loop in that state changes hidden_states shape and crashes
+            _dummy_run's logit_indices post-processing.
             """
             try:
                 from vllm.forward_context import get_forward_context
                 ctx = get_forward_context()
-                # attn_metadata is None during profile_run (CUDAGraphMode.NONE
-                # with force_attention=False) and during some dummy warmup runs.
                 if getattr(ctx, "attn_metadata", None) is None:
                     return True
             except (ImportError, AssertionError, AttributeError):
-                # ImportError: vLLM not installed (test environment)
-                # AssertionError: forward context not set (not inside forward())
-                # AttributeError: ctx doesn't have attn_metadata
                 pass
             return False
 
         def _is_prefill(self) -> bool:
-            """Detect prefill using attention metadata from ForwardContext.
+            """Detect prefill using max_query_len from attention metadata.
 
-            In vLLM v1, prefill and decode are distinguished by max_query_len
-            in the attention metadata:
+            In vLLM v1:
               - Decode-only batch: max_query_len == 1
               - Prefill or mixed batch: max_query_len > 1
-
-            This is the same signal the attention backend uses internally.
             """
             try:
                 from vllm.forward_context import get_forward_context
@@ -279,30 +263,70 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 attn_metadata = getattr(ctx, "attn_metadata", None)
                 if attn_metadata is None:
                     return False
-                # attn_metadata is a dict mapping layer_name -> per-layer metadata
                 if isinstance(attn_metadata, dict) and attn_metadata:
                     any_meta = next(iter(attn_metadata.values()))
-                    max_qlen = getattr(any_meta, "max_query_len", 1)
-                    return max_qlen > 1
-                # Could also be the metadata object directly
-                max_qlen = getattr(attn_metadata, "max_query_len", 1)
-                return max_qlen > 1
+                    return getattr(any_meta, "max_query_len", 1) > 1
+                return getattr(attn_metadata, "max_query_len", 1) > 1
             except (ImportError, AssertionError, AttributeError, StopIteration):
                 return False
 
         def _should_think(self) -> bool:
-            """Determine if latent thinking should run this forward pass.
-
-            Three conditions must all be true:
-              1. Latent steps > 0 (not disabled by TP/PP/config)
-              2. Not in profiling phase (attn_metadata is None)
-              3. This is a prefill batch (max_query_len > 1)
-            """
+            """Determine if latent thinking should run this forward pass."""
             if self._num_latent_steps <= 0:
                 return False
             if self._is_profiling():
                 return False
             return self._is_prefill()
+
+        def _build_latent_attn_metadata(
+            self, original_meta: Any, slot_mapping_1tok: Any
+        ) -> Any:
+            """Build decode-like FlashAttentionMetadata for a single-token step.
+
+            Reuses block_table and seq_lens from the original prefill metadata,
+            but sets max_query_len=1 and uses the overwrite slot_mapping.
+            """
+            import torch
+
+            try:
+                from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+            except ImportError:
+                # If flash_attn backend not available, try to copy the original
+                logger.warning("FlashAttentionMetadata not importable -- cannot build latent metadata")
+                return None
+
+            num_reqs = original_meta.seq_lens.shape[0]
+            # query_start_loc for decode: [0, 1, 2, ..., num_reqs]
+            query_start_loc = torch.arange(
+                num_reqs + 1, dtype=torch.int32,
+                device=original_meta.seq_lens.device,
+            )
+
+            return FlashAttentionMetadata(
+                num_actual_tokens=num_reqs,
+                max_query_len=1,
+                query_start_loc=query_start_loc,
+                max_seq_len=int(original_meta.seq_lens.max().item()),
+                seq_lens=original_meta.seq_lens,
+                block_table=original_meta.block_table,
+                slot_mapping=slot_mapping_1tok,
+                use_cascade=False,
+                common_prefix_len=0,
+                cu_prefix_query_lens=None,
+                prefix_kv_lens=None,
+                suffix_kv_lens=None,
+            )
+
+        def _compute_overwrite_slot(
+            self, position: Any, block_table: Any, req_idx: int = 0,
+        ) -> int:
+            """Compute the KV-cache slot index for a given position.
+
+            slot = block_table[req, pos // block_size] * block_size + pos % block_size
+            """
+            block_idx = int(position) // self._block_size
+            block_number = block_table[req_idx, block_idx].item()
+            return block_number * self._block_size + (int(position) % self._block_size)
 
         def forward(
             self,
@@ -315,18 +339,16 @@ def _make_latent_model_cls(base_cls: type) -> type:
             """Forward pass with optional latent thinking steps.
 
             On prefill, runs N additional forward passes using the overwrite
-            pattern: each step projects the last hidden state back to embedding
-            space and feeds it as the next input.
+            pattern. Between steps, sets a new ForwardContext with decode-like
+            attention metadata so the attention kernels see consistent shapes.
 
-            CRITICAL: The output shape must match the input shape. vLLM's
-            model runner indexes into hidden_states using logit_indices after
-            forward() returns. If we change the shape (e.g., from [N, D] to
-            [1, D]), the index will be out of bounds. The latent loop enriches
-            the last position's hidden state in-place.
+            CRITICAL: Output shape must match input shape. vLLM's model runner
+            indexes hidden_states using logit_indices. The latent loop enriches
+            the last position in-place and returns the original shape.
             """
             import torch
 
-            # Initial forward pass
+            # Initial forward pass (uses existing ForwardContext from model runner)
             hidden_states = base_cls.forward(
                 self,
                 input_ids=input_ids,
@@ -344,84 +366,108 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 try:
                     self._setup_projection()
                 except Exception as e:
-                    logger.warning("Projection setup failed: %s -- skipping latent steps", e)
+                    logger.warning("Projection setup failed: %s -- skipping", e)
                     self._num_latent_steps = 0
                     return hidden_states
 
             if self._num_latent_steps <= 0:
                 return hidden_states
 
-            num_tokens = hidden_states.shape[0]
-            logger.info(
-                "Latent thinking triggered: num_tokens=%d, positions=%s, "
-                "hidden_dtype=%s, hidden_range=[%.4f, %.4f]",
-                num_tokens,
-                positions.shape if positions is not None else "None",
-                hidden_states.dtype,
-                hidden_states.min().item(),
-                hidden_states.max().item(),
+            # Get current ForwardContext for metadata extraction
+            try:
+                from vllm.forward_context import get_forward_context, set_forward_context
+                fwd_ctx = get_forward_context()
+                attn_metadata = fwd_ctx.attn_metadata
+                if not isinstance(attn_metadata, dict) or not attn_metadata:
+                    return hidden_states
+            except Exception:
+                return hidden_states
+
+            # Extract original attention metadata from first layer
+            first_layer_name = next(iter(attn_metadata))
+            original_meta = attn_metadata[first_layer_name]
+
+            # Overwrite position: last token's position (reuse same KV slot)
+            last_position = positions[-1]
+
+            # Compute the physical KV-cache slot for the overwrite position
+            slot_idx = self._compute_overwrite_slot(
+                last_position, original_meta.block_table, req_idx=0,
+            )
+            slot_mapping_1tok = torch.tensor(
+                [slot_idx], dtype=torch.int64, device=positions.device,
             )
 
-            # Save original hidden states -- we'll replace only the last
-            # position with the latent-enriched result.
-            original_hidden = hidden_states
+            # Build decode-like attention metadata for latent steps
+            latent_meta = self._build_latent_attn_metadata(original_meta, slot_mapping_1tok)
+            if latent_meta is None:
+                return hidden_states
 
-            # Overwrite position: last token's position
-            if positions is not None:
-                last_pos = positions[-1:]
-            else:
-                last_pos = None
+            # Per-layer metadata dict (all layers use the same decode-like metadata)
+            per_layer_meta = {name: latent_meta for name in attn_metadata}
+            # Per-layer slot_mapping dict (for KV cache update via ForwardContext)
+            per_layer_slots = {name: slot_mapping_1tok for name in attn_metadata}
+
+            num_tokens = hidden_states.shape[0]
+            logger.info(
+                "Latent thinking: num_tokens=%d, overwrite_pos=%d, slot=%d",
+                num_tokens, int(last_position), slot_idx,
+            )
+
+            # Save original hidden states -- we'll replace only the last position
+            original_hidden = hidden_states
 
             # Extract last hidden state to start the latent loop
             last_hidden = hidden_states[-1:, :]  # [1, hidden_dim]
 
-            # Latent thinking loop (overwrite pattern)
+            # Latent thinking loop with proper ForwardContext per step
             t0 = time.monotonic()
             steps_completed = 0
             for step in range(self._num_latent_steps):
                 # NaN safety check
                 if torch.isnan(last_hidden).any():
                     logger.warning(
-                        "NaN in hidden state at latent step %d/%d -- stopping early. "
-                        "last_hidden_shape=%s, dtype=%s",
+                        "NaN at latent step %d/%d -- stopping",
                         step + 1, self._num_latent_steps,
-                        last_hidden.shape, last_hidden.dtype,
                     )
                     break
 
-                # Project back to embedding space
+                # Project back to embedding space + normalize
                 projected = self._project_hidden(last_hidden)
-                # vLLM models expect 2D inputs_embeds [num_tokens, hidden_dim]
                 if projected.dim() == 1:
-                    projected = projected.unsqueeze(0)
-                # Ensure model compute dtype (bfloat16 typically)
+                    projected = projected.unsqueeze(0)  # [hidden_dim] -> [1, hidden_dim]
                 projected = projected.to(dtype=hidden_states.dtype)
 
-                # Forward with projected embedding (overwrite pattern --
-                # same position, KV cache entry at this slot is overwritten)
-                step_hidden = base_cls.forward(
-                    self,
-                    input_ids=None,
-                    positions=last_pos,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=projected,
-                    **kwargs,
-                )
+                # Forward with new ForwardContext (decode-like, single token)
+                with set_forward_context(
+                    per_layer_meta,
+                    self._vllm_config,
+                    num_tokens=1,
+                    slot_mapping=per_layer_slots,
+                ):
+                    step_hidden = base_cls.forward(
+                        self,
+                        input_ids=None,
+                        positions=last_position.unsqueeze(0) if last_position.dim() == 0 else last_position[:1],
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=projected,
+                        **kwargs,
+                    )
 
                 # Extract last hidden for next iteration
                 last_hidden = step_hidden[-1:, :] if step_hidden.dim() == 2 else step_hidden
                 steps_completed = step + 1
 
             elapsed_ms = (time.monotonic() - t0) * 1000
-            logger.info(
-                "Latent thinking: %d steps in %.1fms (%.1fms/step)",
-                steps_completed, elapsed_ms,
-                elapsed_ms / max(steps_completed, 1),
-            )
+            if steps_completed > 0:
+                logger.info(
+                    "Latent thinking: %d steps in %.1fms (%.1fms/step)",
+                    steps_completed, elapsed_ms,
+                    elapsed_ms / steps_completed,
+                )
 
             # Replace last position with enriched hidden state.
-            # This preserves the output shape [num_tokens, hidden_dim] that
-            # vLLM's model runner expects for logit_indices indexing.
+            # Preserves output shape [num_tokens, hidden_dim].
             if steps_completed > 0:
                 original_hidden = original_hidden.clone()
                 original_hidden[-1:, :] = last_hidden
@@ -436,9 +482,6 @@ def _make_latent_model_cls(base_cls: type) -> type:
 # ---------------------------------------------------------------------------
 # Concrete model class (Qwen2)
 # ---------------------------------------------------------------------------
-
-# Build the class via factory if vLLM is available, otherwise use a stub
-# that supports the same interface for testing.
 
 def _build_qwen2_class():
     """Build AVPLatentQwen2ForCausalLM using the factory pattern."""
@@ -532,16 +575,23 @@ class _AVPLatentStub:
         return None
 
     def _project_hidden(self, hidden_state: Any) -> Any:
-        from ..realign import apply_realignment, project_to_embedding_space
+        from ..realign import (
+            apply_realignment,
+            normalize_to_target,
+            project_to_embedding_space,
+        )
 
         if self._is_tied:
-            return project_to_embedding_space(
+            projected = project_to_embedding_space(
                 hidden_state, self._embed_weight, temperature=1.0
             )
+            if self._target_norm is not None:
+                projected = normalize_to_target(projected, self._target_norm)
         else:
-            return apply_realignment(
+            projected = apply_realignment(
                 hidden_state, self._w_realign, self._target_norm
             )
+        return projected
 
     def _should_think(self, seq_len: int) -> bool:
         """Stub version uses seq_len (no ForwardContext in test mode)."""
