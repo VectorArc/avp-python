@@ -52,7 +52,8 @@ def run_vllm_integration_tests():
 
         with tempfile.TemporaryDirectory() as tmpdir:
             ktc = KVTransferConfig(
-                kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
+                kv_connector="AVPKVConnectorV1Dynamic",
+                kv_connector_module_path="avp.connectors.vllm_kv_connector",
                 kv_role="kv_both",
                 kv_connector_extra_config={
                     "avp_latent_steps": 20,
@@ -116,7 +117,8 @@ def run_vllm_integration_tests():
         # Restart without latent steps
         with tempfile.TemporaryDirectory() as tmpdir2:
             ktc_baseline = KVTransferConfig(
-                kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
+                kv_connector="AVPKVConnectorV1Dynamic",
+                kv_connector_module_path="avp.connectors.vllm_kv_connector",
                 kv_role="kv_both",
                 kv_connector_extra_config={
                     "avp_latent_steps": 0,
@@ -165,7 +167,8 @@ def run_vllm_integration_tests():
 
         with tempfile.TemporaryDirectory() as tmpdir3:
             ktc_multi = KVTransferConfig(
-                kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
+                kv_connector="AVPKVConnectorV1Dynamic",
+                kv_connector_module_path="avp.connectors.vllm_kv_connector",
                 kv_role="kv_both",
                 kv_connector_extra_config={
                     "avp_latent_steps": 20,

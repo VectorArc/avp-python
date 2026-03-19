@@ -299,7 +299,8 @@ def test_latent_thinking_end_to_end():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         ktc = KVTransferConfig(
-            kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
+            kv_connector="AVPKVConnectorV1Dynamic",
+            kv_connector_module_path="avp.connectors.vllm_kv_connector",
             kv_role="kv_both",
             kv_connector_extra_config={
                 "avp_latent_steps": 20,
