@@ -205,17 +205,36 @@ def _make_latent_model_cls(base_cls: type) -> type:
             return None
 
         def _project_hidden(self, hidden_state: Any) -> Any:
-            """Project last hidden state back to embedding space."""
-            from ..realign import apply_realignment, project_to_embedding_space
+            """Project last hidden state back to embedding space.
+
+            After projection, normalizes to target_norm to match the
+            scale of real input embeddings. Without this, the projected
+            vector is ~2000x too small (softmax-weighted average of
+            embeddings has much smaller norm than individual embeddings),
+            causing NaN in subsequent layers.
+            """
+            from ..realign import (
+                apply_realignment,
+                normalize_to_target,
+                project_to_embedding_space,
+            )
 
             if self._is_tied:
-                return project_to_embedding_space(
+                projected = project_to_embedding_space(
                     hidden_state, self._embed_weight, temperature=1.0
                 )
             else:
-                return apply_realignment(
+                projected = apply_realignment(
                     hidden_state, self._w_realign, self._target_norm
                 )
+
+            # Normalize to target embedding norm. The softmax projection
+            # produces vectors with norm ~0.05 while real embeddings have
+            # norm ~100. This mismatch causes NaN in bfloat16 attention.
+            if self._target_norm is not None:
+                projected = normalize_to_target(projected, self._target_norm)
+
+            return projected
 
         def _is_profiling(self) -> bool:
             """Detect vLLM's profiling/dummy-run phase via forward context.
@@ -377,18 +396,6 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     projected = projected.unsqueeze(0)
                 # Ensure model compute dtype (bfloat16 typically)
                 projected = projected.to(dtype=hidden_states.dtype)
-
-                if step == 0:
-                    logger.info(
-                        "Latent step 1: projected_dtype=%s, projected_range=[%.4f, %.4f], "
-                        "has_nan=%s, last_hidden_range=[%.4f, %.4f]",
-                        projected.dtype,
-                        projected.min().item(),
-                        projected.max().item(),
-                        torch.isnan(projected).any().item(),
-                        last_hidden.min().item(),
-                        last_hidden.max().item(),
-                    )
 
                 # Forward with projected embedding (overwrite pattern --
                 # same position, KV cache entry at this slot is overwritten)
