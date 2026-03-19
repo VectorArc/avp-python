@@ -477,6 +477,21 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     projected = projected.unsqueeze(0)
                 projected = projected.to(dtype=hidden_states.dtype)
 
+                if step == 0:
+                    logger.info(
+                        "Extend step 0 diag: is_tied=%s, hidden_norm=%.2f, "
+                        "proj_norm=%.2f, proj_range=[%.4f,%.4f], dtype=%s, "
+                        "w_realign_shape=%s, embed_weight_shape=%s",
+                        self._is_tied,
+                        last_hidden.float().norm().item(),
+                        projected.float().norm().item(),
+                        projected.float().min().item(),
+                        projected.float().max().item(),
+                        projected.dtype,
+                        self._w_realign.shape if self._w_realign is not None else "None",
+                        self._embed_weight.shape if self._embed_weight is not None else "None",
+                    )
+
                 # Position for this latent step: L + step
                 step_position = L + step
                 step_pos_tensor = torch.tensor(
