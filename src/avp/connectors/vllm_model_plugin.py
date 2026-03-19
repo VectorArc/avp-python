@@ -94,13 +94,6 @@ def _make_latent_model_cls(base_cls: type) -> type:
             self._w_realign = None
             self._target_norm = None
 
-            # Skip latent steps during vLLM profiling (profile_run).
-            # Profiling runs forward() with dummy inputs to measure GPU memory.
-            # The latent loop on garbage inputs corrupts CUDA state.
-            # Set to True after the first real forward pass succeeds.
-            self._avp_profiling_done = False
-            self._avp_forward_count = 0
-
             self._avp_initialized = True
             logger.info(
                 "AVPLatentModel(%s) initialized with %d latent steps",
@@ -224,33 +217,73 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     hidden_state, self._w_realign, self._target_norm
                 )
 
-        def _should_think(self, seq_len: int) -> bool:
-            """Only think during prefill (seq_len > threshold), not decode.
+        def _is_profiling(self) -> bool:
+            """Detect vLLM's profiling/dummy-run phase via forward context.
 
-            Also skips latent steps during vLLM's profiling phase.
-            vLLM calls forward() with dummy inputs during _initialize_kv_caches
-            to measure GPU memory. Running the latent loop on garbage inputs
-            corrupts CUDA state. We skip the first few forward calls to avoid
-            this. After profiling completes, vLLM starts real inference.
+            During profile_run() and CUDA graph capture, vLLM sets
+            attn_metadata=None in the forward context.  Attention layers
+            see this and return output.fill_(0), so the latent loop would
+            operate on zeros and -- critically -- change hidden_states shape
+            from [N, hidden_dim] to [1, hidden_dim], causing an out-of-bounds
+            index crash in _dummy_run's logit_indices post-processing.
+
+            This replaces the fragile forward-call counter with a deterministic
+            check on the actual profiling signal.
+            """
+            try:
+                from vllm.forward_context import get_forward_context
+                ctx = get_forward_context()
+                # attn_metadata is None during profile_run (CUDAGraphMode.NONE
+                # with force_attention=False) and during some dummy warmup runs.
+                if getattr(ctx, "attn_metadata", None) is None:
+                    return True
+            except (ImportError, AssertionError, AttributeError):
+                # ImportError: vLLM not installed (test environment)
+                # AssertionError: forward context not set (not inside forward())
+                # AttributeError: ctx doesn't have attn_metadata
+                pass
+            return False
+
+        def _is_prefill(self) -> bool:
+            """Detect prefill using attention metadata from ForwardContext.
+
+            In vLLM v1, prefill and decode are distinguished by max_query_len
+            in the attention metadata:
+              - Decode-only batch: max_query_len == 1
+              - Prefill or mixed batch: max_query_len > 1
+
+            This is the same signal the attention backend uses internally.
+            """
+            try:
+                from vllm.forward_context import get_forward_context
+                ctx = get_forward_context()
+                attn_metadata = getattr(ctx, "attn_metadata", None)
+                if attn_metadata is None:
+                    return False
+                # attn_metadata is a dict mapping layer_name -> per-layer metadata
+                if isinstance(attn_metadata, dict) and attn_metadata:
+                    any_meta = next(iter(attn_metadata.values()))
+                    max_qlen = getattr(any_meta, "max_query_len", 1)
+                    return max_qlen > 1
+                # Could also be the metadata object directly
+                max_qlen = getattr(attn_metadata, "max_query_len", 1)
+                return max_qlen > 1
+            except (ImportError, AssertionError, AttributeError, StopIteration):
+                return False
+
+        def _should_think(self) -> bool:
+            """Determine if latent thinking should run this forward pass.
+
+            Three conditions must all be true:
+              1. Latent steps > 0 (not disabled by TP/PP/config)
+              2. Not in profiling phase (attn_metadata is None)
+              3. This is a prefill batch (max_query_len > 1)
             """
             if self._num_latent_steps <= 0:
                 return False
-            if not self._avp_profiling_done:
-                self._avp_forward_count += 1
-                # vLLM profiling typically runs 1-3 forward passes.
-                # After 5 calls, assume profiling is done.
-                if self._avp_forward_count > 5:
-                    self._avp_profiling_done = True
-                    logger.info("AVP: profiling phase complete, latent steps enabled")
-                else:
-                    return False
-            should = seq_len > _PREFILL_SEQ_LEN_THRESHOLD
-            if not should and self._avp_forward_count < 20:
-                logger.info(
-                    "AVP _should_think: seq_len=%d, threshold=%d, result=%s",
-                    seq_len, _PREFILL_SEQ_LEN_THRESHOLD, should,
-                )
-            return should
+            if self._is_profiling():
+                return False
+            return self._is_prefill()
 
         def forward(
             self,
@@ -265,6 +298,12 @@ def _make_latent_model_cls(base_cls: type) -> type:
             On prefill, runs N additional forward passes using the overwrite
             pattern: each step projects the last hidden state back to embedding
             space and feeds it as the next input.
+
+            CRITICAL: The output shape must match the input shape. vLLM's
+            model runner indexes into hidden_states using logit_indices after
+            forward() returns. If we change the shape (e.g., from [N, D] to
+            [1, D]), the index will be out of bounds. The latent loop enriches
+            the last position's hidden state in-place.
             """
             import torch
 
@@ -278,27 +317,8 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 **kwargs,
             )
 
-            # Determine sequence length for prefill detection.
-            # vLLM v1 passes 1D input_ids (flattened across sequences).
-            # shape[-1] gives total tokens. For prefill, this is >> 1.
-            # For decode, this is the number of active sequences (1 token each).
-            if input_ids is not None:
-                if hasattr(input_ids, "shape"):
-                    seq_len = input_ids.shape[0] if input_ids.dim() == 1 else input_ids.shape[-1]
-                else:
-                    seq_len = 1
-            elif inputs_embeds is not None:
-                seq_len = inputs_embeds.shape[-2] if hasattr(inputs_embeds, "shape") else 1
-            else:
-                seq_len = 1
-
-            if not self._should_think(seq_len):
+            if not self._should_think():
                 return hidden_states
-
-            logger.info(
-                "Latent thinking triggered: seq_len=%d, input_ids.shape=%s",
-                seq_len, input_ids.shape if input_ids is not None else "None",
-            )
 
             # Lazy projection setup
             if not self._projection_ready:
@@ -312,32 +332,30 @@ def _make_latent_model_cls(base_cls: type) -> type:
             if self._num_latent_steps <= 0:
                 return hidden_states
 
-            # Compute per-sequence last position for overwrite pattern.
-            # In batched prefill, positions contains positions for ALL sequences
-            # concatenated. We need the last position of the LAST sequence only,
-            # since vLLM processes one sequence's latent steps at a time during
-            # prefill. For single-sequence prefill (the common case), this is
-            # simply positions[-1:].
+            num_tokens = hidden_states.shape[0]
+            logger.info(
+                "Latent thinking triggered: num_tokens=%d, positions=%s",
+                num_tokens,
+                positions.shape if positions is not None else "None",
+            )
+
+            # Save original hidden states -- we'll replace only the last
+            # position with the latent-enriched result.
+            original_hidden = hidden_states
+
+            # Overwrite position: last token's position
             if positions is not None:
                 last_pos = positions[-1:]
             else:
                 last_pos = None
 
+            # Extract last hidden state to start the latent loop
+            last_hidden = hidden_states[-1:, :]  # [1, hidden_dim]
+
             # Latent thinking loop (overwrite pattern)
             t0 = time.monotonic()
+            steps_completed = 0
             for step in range(self._num_latent_steps):
-                # Extract last hidden state
-                if hidden_states.dim() == 3:
-                    last_hidden = hidden_states[:, -1, :]  # [batch, hidden_dim]
-                elif hidden_states.dim() == 2:
-                    last_hidden = hidden_states[-1:, :]  # [1, hidden_dim]
-                else:
-                    logger.warning(
-                        "Unexpected hidden_states dim %d at step %d -- stopping",
-                        hidden_states.dim(), step,
-                    )
-                    break
-
                 # NaN safety check
                 if torch.isnan(last_hidden).any():
                     logger.warning(
@@ -348,28 +366,41 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
                 # Project back to embedding space
                 projected = self._project_hidden(last_hidden)
-                projected_embed = (
-                    projected.unsqueeze(1) if projected.dim() == 2 else projected
-                )
+                # vLLM models expect 1D inputs_embeds [1, hidden_dim] not
+                # 3D [1, 1, hidden_dim] — the model's embed layer handles 1D
+                if projected.dim() == 1:
+                    projected = projected.unsqueeze(0)  # [hidden_dim] -> [1, hidden_dim]
 
-                # Forward with projected embedding (overwrite pattern)
-                hidden_states = base_cls.forward(
+                # Forward with projected embedding (overwrite pattern --
+                # same position, KV cache entry at this slot is overwritten)
+                step_hidden = base_cls.forward(
                     self,
                     input_ids=None,
                     positions=last_pos,
                     intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=projected_embed,
+                    inputs_embeds=projected,
                     **kwargs,
                 )
+
+                # Extract last hidden for next iteration
+                last_hidden = step_hidden[-1:, :] if step_hidden.dim() == 2 else step_hidden
+                steps_completed = step + 1
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             logger.info(
                 "Latent thinking: %d steps in %.1fms (%.1fms/step)",
-                step + 1, elapsed_ms,
-                elapsed_ms / max(step + 1, 1),
+                steps_completed, elapsed_ms,
+                elapsed_ms / max(steps_completed, 1),
             )
 
-            return hidden_states
+            # Replace last position with enriched hidden state.
+            # This preserves the output shape [num_tokens, hidden_dim] that
+            # vLLM's model runner expects for logit_indices indexing.
+            if steps_completed > 0:
+                original_hidden = original_hidden.clone()
+                original_hidden[-1:, :] = last_hidden
+
+            return original_hidden
 
     _AVPLatentModel.__name__ = f"AVPLatent{base_cls.__name__}"
     _AVPLatentModel.__qualname__ = f"AVPLatent{base_cls.__name__}"
@@ -412,10 +443,6 @@ class _AVPLatentStub:
         self._embed_weight = None
         self._w_realign = None
         self._target_norm = None
-
-        # Stub skips profiling guard (tests represent real inference)
-        self._avp_profiling_done = True
-        self._avp_forward_count = 0
 
     def _setup_projection(self):
         """Detect tied/untied weights and cache projection state."""
@@ -491,6 +518,7 @@ class _AVPLatentStub:
             )
 
     def _should_think(self, seq_len: int) -> bool:
+        """Stub version uses seq_len (no ForwardContext in test mode)."""
         if self._num_latent_steps <= 0:
             return False
         return seq_len > _PREFILL_SEQ_LEN_THRESHOLD
@@ -536,31 +564,41 @@ class _AVPLatentStub:
         if self._num_latent_steps <= 0:
             return hidden_states
 
+        original_hidden = hidden_states
         last_pos = positions[-1:] if positions is not None else None
+        last_hidden = hidden_states[-1:, :] if hidden_states.dim() == 2 else hidden_states[:, -1, :]
 
+        steps_completed = 0
         for step in range(self._num_latent_steps):
-            if hidden_states.dim() == 3:
-                last_hidden = hidden_states[:, -1, :]
-            elif hidden_states.dim() == 2:
-                last_hidden = hidden_states[-1:, :]
-            else:
-                break
-
             if torch.isnan(last_hidden).any():
                 break
 
             projected = self._project_hidden(last_hidden)
-            projected_embed = projected.unsqueeze(1) if projected.dim() == 2 else projected
+            if projected.dim() == 1:
+                projected = projected.unsqueeze(0)
 
-            hidden_states = self._mock_forward(
+            step_hidden = self._mock_forward(
                 input_ids=None,
                 positions=last_pos,
                 intermediate_tensors=intermediate_tensors,
-                inputs_embeds=projected_embed,
+                inputs_embeds=projected,
                 **kwargs,
             )
 
-        return hidden_states
+            if step_hidden.dim() == 3:
+                last_hidden = step_hidden[:, -1, :]
+            else:
+                last_hidden = step_hidden[-1:, :]
+            steps_completed = step + 1
+
+        if steps_completed > 0 and original_hidden.dim() == 3:
+            original_hidden = original_hidden.clone()
+            original_hidden[:, -1, :] = last_hidden
+        elif steps_completed > 0 and original_hidden.dim() == 2:
+            original_hidden = original_hidden.clone()
+            original_hidden[-1:, :] = last_hidden
+
+        return original_hidden
 
 
 # Try to build the real class; fall back to stub
