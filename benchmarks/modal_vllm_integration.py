@@ -154,9 +154,18 @@ def run_vllm_integration_tests():
                 kv_transfer_config=ktc_baseline,
             )
 
+            # Use same chat-templated prompt as Test 1, but WITHOUT padding
+            from transformers import AutoTokenizer
+            tokenizer_bl = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+            baseline_ids = tokenizer_bl.apply_chat_template(
+                [{"role": "user", "content": "Solve step by step: 24 * 17 + 3"}],
+                tokenize=True, add_generation_prompt=True,
+            )
+            print(f"Baseline tokens: {len(baseline_ids)} (no padding)")
+
             params = vllm.SamplingParams(max_tokens=100, temperature=0.0)
             outputs_baseline = engine_baseline.generate(
-                ["Solve step by step: 24 * 17 + 3"], params
+                [vllm.TokensPrompt(prompt_token_ids=list(baseline_ids))], params
             )
 
             text_baseline = outputs_baseline[0].outputs[0].text
