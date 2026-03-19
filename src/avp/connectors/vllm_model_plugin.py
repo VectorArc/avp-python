@@ -334,9 +334,13 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             num_tokens = hidden_states.shape[0]
             logger.info(
-                "Latent thinking triggered: num_tokens=%d, positions=%s",
+                "Latent thinking triggered: num_tokens=%d, positions=%s, "
+                "hidden_dtype=%s, hidden_range=[%.4f, %.4f]",
                 num_tokens,
                 positions.shape if positions is not None else "None",
+                hidden_states.dtype,
+                hidden_states.min().item(),
+                hidden_states.max().item(),
             )
 
             # Save original hidden states -- we'll replace only the last
@@ -359,17 +363,32 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 # NaN safety check
                 if torch.isnan(last_hidden).any():
                     logger.warning(
-                        "NaN in hidden state at latent step %d/%d -- stopping early",
+                        "NaN in hidden state at latent step %d/%d -- stopping early. "
+                        "last_hidden_shape=%s, dtype=%s",
                         step + 1, self._num_latent_steps,
+                        last_hidden.shape, last_hidden.dtype,
                     )
                     break
 
                 # Project back to embedding space
                 projected = self._project_hidden(last_hidden)
-                # vLLM models expect 1D inputs_embeds [1, hidden_dim] not
-                # 3D [1, 1, hidden_dim] — the model's embed layer handles 1D
+                # vLLM models expect 2D inputs_embeds [num_tokens, hidden_dim]
                 if projected.dim() == 1:
-                    projected = projected.unsqueeze(0)  # [hidden_dim] -> [1, hidden_dim]
+                    projected = projected.unsqueeze(0)
+                # Ensure model compute dtype (bfloat16 typically)
+                projected = projected.to(dtype=hidden_states.dtype)
+
+                if step == 0:
+                    logger.info(
+                        "Latent step 1: projected_dtype=%s, projected_range=[%.4f, %.4f], "
+                        "has_nan=%s, last_hidden_range=[%.4f, %.4f]",
+                        projected.dtype,
+                        projected.min().item(),
+                        projected.max().item(),
+                        torch.isnan(projected).any().item(),
+                        last_hidden.min().item(),
+                        last_hidden.max().item(),
+                    )
 
                 # Forward with projected embedding (overwrite pattern --
                 # same position, KV cache entry at this slot is overwritten)
