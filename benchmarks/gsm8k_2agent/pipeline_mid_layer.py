@@ -37,6 +37,7 @@ def run_mid_layer_pipeline(
     top_p: float = 0.95,
     verbose: bool = False,
     depth_ratio: float = 0.75,
+    num_vectors: int = 1,
 ) -> Dict:
     """Run the 2-agent cross-model pipeline with mid-layer injection.
 
@@ -76,21 +77,35 @@ def run_mid_layer_pipeline(
             collect_hidden_states=True,
         )
 
-        # Use last hidden state for projection
-        last_hidden = hidden_states[-1].unsqueeze(0)  # [1, D_src]
+        # Select hidden states for projection
+        if num_vectors == 1:
+            selected = [hidden_states[-1].unsqueeze(0)]  # [1, D_src]
+        else:
+            # Evenly spaced from the latent steps
+            n_available = len(hidden_states)
+            indices = [int(i * n_available / num_vectors) for i in range(num_vectors)]
+            indices[-1] = n_available - 1  # always include last
+            selected = [hidden_states[i].unsqueeze(0) for i in indices]
 
-        # Project to target model space
+        # Project each hidden state to target model space
         proj_t0 = time.perf_counter()
-        projected, proj_metrics = conn_a.project_hidden_for_cross_model(
-            last_hidden, avp_map, return_metrics=True,
-        )
-        projection_ms = (time.perf_counter() - proj_t0) * 1000
+        projected_list = []
+        proj_metrics = {}
+        for h in selected:
+            p, m = conn_a.project_hidden_for_cross_model(
+                h, avp_map, return_metrics=True,
+            )
+            if p.dim() == 1:
+                p = p.unsqueeze(0)
+            if p.dim() == 3:
+                p = p.squeeze(0)[-1:, :]
+            projected_list.append(p)
+            if not proj_metrics:
+                proj_metrics = m
 
-        # Ensure [1, D] shape for injection
-        if projected.dim() == 1:
-            projected = projected.unsqueeze(0)
-        if projected.dim() == 3:
-            projected = projected.squeeze(0)[-1:, :]
+        # Stack into [N, D] for multi-vector or [1, D] for single
+        projected = torch.cat(projected_list, dim=0)  # [N, D]
+        projection_ms = (time.perf_counter() - proj_t0) * 1000
 
         wire_bytes = projected.nelement() * projected.element_size()
         agent_time_ms = (time.perf_counter() - agent_t0) * 1000
@@ -138,6 +153,14 @@ def run_mid_layer_pipeline(
         prompt_text = render_prompt(tokenizer_b, messages)
         input_ids, attention_mask = tokenize_prompt(tokenizer_b, prompt_text, device)
 
+        # For multi-vector: prepend N pad tokens as placeholders for injection
+        if num_vectors > 1:
+            pad_id = tokenizer_b.pad_token_id or tokenizer_b.eos_token_id
+            pad_ids = torch.full((1, num_vectors), pad_id, dtype=input_ids.dtype, device=device)
+            pad_mask = torch.ones((1, num_vectors), dtype=attention_mask.dtype, device=device)
+            input_ids = torch.cat([pad_ids, input_ids], dim=-1)
+            attention_mask = torch.cat([pad_mask, attention_mask], dim=-1)
+
         agent_t0 = time.perf_counter()
         prompt_tokens = int(input_ids.shape[-1])
         total_prompt_tokens += prompt_tokens
@@ -145,7 +168,7 @@ def run_mid_layer_pipeline(
         # Generate with mid-layer injection hook
         inject_hidden = projected.to(device).to(model_b.dtype)
 
-        with mid_layer_injection_hook(model_b, injection_layer, inject_hidden):
+        with mid_layer_injection_hook(model_b, injection_layer, inject_hidden, num_vectors=num_vectors):
             text, _ = generate_text(
                 model_b, tokenizer_b, input_ids, attention_mask, device,
                 past_key_values=None,  # No KV-cache priming
@@ -201,6 +224,7 @@ def run_mid_layer_pipeline(
         "nearest_cos_sim": float(proj_metrics["nearest_cos_sim"].mean()) if "nearest_cos_sim" in proj_metrics else None,
         "agents": agent_traces,
         "mode": "mid_layer",
+        "num_vectors": num_vectors,
     }
 
 
@@ -220,6 +244,7 @@ def run_mid_layer_benchmark(
     top_p: float = 0.95,
     verbose: bool = False,
     depth_ratio: float = 0.75,
+    num_vectors: int = 1,
 ) -> List[Dict]:
     """Run mid-layer pipeline on a list of GSM8K samples."""
     results = []
@@ -239,6 +264,7 @@ def run_mid_layer_benchmark(
             top_p=top_p,
             verbose=verbose,
             depth_ratio=depth_ratio,
+            num_vectors=num_vectors,
         )
         results.append(result)
 

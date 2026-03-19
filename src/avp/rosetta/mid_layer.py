@@ -185,6 +185,7 @@ def mid_layer_injection_hook(
     model: Any,
     injection_layer: int,
     projected_hidden: Any,
+    num_vectors: int = 1,
 ):
     """Context manager that installs a forward hook to replace hidden states
     at a specific layer during the first forward pass (prefill).
@@ -195,14 +196,15 @@ def mid_layer_injection_hook(
     Args:
         model: HuggingFace model to hook into.
         injection_layer: Layer index to inject at.
-        projected_hidden: Tensor [1, D] or [B, D] to replace the last token's
-            hidden state with.
+        projected_hidden: Tensor [1, D], [N, D], or [B, N, D] to inject.
+            For N>1, replaces the first N positions (prepended pad tokens).
+            For N=1, replaces the last position (original behavior).
+        num_vectors: Number of vectors being injected. Must match
+            projected_hidden's N dimension.
 
     Yields:
         None. The hook is active during the context.
     """
-    import torch
-
     layers = _get_decoder_layers(model)
     target_layer = layers[injection_layer]
 
@@ -220,14 +222,20 @@ def mid_layer_injection_hook(
         else:
             hidden = output
 
-        # Replace last token's hidden state with projected source hidden state
         injection = projected_hidden.to(device=hidden.device, dtype=hidden.dtype)
-        if injection.dim() == 1:
-            injection = injection.unsqueeze(0)  # [D] -> [1, D]
 
-        # Clone to avoid in-place modification
         modified = hidden.clone()
-        modified[:, -1, :] = injection  # Replace last position
+
+        if num_vectors == 1:
+            # Single vector: replace last position (original behavior)
+            if injection.dim() == 1:
+                injection = injection.unsqueeze(0)
+            modified[:, -1, :] = injection
+        else:
+            # Multi-vector: replace first N positions (prepended pad tokens)
+            if injection.dim() == 2:
+                injection = injection.unsqueeze(0)  # [N, D] -> [1, N, D]
+            modified[:, :num_vectors, :] = injection
 
         if isinstance(output, tuple):
             return (modified,) + output[1:]

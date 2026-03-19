@@ -309,12 +309,14 @@ def run_benchmark(config: dict) -> dict:
                   f"validation_score: {avp_map.validation_score:.4f}, "
                   f"{avp_map.source_dim}d -> {avp_map.target_dim}d")
 
+        num_vectors = config.get("num_vectors", 1)
         mid_layer_results = run_mid_layer_benchmark(
             conn_a=connector, model_a=model, tokenizer_a=tokenizer,
             identity_a=identity, model_b=model_b, tokenizer_b=tokenizer_b,
             device=device, avp_map=avp_map, dataset=dataset,
             latent_steps=latent_steps, max_new_tokens=max_new_tokens,
             temperature=temperature, top_p=top_p, verbose=verbose,
+            num_vectors=num_vectors,
         )
 
     if run_trained:
