@@ -480,16 +480,15 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 if step == 0:
                     logger.info(
                         "Extend step 0 diag: is_tied=%s, hidden_norm=%.2f, "
-                        "proj_norm=%.2f, proj_range=[%.4f,%.4f], dtype=%s, "
-                        "w_realign_shape=%s, embed_weight_shape=%s",
+                        "proj_norm=%.2f, proj_range=[%.4f,%.4f], "
+                        "target_norm=%.4f, dtype=%s",
                         self._is_tied,
                         last_hidden.float().norm().item(),
                         projected.float().norm().item(),
                         projected.float().min().item(),
                         projected.float().max().item(),
+                        self._target_norm.float().item() if self._target_norm is not None else 0,
                         projected.dtype,
-                        self._w_realign.shape if self._w_realign is not None else "None",
-                        self._embed_weight.shape if self._embed_weight is not None else "None",
                     )
 
                 # Position for this latent step: L + step
