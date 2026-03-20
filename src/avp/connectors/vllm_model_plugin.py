@@ -334,9 +334,18 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     target_config.to_dict() if hasattr(target_config, "to_dict") else {}
                 )
 
-                # Load source tokenizer
+                # Load source tokenizer. _name_or_path may be a local
+                # directory that doesn't exist on this machine.
                 from transformers import AutoTokenizer
-                source_tokenizer = AutoTokenizer.from_pretrained(source_model_id)
+                try:
+                    source_tokenizer = AutoTokenizer.from_pretrained(source_model_id)
+                except (OSError, ValueError):
+                    logger.warning(
+                        "Cannot load tokenizer for '%s' (may be a local path). "
+                        "Cross-model projection disabled.",
+                        source_model_id,
+                    )
+                    return
 
                 # Build AVPMap via calibrate_from_weights
                 from ..rosetta.calibrate import calibrate_from_weights
@@ -381,13 +390,10 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 vocab_overlap_projection,
             )
             from ..types import ProjectionMethod
-            from .vllm_kv_connector import (
-                _PROJECTED_EMBEDDINGS,
-                _REQUEST_STORE_KEYS,
-                compute_request_hash,
-            )
+            from .vllm_kv_connector import _PROJECTED_EMBEDDINGS, compute_request_hash
 
             for i in range(num_prefill):
+              try:
                 req_idx = prefill_req_indices[i]
                 chunk_start = int(query_start_loc[req_idx].item())
                 chunk_end = int(query_start_loc[req_idx + 1].item())
@@ -411,31 +417,20 @@ def _make_latent_model_cls(base_cls: type) -> type:
                         target_norm=self._avp_map.target_norm,
                     )
 
-                # Store keyed by prompt hash. Use _REQUEST_STORE_KEYS
-                # (populated by the connector's build_connector_meta from the
-                # full prompt_token_ids) when available, falling back to
-                # hashing the chunk tokens for the common single-request case.
-                try:
-                    from vllm.forward_context import get_forward_context as _gfc
-                    _ctx = _gfc()
-                    _rid = str(getattr(_ctx, "request_id", ""))
-                    if not _rid and hasattr(_ctx, "requests") and _ctx.requests:
-                        _rid = str(getattr(_ctx.requests[0], "request_id", ""))
-                except Exception:
-                    _rid = ""
-                if _rid and _rid in _REQUEST_STORE_KEYS:
-                    store_key = _REQUEST_STORE_KEYS[_rid]
-                else:
-                    # Fallback: hash the chunk tokens (correct when full
-                    # prompt is in one chunk, i.e. max_num_seqs=1).
-                    req_token_ids = input_ids[chunk_start:chunk_end].tolist()
-                    store_key = compute_request_hash(req_token_ids)
-
+                # Hash the chunk tokens as the store key. The latent loop
+                # guard (chunk_first_pos > L-1) ensures the full prompt is
+                # in this chunk when cross-model projection runs.
+                req_token_ids = input_ids[chunk_start:chunk_end].tolist()
+                store_key = compute_request_hash(req_token_ids)
                 _PROJECTED_EMBEDDINGS[store_key] = projected.squeeze(0)
 
                 logger.debug(
                     "Projected hidden state for cross-model: key=%s, shape=%s",
                     store_key, list(projected.shape),
+                )
+              except Exception as e:
+                logger.warning(
+                    "Cross-model projection failed for request %d: %s", i, e,
                 )
 
         def _is_profiling(self) -> bool:

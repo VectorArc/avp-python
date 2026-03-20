@@ -87,6 +87,12 @@ def vocab_overlap_projection(
     """
     torch = _require_torch()
 
+    if temperature <= 0:
+        raise ValueError(
+            f"temperature must be positive, got {temperature}. "
+            "Use a small value like 0.01 for near-argmax behavior."
+        )
+
     original_dtype = hidden_state.dtype
     h = hidden_state.to(torch.float32)
     w_src = source_lm_head_weight.detach().to(device=h.device, dtype=torch.float32)
@@ -178,6 +184,12 @@ def vocabulary_mediated_projection(
         returns (projected, {"entropy": ..., "max_prob": ...}).
     """
     torch = _require_torch()
+
+    if temperature <= 0:
+        raise ValueError(
+            f"temperature must be positive, got {temperature}. "
+            "Use a small value like 0.01 for near-argmax behavior."
+        )
 
     original_dtype = hidden_state.dtype
     h = hidden_state.to(torch.float32)

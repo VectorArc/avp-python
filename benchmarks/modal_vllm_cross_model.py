@@ -144,47 +144,31 @@ def run_cross_model_test():
             tensor_parallel_size=1,
         )
 
-        # Load target model's embedding layer for prepending projected embedding
-        from avp.connectors.vllm_kv_connector import load_projected_embedding
+        from avp.connectors.vllm_kv_connector import generate_with_rosetta
 
         latent_answers = []
         for i, problem in enumerate(problems):
-            # Load projected embedding from store
-            projected = load_projected_embedding(store_dir, store_keys[i])
-            if projected is None:
-                print(f"\n[{i+1}] SKIP: No projected embedding for {store_keys[i]}")
-                latent_answers.append("")
-                continue
-
-            # Create solver prompt for Agent B
             solver_prompt = f"Solve step by step: {problem}"
             solver_ids = tgt_tokenizer.apply_chat_template(
                 [{"role": "user", "content": solver_prompt}],
                 tokenize=True, add_generation_prompt=True,
             )
 
-            # Get the embedding layer to convert token IDs to embeddings
-            # Then prepend the projected embedding as a virtual context token
-            emb_layer = engine_b.llm_engine.model_executor.driver_worker.model_runner.model.model.embed_tokens
-            solver_token_embeds = emb_layer.weight[solver_ids].detach()
-
-            # Prepend projected embedding (unsqueeze to [1, D_tgt] if needed)
-            projected_emb = projected.to(
-                dtype=solver_token_embeds.dtype,
-                device=solver_token_embeds.device,
-            )
-            if projected_emb.dim() == 1:
-                projected_emb = projected_emb.unsqueeze(0)
-
-            combined_embeds = torch.cat([projected_emb, solver_token_embeds], dim=0)
-
             params = vllm.SamplingParams(max_tokens=256, temperature=0.0)
             t0 = time.monotonic()
-            outputs = engine_b.generate(
-                [vllm.PromptEmbeds(prompt_embeds=combined_embeds)], params,
-            )
-            elapsed = time.monotonic() - t0
-            answer = outputs[0].outputs[0].text.strip()
+            try:
+                outputs = generate_with_rosetta(
+                    engine=engine_b,
+                    prompt_token_ids=list(solver_ids),
+                    store_dir=store_dir,
+                    store_key=store_keys[i],
+                    sampling_params=params,
+                )
+                elapsed = time.monotonic() - t0
+                answer = outputs[0].outputs[0].text.strip()
+            except Exception as e:
+                elapsed = time.monotonic() - t0
+                answer = f"ERROR: {e}"
             latent_answers.append(answer)
 
             print(f"\n[{i+1}] Problem: {problem[:60]}...")

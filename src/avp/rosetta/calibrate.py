@@ -577,9 +577,21 @@ def calibrate_from_weights(
     src_dim = source_config_dict.get("hidden_size", 0) or source_config_dict.get("n_embd", 0)
     tgt_dim = target_config_dict.get("hidden_size", 0) or target_config_dict.get("n_embd", 0)
 
+    if src_dim <= 0 or tgt_dim <= 0:
+        raise ValueError(
+            f"Invalid hidden dimensions: source={src_dim}, target={tgt_dim}. "
+            "Config dicts must contain 'hidden_size' or 'n_embd'."
+        )
+
     # Compute target norm directly from embed weights
     embed_f32 = target_embed_weight.detach().to(dtype=torch.float32)
     target_norm = embed_f32.norm(dim=1).mean().detach()
+
+    if torch.isnan(target_norm) or target_norm.item() <= 0:
+        raise ValueError(
+            f"Invalid target_norm ({target_norm.item():.4f}). "
+            "Check target_embed_weight for NaN or all-zero rows."
+        )
 
     # Determine projection method from tokenizer compatibility
     shared_vocab = _have_shared_vocab(source_tokenizer, target_tokenizer)

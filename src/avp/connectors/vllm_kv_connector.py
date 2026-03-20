@@ -75,7 +75,10 @@ class FileKVStore:
         import torch
         key_dir = self._key_dir(key)
         key_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(tensor.cpu(), key_dir / f"layer_{layer_idx}.pt")
+        target = key_dir / f"layer_{layer_idx}.pt"
+        tmp = target.with_suffix(".pt.tmp")
+        torch.save(tensor.cpu(), tmp)
+        os.rename(str(tmp), str(target))
 
     def load_layer(self, key: str, layer_idx: int) -> Optional[Any]:
         import torch
@@ -87,7 +90,10 @@ class FileKVStore:
     def save_meta(self, key: str, seq_len: int, num_layers: int) -> None:
         key_dir = self._key_dir(key)
         key_dir.mkdir(parents=True, exist_ok=True)
-        (key_dir / "meta.txt").write_text(f"{seq_len}\n{num_layers}\n")
+        target = key_dir / "meta.txt"
+        tmp = target.with_suffix(".txt.tmp")
+        tmp.write_text(f"{seq_len}\n{num_layers}\n")
+        os.rename(str(tmp), str(target))
 
     def has_key(self, key: str) -> bool:
         return (self._key_dir(key) / "meta.txt").exists()
@@ -116,7 +122,10 @@ class FileKVStore:
         import torch
         key_dir = self._key_dir(key)
         key_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(tensor.cpu(), key_dir / "projected.pt")
+        target = key_dir / "projected.pt"
+        tmp = target.with_suffix(".pt.tmp")
+        torch.save(tensor.cpu(), tmp)
+        os.rename(str(tmp), str(target))
 
     def load_projected(self, key: str) -> Optional[Any]:
         """Load a projected embedding for cross-model transfer."""
@@ -234,9 +243,14 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
     about external tokens, injects stored KV into allocated blocks before
     forward pass.
 
+    Requires UniProcExecutor (single-process vLLM). Module-level shared
+    state (``_REQUEST_STORE_KEYS``, ``_PENDING_LOADS``, ``_PROJECTED_EMBEDDINGS``)
+    is not process-safe and will not work with MultiProcExecutor.
+
     Configuration via kv_connector_extra_config:
         avp_latent_steps: Number of latent thinking steps (default: 20)
         avp_store_dir: Directory for KV-cache files (default: /tmp/avp_kv_store)
+        avp_target_model: Target model for cross-model rosetta (optional)
     """
 
     def __init__(self, vllm_config=None, role=None, kv_cache_config=None, **kwargs):
@@ -288,7 +302,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         # Pending load metadata (from scheduler → worker)
         self._pending_loads: Dict[str, AVPReqMeta] = {}
         self._lock = threading.RLock()
-        self._save_error_logged = False
+        self._save_error_count = 0
         self._save_thread: Optional[threading.Thread] = None
 
         # Cross-model mode: skip KV layer saves (useless to a different model).
@@ -397,12 +411,18 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                     self._pending_saves[store_key][layer_idx] = per_request_kv
 
         except Exception as e:
-            if not self._save_error_logged:
-                logger.warning("save_kv_layer error: %s", e)
-                self._save_error_logged = True
+            self._save_error_count += 1
+            lvl = logging.WARNING if self._save_error_count <= 3 else logging.DEBUG
+            logger.log(lvl, "save_kv_layer error (#%d): %s", self._save_error_count, e)
 
     def wait_for_save(self) -> None:
         """Flush all pending saves to the store in a background thread."""
+        # Join any still-running previous save thread to avoid two
+        # threads writing to the same store key concurrently.
+        prev = self._save_thread
+        if prev is not None and prev.is_alive():
+            prev.join(timeout=10.0)
+
         with self._lock:
             pending = dict(self._pending_saves)
             self._pending_saves.clear()
@@ -475,6 +495,10 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         save_thread = getattr(self, "_save_thread", None)
         if save_thread is not None and save_thread.is_alive():
             save_thread.join(timeout=5.0)
+        # Clean up request_id → store_key mapping to prevent unbounded growth
+        req_id = str(getattr(request, "request_id", ""))
+        if req_id:
+            _REQUEST_STORE_KEYS.pop(req_id, None)
         return (True, None)
 
     # ----- Load side (Agent B starts → KV injected from store) -----
@@ -499,45 +523,48 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         )
 
         for req_id, meta in pending.items():
-            if not self._store.has_key(meta.store_key):
-                continue
-
-            slot_mapping = _compute_slot_mapping(
-                meta.block_ids, self._block_size, meta.num_external_tokens,
-            )
-
-            layers_loaded = 0
-            for layer_name, kv_cache in self._kv_caches.items():
-                layer_idx = _parse_layer_index(layer_name)
-                if layer_idx is None:
+            try:
+                if not self._store.has_key(meta.store_key):
                     continue
 
-                stored_kv = self._store.load_layer(meta.store_key, layer_idx)
-                if stored_kv is None:
-                    continue
-
-                if layers_loaded == 0:
-                    logger.debug(
-                        "Injecting KV: store_key=%s, %d tokens into %d slots",
-                        meta.store_key, stored_kv.shape[1],
-                        slot_mapping.shape[0],
-                    )
-
-                # Align stored KV to allocated slot count. The store may
-                # have more tokens than the scheduler allocated (the -1 cap
-                # in get_num_new_matched_tokens leaves 1 token for prefill).
-                num_slots = slot_mapping.shape[0]
-                if stored_kv.shape[1] > num_slots:
-                    stored_kv = stored_kv[:, :num_slots, :]
-
-                _inject_request_kv(kv_cache, slot_mapping, stored_kv)
-                layers_loaded += 1
-
-            if layers_loaded > 0:
-                logger.debug(
-                    "Loaded KV for %s: %d layers, %d tokens",
-                    meta.store_key, layers_loaded, meta.num_external_tokens,
+                slot_mapping = _compute_slot_mapping(
+                    meta.block_ids, self._block_size, meta.num_external_tokens,
                 )
+
+                layers_loaded = 0
+                for layer_name, kv_cache in self._kv_caches.items():
+                    layer_idx = _parse_layer_index(layer_name)
+                    if layer_idx is None:
+                        continue
+
+                    stored_kv = self._store.load_layer(meta.store_key, layer_idx)
+                    if stored_kv is None:
+                        continue
+
+                    if layers_loaded == 0:
+                        logger.debug(
+                            "Injecting KV: store_key=%s, %d tokens into %d slots",
+                            meta.store_key, stored_kv.shape[1],
+                            slot_mapping.shape[0],
+                        )
+
+                    # Align stored KV to allocated slot count. The store may
+                    # have more tokens than the scheduler allocated (the -1 cap
+                    # in get_num_new_matched_tokens leaves 1 token for prefill).
+                    num_slots = slot_mapping.shape[0]
+                    if stored_kv.shape[1] > num_slots:
+                        stored_kv = stored_kv[:, :num_slots, :]
+
+                    _inject_request_kv(kv_cache, slot_mapping, stored_kv)
+                    layers_loaded += 1
+
+                if layers_loaded > 0:
+                    logger.debug(
+                        "Loaded KV for %s: %d layers, %d tokens",
+                        meta.store_key, layers_loaded, meta.num_external_tokens,
+                    )
+            except Exception as e:
+                logger.warning("start_load_kv failed for %s: %s", req_id, e)
 
         # Clear processed loads from module-level dict
         for req_id in pending:
@@ -805,8 +832,12 @@ def generate_with_rosetta(
         proj = proj.unsqueeze(0)  # [1, D]
     combined = torch.cat([proj, prompt_embeds.to(torch.float32)], dim=0)
 
-    # Cast to bfloat16 (vLLM's default dtype for most models)
-    combined = combined.to(torch.bfloat16)
+    # Cast to engine's dtype (bfloat16 for most modern models)
+    try:
+        engine_dtype = engine.llm_engine.model_config.dtype
+    except AttributeError:
+        engine_dtype = torch.bfloat16
+    combined = combined.to(engine_dtype)
 
     return engine.generate(
         [{"prompt_embeds": combined}],

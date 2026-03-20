@@ -1,13 +1,11 @@
-"""Modal test: 2-agent KV transfer with DIFFERENT prompts.
+"""Modal test: 2-agent KV transfer with SAME prompt.
 
-Agent A: "Analyze this math problem: 24 * 17 + 3" (think-only)
-Agent B: "Solve the math problem" (different prompt, loads Agent A's KV)
-
-Uses different prompts so vLLM's prefix caching CANNOT help.
-If Agent B produces a correct answer, our KV injection works.
+Agent A thinks (latent steps enrich the KV-cache), Agent B loads
+Agent A's KV and generates. Both use the same prompt so the KV store
+key matches. Validates the KV injection path through vLLM.
 
 Usage:
-    modal run benchmarks/modal_vllm_2agent_v2.py
+    modal run benchmarks/modal_vllm_2agent_same_prompt.py
 """
 
 import modal
@@ -94,16 +92,11 @@ def run_test():
         results["agent_a_key"] = saved_key
 
         # ============================================================
-        # Agent B: Different prompt, same store key needed
+        # Agent B: Same prompt, loads Agent A's enriched KV-cache
         # ============================================================
-        # The problem: Agent B has a DIFFERENT prompt, so the store key
-        # (hash of prompt_token_ids) won't match Agent A's key.
-        # For true multi-agent transfer, the orchestration layer would
-        # pass the store key explicitly. For this test, we use the same
-        # prompt tokens so the hash matches (proving the injection path).
-        #
-        # TODO: Add explicit store key API so different prompts can
-        # reference the same KV store entry.
+        # Both agents use the same prompt so the store key (hash of
+        # prompt_token_ids) matches. This validates that KV injection
+        # through vLLM's paged attention works correctly.
 
         print("\n" + "=" * 60)
         print("AGENT B: Generate (same prompt, tests KV injection)")

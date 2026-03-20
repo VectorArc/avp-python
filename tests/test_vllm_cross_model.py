@@ -640,3 +640,117 @@ class TestProjectedSyncFlush:
             loaded = store.load_projected("sync-key")
             assert loaded is not None
             assert torch.allclose(loaded, emb)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Production hardening (audit fixes)
+# ---------------------------------------------------------------------------
+
+
+class TestAuditFixes:
+    """Tests for issues found during the engineering audit."""
+
+    def test_request_finished_cleans_store_keys(self):
+        """C1: _REQUEST_STORE_KEYS entries are cleaned up in request_finished."""
+        from avp.connectors.vllm_kv_connector import (
+            AVPKVConnectorV1Dynamic,
+            _REQUEST_STORE_KEYS,
+        )
+
+        with tempfile.TemporaryDirectory() as store_dir:
+            os.environ.pop("AVP_TARGET_MODEL", None)
+
+            class MockKVConfig:
+                kv_connector_extra_config = {
+                    "avp_store_dir": store_dir,
+                    "avp_latent_steps": 0,
+                }
+
+            class MockVLLMConfig:
+                kv_transfer_config = MockKVConfig()
+
+            connector = AVPKVConnectorV1Dynamic(
+                vllm_config=MockVLLMConfig(), role=None,
+            )
+
+            # Simulate build_connector_meta adding an entry
+            _REQUEST_STORE_KEYS["req-cleanup-test"] = "some-store-key"
+            assert "req-cleanup-test" in _REQUEST_STORE_KEYS
+
+            # request_finished should clean it up
+            class Req:
+                request_id = "req-cleanup-test"
+
+            connector.request_finished(Req())
+            assert "req-cleanup-test" not in _REQUEST_STORE_KEYS
+
+    def test_atomic_write_no_tmp_leftover(self, tmp_path):
+        """C3: No .tmp files left after save completes."""
+        from avp.connectors.vllm_kv_connector import FileKVStore
+
+        store = FileKVStore(str(tmp_path))
+        store.save_layer("atomic-test", 0, torch.randn(2, 4, 8))
+        store.save_meta("atomic-test", seq_len=10, num_layers=1)
+        store.save_projected("atomic-test", torch.randn(32))
+
+        # No .tmp files should remain
+        tmp_files = list(tmp_path.rglob("*.tmp"))
+        assert tmp_files == [], f"Leftover tmp files: {tmp_files}"
+
+    def test_temperature_zero_raises(self):
+        """I4: temperature=0 should raise ValueError, not produce NaN."""
+        from avp.rosetta.project import (
+            vocab_overlap_projection,
+            vocabulary_mediated_projection,
+        )
+
+        h = torch.randn(1, 64)
+        w = torch.randn(100, 64)
+
+        with pytest.raises(ValueError, match="temperature must be positive"):
+            vocabulary_mediated_projection(h, w, w, temperature=0.0)
+
+        with pytest.raises(ValueError, match="temperature must be positive"):
+            vocab_overlap_projection(
+                h, w, w[:50], torch.arange(50), temperature=0.0,
+            )
+
+    def test_nan_embed_weight_raises(self):
+        """I5: NaN embed weights should raise ValueError."""
+        from avp.rosetta.calibrate import calibrate_from_weights
+
+        vocab = {f"tok_{i}": i for i in range(150)}
+        tokenizer = MockTokenizer(vocab)
+
+        nan_embed = torch.full((150, 32), float("nan"))
+
+        with pytest.raises(ValueError, match="Invalid target_norm"):
+            calibrate_from_weights(
+                source_model_id="mock/src",
+                source_config_dict={"hidden_size": 64, "vocab_size": 150},
+                target_model_id="mock/tgt",
+                target_config_dict={"hidden_size": 32, "vocab_size": 150},
+                target_embed_weight=nan_embed,
+                source_tokenizer=tokenizer,
+                target_tokenizer=tokenizer,
+                auto_save=False,
+            )
+
+    def test_zero_hidden_size_raises(self):
+        """I6: Missing hidden_size in config should raise ValueError."""
+        from avp.rosetta.calibrate import calibrate_from_weights
+
+        vocab = {f"tok_{i}": i for i in range(150)}
+        tokenizer = MockTokenizer(vocab)
+
+        with pytest.raises(ValueError, match="Invalid hidden dimensions"):
+            calibrate_from_weights(
+                source_model_id="mock/src",
+                source_config_dict={"vocab_size": 150},  # no hidden_size
+                target_model_id="mock/tgt",
+                target_config_dict={"vocab_size": 150},  # no hidden_size
+                target_embed_weight=torch.randn(150, 32),
+                source_tokenizer=tokenizer,
+                target_tokenizer=tokenizer,
+                auto_save=False,
+            )
