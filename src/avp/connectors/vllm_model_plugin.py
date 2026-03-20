@@ -613,6 +613,23 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 # This is a padded prefill request: total_len = L + N
                 L = total_len - N
 
+                # Validate padding: last N tokens should all be copies of
+                # token at position L-1 (set by prepare_latent_prompt).
+                # Without proper padding, the latent loop overwrites real
+                # prompt KV entries, corrupting generation.
+                if input_ids is not None and query_len == total_len:
+                    pad_region = input_ids[chunk_start + L : chunk_end]
+                    if pad_region.numel() == N:
+                        seed_tok = input_ids[chunk_start + L - 1].item()
+                        if not (pad_region == seed_tok).all():
+                            logger.warning(
+                                "Prompt does not appear padded by prepare_latent_prompt "
+                                "(last %d tokens are not copies of token at position %d). "
+                                "Skipping latent steps for this request to avoid corruption.",
+                                N, L - 1,
+                            )
+                            continue
+
                 # With chunked prefill, only part of the prompt may be in
                 # this chunk. We need the FULL prompt's last N positions
                 # to be in this chunk for extend to work.
