@@ -29,11 +29,16 @@ from ._vllm_compat import (
 
 logger = logging.getLogger(__name__)
 
-# Module-level mapping from request_id → store_key (prompt hash).
-# The scheduler sets this (has prompt_token_ids), the worker reads it
-# (needs the key in save_kv_layer). Shared via module-level dict because
-# scheduler and worker are separate connector instances in the same process.
+# Module-level shared state between scheduler and worker connector instances.
+# vLLM creates two connector instances (SCHEDULER and WORKER) in the same
+# EngineCore process. Instance-level dicts don't cross between them.
+
+# request_id → store_key (prompt hash). Scheduler sets, worker reads.
 _REQUEST_STORE_KEYS: Dict[str, str] = {}
+
+# request_id → AVPReqMeta for pending loads. Scheduler sets via
+# update_state_after_alloc, worker reads via start_load_kv.
+_PENDING_LOADS: Dict[str, Any] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -377,18 +382,18 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         Uses pending load metadata (block_ids from scheduler) to compute
         slot_mapping, then writes stored KV into the allocated blocks.
         """
-        logger.info(
-            "start_load_kv called: context=%s, kv_caches=%s, pending_loads=%d",
-            type(forward_context).__name__ if forward_context else "None",
-            "registered" if self._kv_caches else "None",
-            len(self._pending_loads),
-        )
-
         if forward_context is None or self._kv_caches is None:
             return
 
-        with self._lock:
-            pending = dict(self._pending_loads)
+        # Read from module-level dict (set by scheduler instance)
+        pending = dict(_PENDING_LOADS)
+        if not pending:
+            return
+
+        logger.debug(
+            "start_load_kv: %d pending loads, kv_caches registered",
+            len(pending),
+        )
 
         for req_id, meta in pending.items():
             if not self._store.has_key(meta.store_key):
@@ -428,8 +433,9 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                     meta.store_key, layers_loaded, meta.num_external_tokens,
                 )
 
-        with self._lock:
-            self._pending_loads.clear()
+        # Clear processed loads from module-level dict
+        for req_id in pending:
+            _PENDING_LOADS.pop(req_id, None)
 
     def wait_for_layer_load(self, layer_name: str, **kwargs) -> Optional[Any]:
         """No-op — injection happens in start_load_kv."""
@@ -505,8 +511,8 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         meta.block_ids = block_list
         meta.num_external_tokens = num_external_tokens
 
-        with self._lock:
-            self._pending_loads[meta.request_id] = meta
+        # Use module-level dict (shared between scheduler and worker instances)
+        _PENDING_LOADS[meta.request_id] = meta
 
         logger.debug(
             "Scheduled load for %s: %d external tokens, %d blocks",

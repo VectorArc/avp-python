@@ -271,14 +271,16 @@ class TestUpdateStateAfterAlloc:
                 return ([5, 6, 7],)
 
         connector.update_state_after_alloc(req, MockBlocks(), num_external_tokens=10)
-        assert "req-alloc" in connector._pending_loads
-        assert connector._pending_loads["req-alloc"].block_ids == [5, 6, 7]
-        assert connector._pending_loads["req-alloc"].num_external_tokens == 10
+        from avp.connectors.vllm_kv_connector import _PENDING_LOADS
+        assert "req-alloc" in _PENDING_LOADS
+        assert _PENDING_LOADS["req-alloc"].block_ids == [5, 6, 7]
+        assert _PENDING_LOADS["req-alloc"].num_external_tokens == 10
 
     def test_ignores_zero_external(self, connector):
         req = MockRequest("req-zero")
         connector.update_state_after_alloc(req, None, num_external_tokens=0)
-        assert "req-zero" not in connector._pending_loads
+        from avp.connectors.vllm_kv_connector import _PENDING_LOADS
+        assert "req-zero" not in _PENDING_LOADS
 
 
 class TestStartLoadKV:
@@ -311,7 +313,8 @@ class TestStartLoadKV:
             request_id="req-b", store_key=store_key,
             num_external_tokens=4, block_ids=[5],
         )
-        connector._pending_loads["req-b"] = meta_b
+        from avp.connectors.vllm_kv_connector import _PENDING_LOADS
+        _PENDING_LOADS["req-b"] = meta_b
 
         connector.start_load_kv(forward_context=MockForwardContext())
 
