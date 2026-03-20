@@ -390,7 +390,24 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 vocab_overlap_projection,
             )
             from ..types import ProjectionMethod
-            from .vllm_kv_connector import _PROJECTED_EMBEDDINGS, compute_request_hash
+            from .vllm_kv_connector import (
+                _PROJECTED_EMBEDDINGS,
+                _REQUEST_STORE_KEYS,
+                compute_request_hash,
+            )
+
+            # Try to get request_id from forward context for _REQUEST_STORE_KEYS
+            # lookup. The connector's build_connector_meta resolves explicit
+            # store keys (from kv_transfer_params) and stores the mapping.
+            _fwd_req_id = ""
+            try:
+                from vllm.forward_context import get_forward_context as _gfc
+                _ctx = _gfc()
+                _fwd_req_id = str(getattr(_ctx, "request_id", ""))
+                if not _fwd_req_id and hasattr(_ctx, "requests") and _ctx.requests:
+                    _fwd_req_id = str(getattr(_ctx.requests[0], "request_id", ""))
+            except Exception:
+                pass
 
             for i in range(num_prefill):
               try:
@@ -417,11 +434,12 @@ def _make_latent_model_cls(base_cls: type) -> type:
                         target_norm=self._avp_map.target_norm,
                     )
 
-                # Hash the chunk tokens as the store key. The latent loop
-                # guard (chunk_first_pos > L-1) ensures the full prompt is
-                # in this chunk when cross-model projection runs.
-                req_token_ids = input_ids[chunk_start:chunk_end].tolist()
-                store_key = compute_request_hash(req_token_ids)
+                # Derive store key: use _REQUEST_STORE_KEYS (which resolves
+                # explicit keys from kv_transfer_params), fall back to chunk hash.
+                store_key = _REQUEST_STORE_KEYS.get(_fwd_req_id, "")
+                if not store_key:
+                    req_token_ids = input_ids[chunk_start:chunk_end].tolist()
+                    store_key = compute_request_hash(req_token_ids)
                 _PROJECTED_EMBEDDINGS[store_key] = projected.squeeze(0)
 
                 logger.debug(

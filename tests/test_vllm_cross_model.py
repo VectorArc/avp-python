@@ -754,3 +754,39 @@ class TestAuditFixes:
                 target_tokenizer=tokenizer,
                 auto_save=False,
             )
+
+    def test_explicit_store_key_from_kv_transfer_params(self):
+        """Explicit store_key via kv_transfer_params takes priority over prompt hash."""
+        from avp.connectors.vllm_kv_connector import AVPReqMeta
+
+        class MockReqWithKVParams:
+            request_id = "req-explicit"
+            prompt_token_ids = [1, 2, 3]
+            kv_transfer_params = {"store_key": "my-custom-key"}
+
+        meta = AVPReqMeta.from_request(MockReqWithKVParams())
+        assert meta.store_key == "my-custom-key"
+
+    def test_fallback_to_prompt_hash_without_kv_transfer_params(self):
+        """Without kv_transfer_params, store_key falls back to prompt hash."""
+        from avp.connectors.vllm_kv_connector import AVPReqMeta, compute_request_hash
+
+        class MockReqNoKVParams:
+            request_id = "req-fallback"
+            prompt_token_ids = [10, 20, 30]
+
+        meta = AVPReqMeta.from_request(MockReqNoKVParams())
+        expected = compute_request_hash([10, 20, 30])
+        assert meta.store_key == expected
+
+    def test_make_sampling_params_sets_store_key(self):
+        """make_sampling_params creates SamplingParams with kv_transfer_params."""
+        from avp.connectors.vllm_kv_connector import make_sampling_params
+
+        try:
+            params = make_sampling_params("problem-42", max_tokens=256, temperature=0.0)
+            assert params.extra_args["kv_transfer_params"]["store_key"] == "problem-42"
+            assert params.max_tokens == 256
+            assert params.temperature == 0.0
+        except ImportError:
+            pytest.skip("vllm not installed")

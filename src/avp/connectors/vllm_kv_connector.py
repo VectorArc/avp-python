@@ -164,11 +164,17 @@ class AVPReqMeta:
     def from_request(cls, request: Any, store_key: str = "") -> "AVPReqMeta":
         req_id = str(getattr(request, "request_id", "default"))
         if not store_key:
-            prompt_ids = getattr(request, "prompt_token_ids", None)
-            if prompt_ids:
-                store_key = compute_request_hash(prompt_ids)
-            else:
-                store_key = req_id
+            # Check kv_transfer_params for explicit store_key (set via
+            # SamplingParams(extra_args={"kv_transfer_params": {"store_key": "..."}})
+            kv_params = getattr(request, "kv_transfer_params", None)
+            if isinstance(kv_params, dict):
+                store_key = kv_params.get("store_key", "")
+            if not store_key:
+                prompt_ids = getattr(request, "prompt_token_ids", None)
+                if prompt_ids:
+                    store_key = compute_request_hash(prompt_ids)
+                else:
+                    store_key = req_id
         return cls(request_id=req_id, store_key=store_key)
 
 
@@ -763,6 +769,39 @@ def prepare_latent_prompt(token_ids: List[int], latent_steps: int = 20) -> List[
 def compute_request_hash(token_ids: List[int]) -> str:
     data = ",".join(str(t) for t in token_ids).encode("utf-8")
     return hashlib.sha256(data).hexdigest()[:16]
+
+
+def make_sampling_params(store_key: str, **kwargs: Any) -> Any:
+    """Create vLLM SamplingParams with an explicit AVP store key.
+
+    The store key lets Agent B retrieve Agent A's KV-cache or projected
+    embedding even when using a different prompt. Without this, the store
+    key is derived from the prompt token hash, requiring both agents to
+    use the same prompt.
+
+    Args:
+        store_key: Shared key for the store (any string).
+        **kwargs: Forwarded to ``vllm.SamplingParams`` (e.g. max_tokens,
+            temperature).
+
+    Returns:
+        ``vllm.SamplingParams`` with the store key in ``extra_args``.
+
+    Example::
+
+        # Agent A (researcher)
+        params_a = make_sampling_params("problem-42", max_tokens=1)
+        engine_a.generate([researcher_prompt], params_a)
+
+        # Agent B (solver) — different prompt, same store key
+        params_b = make_sampling_params("problem-42", max_tokens=256)
+        engine_b.generate([solver_prompt], params_b)
+    """
+    import vllm
+
+    extra_args = kwargs.pop("extra_args", None) or {}
+    extra_args["kv_transfer_params"] = {"store_key": store_key}
+    return vllm.SamplingParams(extra_args=extra_args, **kwargs)
 
 
 def load_projected_embedding(store_dir: str, store_key: str) -> Optional[Any]:
