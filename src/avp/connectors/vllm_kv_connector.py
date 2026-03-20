@@ -436,6 +436,16 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             return (0, False)
 
         matched = max(0, seq_len - num_computed_tokens)
+
+        # Leave at least 1 token for the scheduler to process.
+        # vLLM asserts num_new_tokens > 0 (scheduler.py:670).
+        prompt_len = getattr(request, "num_tokens", None)
+        if prompt_len is None:
+            prompt_ids = getattr(request, "prompt_token_ids", None)
+            prompt_len = len(prompt_ids) if prompt_ids else 0
+        if prompt_len > 0 and matched >= prompt_len - num_computed_tokens:
+            matched = max(0, prompt_len - num_computed_tokens - 1)
+
         return (matched, False)
 
     def update_state_after_alloc(

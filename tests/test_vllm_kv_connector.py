@@ -241,7 +241,8 @@ class TestGetNumNewMatchedTokens:
 
         req = MockRequest("req-match", prompt_token_ids=prompt_ids)
         matched, is_async = connector.get_num_new_matched_tokens(req, num_computed_tokens=0)
-        assert matched == 50
+        # Capped at prompt_len - 1 to leave 1 token for scheduler
+        assert matched == 2  # 3 tokens prompt, leave 1 → min(50, 3-0-1) = 2
         assert is_async is False
 
     def test_returns_zero_when_not_stored(self, connector):
@@ -251,13 +252,14 @@ class TestGetNumNewMatchedTokens:
 
     def test_subtracts_computed_tokens(self, connector):
         from avp.connectors.vllm_kv_connector import compute_request_hash
-        prompt_ids = [1, 2, 3]
+        # Use a longer prompt so the cap doesn't kick in
+        prompt_ids = list(range(100))
         store_key = compute_request_hash(prompt_ids)
         connector._store.save_meta(store_key, seq_len=30, num_layers=1)
 
         req = MockRequest("req-partial", prompt_token_ids=prompt_ids)
         matched, _ = connector.get_num_new_matched_tokens(req, num_computed_tokens=10)
-        assert matched == 20
+        assert matched == 20  # 30 - 10 = 20, capped at 100-10-1=89, so 20
 
 
 class TestUpdateStateAfterAlloc:
