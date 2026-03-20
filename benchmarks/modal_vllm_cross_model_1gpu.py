@@ -134,35 +134,16 @@ def run_test():
         print(f"AGENT B: {TGT_MODEL}")
         print("=" * 60)
 
-        # Load target embed weights from safetensors for token→embedding conversion
-        from avp.connectors.vllm_model_plugin import _load_target_model_weights
-        tgt_embed_weight, _, _ = _load_target_model_weights(TGT_MODEL)
-        tgt_embed_weight = tgt_embed_weight.float()
+        engine_b = vllm.LLM(
+            model=TGT_MODEL,
+            enforce_eager=True,
+            max_model_len=512,
+            gpu_memory_utilization=0.7,
+            enable_prompt_embeds=True,
+            max_num_seqs=1,
+        )
 
-        # Try with prompt_embeds first, fall back to text-only
-        try:
-            engine_b = vllm.LLM(
-                model=TGT_MODEL,
-                enforce_eager=True,
-                max_model_len=512,
-                gpu_memory_utilization=0.7,
-                enable_prompt_embeds=True,
-                max_num_seqs=1,
-            )
-            has_prompt_embeds = True
-            print("  enable_prompt_embeds=True OK")
-        except Exception as e:
-            print(f"  enable_prompt_embeds failed ({e}), using text-only")
-            engine_b = vllm.LLM(
-                model=TGT_MODEL,
-                enforce_eager=True,
-                max_model_len=512,
-                gpu_memory_utilization=0.7,
-                max_num_seqs=1,
-            )
-            has_prompt_embeds = False
-
-        from avp.connectors.vllm_kv_connector import load_projected_embedding
+        from avp.connectors.vllm_kv_connector import generate_with_rosetta
 
         latent_answers = []
         text_answers = []
@@ -173,9 +154,9 @@ def run_test():
                 [{"role": "user", "content": solver_prompt}],
                 tokenize=True, add_generation_prompt=True,
             )
+            params = vllm.SamplingParams(max_tokens=256, temperature=0.0)
 
             # --- Text baseline ---
-            params = vllm.SamplingParams(max_tokens=256, temperature=0.0)
             t0 = time.monotonic()
             text_out = engine_b.generate(
                 [vllm.TokensPrompt(prompt_token_ids=list(solver_ids))], params,
@@ -184,34 +165,21 @@ def run_test():
             text_answer = text_out[0].outputs[0].text.strip()
             text_answers.append(text_answer)
 
-            # --- Latent (projected embedding + prompt) ---
-            projected = load_projected_embedding(store_dir, store_keys[i])
-            if projected is not None and has_prompt_embeds:
-                try:
-                    # Convert solver token IDs → embeddings using safetensors weights
-                    solver_embeds = tgt_embed_weight[solver_ids]  # [seq_len, D]
-
-                    # Prepend projected embedding as virtual context token
-                    proj_emb = projected.float()
-                    if proj_emb.dim() == 1:
-                        proj_emb = proj_emb.unsqueeze(0)  # [1, D]
-
-                    combined = torch.cat([proj_emb, solver_embeds], dim=0)
-                    # Cast to model dtype (bf16)
-                    combined = combined.to(torch.bfloat16)
-
-                    t0 = time.monotonic()
-                    latent_out = engine_b.generate(
-                        [{"prompt_embeds": combined}], params,
-                    )
-                    latent_elapsed = time.monotonic() - t0
-                    latent_answer = latent_out[0].outputs[0].text.strip()
-                except Exception as e:
-                    latent_answer = f"ERROR: {e}"
-                    latent_elapsed = 0.0
-            else:
-                latent_answer = "SKIP (no projected embedding or no prompt_embeds)"
-                latent_elapsed = 0.0
+            # --- Latent (one-liner via generate_with_rosetta) ---
+            t0 = time.monotonic()
+            try:
+                latent_out = generate_with_rosetta(
+                    engine=engine_b,
+                    prompt_token_ids=list(solver_ids),
+                    store_dir=store_dir,
+                    store_key=store_keys[i],
+                    sampling_params=params,
+                )
+                latent_elapsed = time.monotonic() - t0
+                latent_answer = latent_out[0].outputs[0].text.strip()
+            except Exception as e:
+                latent_answer = f"ERROR: {e}"
+                latent_elapsed = time.monotonic() - t0
 
             latent_answers.append(latent_answer)
 
@@ -222,7 +190,6 @@ def run_test():
         results["latent_answers"] = latent_answers
         results["text_answers"] = text_answers
         results["status"] = "done"
-        results["has_prompt_embeds"] = has_prompt_embeds
 
     print("\n" + "=" * 60)
     print("DONE")

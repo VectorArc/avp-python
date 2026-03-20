@@ -537,3 +537,106 @@ class TestEndToEndCrossModel:
         projected = stub._project_cross_model_stub(hidden)
         assert projected is not None
         assert projected.shape[-1] == tgt_hidden
+
+
+# ---------------------------------------------------------------------------
+# Tests: Cross-model KV skip
+# ---------------------------------------------------------------------------
+
+
+class TestCrossModelKVSkip:
+    """Test that save_kv_layer is skipped in cross-model mode."""
+
+    def test_cross_model_skips_kv_save(self):
+        """Connector with avp_target_model should skip save_kv_layer."""
+        from avp.connectors.vllm_kv_connector import AVPKVConnectorV1Dynamic
+
+        with tempfile.TemporaryDirectory() as store_dir:
+            class MockKVConfig:
+                kv_connector_extra_config = {
+                    "avp_store_dir": store_dir,
+                    "avp_latent_steps": 10,
+                    "avp_target_model": "some/target-model",
+                }
+
+            class MockVLLMConfig:
+                kv_transfer_config = MockKVConfig()
+
+            connector = AVPKVConnectorV1Dynamic(
+                vllm_config=MockVLLMConfig(), role=None,
+            )
+
+            assert connector._cross_model_only is True
+
+            # save_kv_layer should be a no-op (returns immediately)
+            # Calling with garbage args — if it didn't return early, it would crash
+            connector.save_kv_layer("model.layers.0.attn", None, None)
+
+            # No pending saves should exist
+            assert len(connector._pending_saves) == 0
+
+    def test_same_model_does_not_skip_kv_save(self):
+        """Connector without avp_target_model should NOT skip save_kv_layer."""
+        from avp.connectors.vllm_kv_connector import AVPKVConnectorV1Dynamic
+
+        with tempfile.TemporaryDirectory() as store_dir:
+            os.environ.pop("AVP_TARGET_MODEL", None)
+
+            class MockKVConfig:
+                kv_connector_extra_config = {
+                    "avp_store_dir": store_dir,
+                    "avp_latent_steps": 10,
+                }
+
+            class MockVLLMConfig:
+                kv_transfer_config = MockKVConfig()
+
+            connector = AVPKVConnectorV1Dynamic(
+                vllm_config=MockVLLMConfig(), role=None,
+            )
+
+            assert connector._cross_model_only is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: Projected embedding synchronous flush
+# ---------------------------------------------------------------------------
+
+
+class TestProjectedSyncFlush:
+    """Test that projected embeddings are flushed synchronously."""
+
+    def test_projected_available_immediately_after_wait_for_save(self):
+        """projected.pt should exist on disk immediately after wait_for_save."""
+        from avp.connectors.vllm_kv_connector import (
+            AVPKVConnectorV1Dynamic,
+            FileKVStore,
+            _PROJECTED_EMBEDDINGS,
+        )
+
+        with tempfile.TemporaryDirectory() as store_dir:
+            os.environ.pop("AVP_TARGET_MODEL", None)
+
+            class MockKVConfig:
+                kv_connector_extra_config = {
+                    "avp_store_dir": store_dir,
+                    "avp_latent_steps": 0,
+                }
+
+            class MockVLLMConfig:
+                kv_transfer_config = MockKVConfig()
+
+            connector = AVPKVConnectorV1Dynamic(
+                vllm_config=MockVLLMConfig(), role=None,
+            )
+
+            emb = torch.randn(64)
+            _PROJECTED_EMBEDDINGS["sync-key"] = emb
+
+            connector.wait_for_save()
+
+            # No sleep needed — projected flush is synchronous
+            store = FileKVStore(store_dir)
+            loaded = store.load_projected("sync-key")
+            assert loaded is not None
+            assert torch.allclose(loaded, emb)

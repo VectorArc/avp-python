@@ -291,9 +291,15 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         self._save_error_logged = False
         self._save_thread: Optional[threading.Thread] = None
 
+        # Cross-model mode: skip KV layer saves (useless to a different model).
+        # The projected embedding is saved synchronously in wait_for_save.
+        self._cross_model_only = bool(target_model)
+
         logger.info(
-            "AVPKVConnectorV1Dynamic initialized: store=%s, block_size=%d, latent_steps=%s",
+            "AVPKVConnectorV1Dynamic initialized: store=%s, block_size=%d, "
+            "latent_steps=%s, cross_model=%s",
             store_dir, self._block_size, latent_steps,
+            target_model or "(none)",
         )
 
     @property
@@ -316,7 +322,13 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         requests (query_len == 1) are skipped. Extracted data is queued
         in memory (_pending_saves) and flushed to disk asynchronously
         by wait_for_save.
+
+        Skipped entirely in cross-model mode — the full KV cache from model A
+        is useless to model B. Only the projected embedding matters.
         """
+        if self._cross_model_only:
+            return
+
         layer_idx = _parse_layer_index(layer_name)
         if layer_idx is None:
             return
@@ -727,3 +739,76 @@ def load_projected_embedding(store_dir: str, store_key: str) -> Optional[Any]:
     """
     store = FileKVStore(store_dir)
     return store.load_projected(store_key)
+
+
+def generate_with_rosetta(
+    engine: Any,
+    prompt_token_ids: List[int],
+    store_dir: str,
+    store_key: str,
+    sampling_params: Any,
+    model_id: Optional[str] = None,
+) -> Any:
+    """Generate from a rosetta-projected embedding via vLLM.
+
+    Loads the projected embedding that Agent A saved, prepends it to
+    the prompt as a virtual context token, and generates via vLLM's
+    ``prompt_embeds`` pathway. Falls back to normal token-based
+    generation if no projected embedding is found.
+
+    The engine must be created with ``enable_prompt_embeds=True``.
+
+    Args:
+        engine: vLLM ``LLM`` instance for Agent B.
+        prompt_token_ids: Agent B's prompt token IDs.
+        store_dir: Path to the shared AVP store directory.
+        store_key: Store key from Agent A (from ``compute_request_hash``).
+        sampling_params: vLLM ``SamplingParams``.
+        model_id: Agent B's HuggingFace model ID. Auto-detected from
+            engine if not provided.
+
+    Returns:
+        vLLM ``RequestOutput`` list (same as ``engine.generate``).
+    """
+    import torch
+
+    projected = load_projected_embedding(store_dir, store_key)
+
+    if projected is None:
+        # No rosetta embedding — generate normally from tokens
+        import vllm
+        return engine.generate(
+            [vllm.TokensPrompt(prompt_token_ids=list(prompt_token_ids))],
+            sampling_params,
+        )
+
+    # Auto-detect model ID from the engine
+    if model_id is None:
+        try:
+            model_id = engine.llm_engine.model_config.model
+        except AttributeError:
+            raise ValueError(
+                "Cannot auto-detect model_id from engine. "
+                "Pass model_id explicitly."
+            )
+
+    # Load target embed weights (cached after first call)
+    from .vllm_model_plugin import _load_target_model_weights
+    embed_weight, _, _ = _load_target_model_weights(model_id)
+
+    # Convert token IDs → embeddings
+    prompt_embeds = embed_weight[prompt_token_ids]  # [seq_len, D]
+
+    # Prepend projected embedding as a virtual context token
+    proj = projected.to(torch.float32)
+    if proj.dim() == 1:
+        proj = proj.unsqueeze(0)  # [1, D]
+    combined = torch.cat([proj, prompt_embeds.to(torch.float32)], dim=0)
+
+    # Cast to bfloat16 (vLLM's default dtype for most models)
+    combined = combined.to(torch.bfloat16)
+
+    return engine.generate(
+        [{"prompt_embeds": combined}],
+        sampling_params,
+    )
