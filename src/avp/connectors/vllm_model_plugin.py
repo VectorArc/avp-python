@@ -259,10 +259,14 @@ def _make_latent_model_cls(base_cls: type) -> type:
             return self._is_prefill()
 
         def _build_latent_attn_metadata(
-            self, original_meta: Any, slot_mapping_1tok: Any,
-            seq_len_override: int = 0,
+            self, original_meta: Any, slot_mapping: Any,
+            seq_lens: Any, block_table: Any,
         ) -> Any:
-            """Build decode-like FlashAttentionMetadata for a single-token step."""
+            """Build decode-like FlashAttentionMetadata for batched latent step.
+
+            Each request gets 1 query token (decode-like). Supports
+            arbitrary number of requests in the batch.
+            """
             import torch
 
             try:
@@ -270,24 +274,21 @@ def _make_latent_model_cls(base_cls: type) -> type:
             except ImportError:
                 return None
 
-            device = original_meta.seq_lens.device
-            query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
+            num_reqs = seq_lens.shape[0]
+            device = seq_lens.device
 
-            if seq_len_override > 0:
-                seq_lens = torch.tensor(
-                    [seq_len_override], dtype=original_meta.seq_lens.dtype, device=device,
-                )
-            else:
-                seq_lens = original_meta.seq_lens[:1].clone()
+            query_start_loc = torch.arange(
+                num_reqs + 1, dtype=torch.int32, device=device,
+            )
 
             return FlashAttentionMetadata(
-                num_actual_tokens=1,
+                num_actual_tokens=num_reqs,
                 max_query_len=1,
                 query_start_loc=query_start_loc,
                 max_seq_len=int(seq_lens.max().item()),
-                seq_lens=seq_lens,
-                block_table=original_meta.block_table[:1].clone(),
-                slot_mapping=slot_mapping_1tok,
+                seq_lens=seq_lens.clone(),
+                block_table=block_table.clone(),
+                slot_mapping=slot_mapping,
                 use_cascade=False,
                 common_prefix_len=0,
                 cu_prefix_query_lens=None,
@@ -311,14 +312,14 @@ def _make_latent_model_cls(base_cls: type) -> type:
         ) -> Any:
             """Forward pass with optional latent thinking steps.
 
-            On prefill, runs N additional forward passes using the overwrite
-            pattern: each step projects the last hidden state back to
-            embedding space and re-computes at the last position. The
-            enriched KV entry at this position persists through all decode
-            tokens, influencing the entire generation.
+            Supports multi-request batches. Identifies prefill requests
+            (query_len > 1), runs N latent steps for each, and enriches
+            their last KV position. Decode-only requests pass through
+            unmodified.
 
-            Between steps, a new ForwardContext is set with decode-like
-            attention metadata so the attention kernels see consistent shapes.
+            The latent loop processes ALL prefill requests together in a
+            single batched forward call per step (same as a normal decode
+            batch), maintaining vLLM's throughput advantages.
 
             Output shape is preserved: [num_tokens, hidden_dim].
             """
@@ -357,47 +358,82 @@ def _make_latent_model_cls(base_cls: type) -> type:
             first_layer_name = next(iter(attn_metadata))
             original_meta = attn_metadata[first_layer_name]
 
-            # Guard: single-request batches only
-            meta_seq_lens = original_meta.seq_lens
-            if meta_seq_lens is not None and int((meta_seq_lens > 0).sum().item()) > 1:
+            # Identify prefill requests in the batch.
+            # query_start_loc[i+1] - query_start_loc[i] = num query tokens for request i
+            # Prefill: > 1 query tokens. Decode: 1 query token.
+            query_start_loc = original_meta.query_start_loc
+            seq_lens = original_meta.seq_lens
+            block_table = original_meta.block_table
+            num_reqs = seq_lens.shape[0]
+
+            # Find prefill request indices and their last token positions in the batch
+            prefill_req_indices = []
+            last_token_indices = []
+
+            for i in range(num_reqs):
+                if int(seq_lens[i].item()) <= 0:
+                    continue
+                query_len = int(query_start_loc[i + 1].item()) - int(query_start_loc[i].item())
+                if query_len > 1:  # prefill
+                    # Last token index in the flat hidden_states tensor
+                    last_idx = int(query_start_loc[i + 1].item()) - 1
+                    prefill_req_indices.append(i)
+                    last_token_indices.append(last_idx)
+
+            if not prefill_req_indices:
                 return hidden_states
 
-            # Overwrite position and slot
-            overwrite_pos = int(positions[-1])
-            slot_idx = self._compute_slot(overwrite_pos, original_meta.block_table)
-            slot_mapping = torch.tensor([slot_idx], dtype=torch.int64, device=positions.device)
-            pos_tensor = torch.tensor([overwrite_pos], dtype=positions.dtype, device=positions.device)
+            num_prefill = len(prefill_req_indices)
+            device = positions.device
 
-            # Build metadata once (overwrite uses same position/seq_len every step)
-            latent_meta = self._build_latent_attn_metadata(original_meta, slot_mapping)
+            # Extract last hidden states for all prefill requests [num_prefill, D]
+            last_hiddens = hidden_states[last_token_indices, :]
+
+            # Compute overwrite positions and slots for each prefill request
+            overwrite_positions = []
+            slot_indices = []
+            for i, req_idx in enumerate(prefill_req_indices):
+                pos = int(positions[last_token_indices[i]].item())
+                overwrite_positions.append(pos)
+                slot_idx = self._compute_slot(pos, block_table, req_idx=req_idx)
+                slot_indices.append(slot_idx)
+
+            pos_tensor = torch.tensor(overwrite_positions, dtype=positions.dtype, device=device)
+            slot_tensor = torch.tensor(slot_indices, dtype=torch.int64, device=device)
+
+            # Build batched metadata once (overwrite: same positions/seq_lens every step)
+            prefill_seq_lens = seq_lens[prefill_req_indices]
+            prefill_block_table = block_table[prefill_req_indices]
+
+            latent_meta = self._build_latent_attn_metadata(
+                original_meta, slot_tensor, prefill_seq_lens, prefill_block_table,
+            )
             if latent_meta is None:
                 return hidden_states
 
             per_layer_meta = {name: latent_meta for name in attn_metadata}
-            per_layer_slots = {name: slot_mapping for name in attn_metadata}
+            per_layer_slots = {name: slot_tensor for name in attn_metadata}
 
-            # Latent thinking loop
+            # Latent thinking loop (batched: all prefill requests together)
             original_hidden = hidden_states
-            last_hidden = hidden_states[-1:, :]
             t0 = time.monotonic()
             steps_completed = 0
 
             for step in range(N):
-                if torch.isnan(last_hidden).any():
+                if torch.isnan(last_hiddens).any():
                     logger.warning("NaN at latent step %d/%d -- stopping", step + 1, N)
                     break
 
+                # Project all prefill requests' hidden states [num_prefill, D]
                 projected = _project_hidden_state(
-                    last_hidden, self._is_tied,
+                    last_hiddens, self._is_tied,
                     self._embed_weight, self._w_realign, self._target_norm,
                 )
-                if projected.dim() == 1:
-                    projected = projected.unsqueeze(0)
                 projected = projected.to(dtype=hidden_states.dtype)
 
                 with set_forward_context(
                     per_layer_meta, self._vllm_config,
-                    num_tokens=1, slot_mapping=per_layer_slots,
+                    num_tokens=num_prefill, slot_mapping=per_layer_slots,
                 ):
                     step_hidden = base_cls.forward(
                         self,
@@ -408,17 +444,21 @@ def _make_latent_model_cls(base_cls: type) -> type:
                         **kwargs,
                     )
 
-                last_hidden = step_hidden[-1:, :] if step_hidden.dim() == 2 else step_hidden
+                # Extract each request's hidden for next iteration
+                last_hiddens = step_hidden[:num_prefill, :] if step_hidden.dim() == 2 else step_hidden
                 steps_completed = step + 1
 
             if steps_completed > 0:
                 elapsed_ms = (time.monotonic() - t0) * 1000
                 logger.debug(
-                    "Latent thinking: %d steps in %.1fms (%.1fms/step)",
-                    steps_completed, elapsed_ms, elapsed_ms / steps_completed,
+                    "Latent thinking: %d reqs, %d steps in %.1fms (%.1fms/step)",
+                    num_prefill, steps_completed, elapsed_ms,
+                    elapsed_ms / steps_completed,
                 )
+                # Replace each prefill request's last position with enriched hidden
                 original_hidden = original_hidden.clone()
-                original_hidden[-1:, :] = last_hidden
+                for i, idx in enumerate(last_token_indices):
+                    original_hidden[idx, :] = last_hiddens[i, :]
 
             return original_hidden
 
