@@ -431,38 +431,39 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             num_tokens = hidden_states.shape[0]
 
-            # Determine L (real prompt length) and N (latent steps).
-            # If the prompt was padded with N dummy tokens, num_tokens = L + N.
-            # The last N positions in the prefill are dummy tokens whose KV
-            # entries we'll overwrite with latent computation.
-            # If num_tokens <= N, the prompt is too short for padding -- skip.
-            if num_tokens <= N:
-                logger.info(
-                    "Skipping latent: num_tokens=%d <= N=%d (prompt not padded?)",
-                    num_tokens, N,
-                )
-                return hidden_states
+            # Determine if prompt was padded for extend pattern.
+            # If num_tokens > prompt length (i.e., padding detected), use
+            # extend. Otherwise, use overwrite (no extra blocks needed).
+            use_extend = num_tokens > N and os.environ.get("AVP_LATENT_MODE", "") == "extend"
 
-            L = num_tokens - N  # real prompt length
-
-            # Position L-1's hidden state is identical to HF (causal mask
-            # ensures dummy tokens at positions L..L+N-1 don't affect it)
-            last_hidden = hidden_states[L - 1 : L, :]  # [1, hidden_dim]
+            if use_extend:
+                L = num_tokens - N
+                last_hidden = hidden_states[L - 1 : L, :]
+            else:
+                # Overwrite pattern: reuse last position
+                L = num_tokens
+                last_hidden = hidden_states[-1:, :]
 
             # Extract block_table for slot computation
             block_table = original_meta.block_table
 
-            logger.info(
-                "Latent thinking (extend): L=%d, N=%d, total=%d",
-                L, N, num_tokens,
+            mode_label = "extend" if use_extend else "overwrite"
+            logger.debug(
+                "Latent thinking (%s): L=%d, N=%d, total=%d",
+                mode_label, L, N, num_tokens,
             )
 
             # Save original hidden states for shape preservation
             original_hidden = hidden_states
 
-            # Latent thinking loop (extend pattern)
+            # Latent thinking loop
             t0 = time.monotonic()
             steps_completed = 0
+
+            # For overwrite: reuse same position and slot every step.
+            # For extend: increment position and seq_len each step.
+            overwrite_position = positions[-1]  # last prompt position
+
             for step in range(N):
                 # NaN safety check
                 if torch.isnan(last_hidden).any():
@@ -477,22 +478,15 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     projected = projected.unsqueeze(0)
                 projected = projected.to(dtype=hidden_states.dtype)
 
-                if step == 0:
-                    logger.info(
-                        "Extend step 0 diag: is_tied=%s, hidden_norm=%.2f, "
-                        "proj_norm=%.2f, proj_range=[%.4f,%.4f], "
-                        "target_norm=%.4f, dtype=%s",
-                        self._is_tied,
-                        last_hidden.float().norm().item(),
-                        projected.float().norm().item(),
-                        projected.float().min().item(),
-                        projected.float().max().item(),
-                        self._target_norm.float().item() if self._target_norm is not None else 0,
-                        projected.dtype,
-                    )
+                if use_extend:
+                    # Extend: new position each step, seq_len grows
+                    step_position = L + step
+                    current_seq_len = L + step + 1
+                else:
+                    # Overwrite: same position every step, seq_len unchanged
+                    step_position = int(overwrite_position)
+                    current_seq_len = L  # unchanged
 
-                # Position for this latent step: L + step
-                step_position = L + step
                 step_pos_tensor = torch.tensor(
                     [step_position], dtype=positions.dtype, device=positions.device,
                 )
@@ -505,10 +499,6 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     [slot_idx], dtype=torch.int64, device=positions.device,
                 )
 
-                # Build attention metadata for this step.
-                # seq_len = L + step + 1: attend to prompt (0..L-1) + all
-                # prior latent steps (L..L+step-1) + this step (L+step).
-                current_seq_len = L + step + 1
                 latent_meta = self._build_latent_attn_metadata(
                     original_meta, slot_mapping_1tok,
                     seq_len_override=current_seq_len,
@@ -541,17 +531,13 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             if steps_completed > 0:
-                logger.info(
-                    "Latent thinking (extend): %d steps in %.1fms (%.1fms/step)",
-                    steps_completed, elapsed_ms,
+                logger.debug(
+                    "Latent thinking (%s): %d steps in %.1fms (%.1fms/step)",
+                    mode_label, steps_completed, elapsed_ms,
                     elapsed_ms / steps_completed,
                 )
 
-            # Replace the last position's hidden state (the last dummy token)
-            # with the enriched hidden state for logits computation.
-            # vLLM's model runner uses logit_indices to select hidden_states
-            # for compute_logits(). For a single request, logit_indices points
-            # to the last position (num_tokens - 1 = L + N - 1).
+            # Replace the last position's hidden state with enriched result.
             if steps_completed > 0:
                 original_hidden = original_hidden.clone()
                 original_hidden[-1:, :] = last_hidden

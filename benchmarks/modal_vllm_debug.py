@@ -197,6 +197,33 @@ def run_debug():
         del engine
 
     # ================================================================
+    # Config 5: Overwrite (wrapper + latent_steps=20, NO padding)
+    # ================================================================
+    print("\n" + "=" * 60)
+    print("CONFIG 5: Overwrite (wrapper + 20 steps, NO padding)")
+    print("=" * 60)
+
+    with tempfile.TemporaryDirectory() as td:
+        ktc = KVTransferConfig(
+            kv_connector="AVPKVConnectorV1Dynamic",
+            kv_connector_module_path="avp.connectors.vllm_kv_connector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"avp_latent_steps": 20, "avp_store_dir": td},
+        )
+        engine = vllm.LLM(
+            model=MODEL, enforce_eager=True, max_model_len=2048,
+            gpu_memory_utilization=0.85, kv_transfer_config=ktc,
+            hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
+        )
+        # Process one at a time (batch guard)
+        outputs = []
+        for ids in base_ids:
+            out = engine.generate([vllm.TokensPrompt(prompt_token_ids=ids)], params)
+            outputs.extend(out)
+        results["5_overwrite"] = print_results("Overwrite", outputs)
+        del engine
+
+    # ================================================================
     # Summary
     # ================================================================
     print("\n" + "=" * 60)
