@@ -109,9 +109,6 @@ def run_test():
             print(f"\n[{i+1}] Problem: {problem[:60]}...")
             print(f"    Tokens: {len(ids)} (+10 latent), Time: {elapsed:.2f}s")
 
-            # Wait for background flush thread to complete
-            time.sleep(1.0)
-
             # Verify projected embedding
             proj_path = Path(store_dir) / store_key / "projected.pt"
             if proj_path.exists():

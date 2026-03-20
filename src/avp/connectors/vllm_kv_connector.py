@@ -409,6 +409,25 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         if not pending and not projected:
             return
 
+        # Flush projected embeddings synchronously — they're tiny (~6KB,
+        # <1ms) and callers need them immediately after generate() returns.
+        for store_key, emb_tensor in projected.items():
+            try:
+                self._store.save_projected(store_key, emb_tensor)
+                logger.debug(
+                    "Saved projected embedding for %s: shape=%s",
+                    store_key, list(emb_tensor.shape),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to save projected embedding for %s: %s",
+                    store_key, e,
+                )
+
+        if not pending:
+            return
+
+        # KV layers are large (28 layers × MBs) — flush in background
         def _flush():
             for store_key, layers_data in pending.items():
                 num_tokens = layers_data.pop("num_tokens", 0)
@@ -427,20 +446,6 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                         )
                 except Exception as e:
                     logger.warning("Failed to flush KV for %s: %s", store_key, e)
-
-            # Flush projected embeddings from cross-model rosetta
-            for store_key, emb_tensor in projected.items():
-                try:
-                    self._store.save_projected(store_key, emb_tensor)
-                    logger.debug(
-                        "Saved projected embedding for %s: shape=%s",
-                        store_key, list(emb_tensor.shape),
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to flush projected embedding for %s: %s",
-                        store_key, e,
-                    )
 
         # Run in background thread to avoid blocking the model runner
         t = threading.Thread(target=_flush, daemon=True)
