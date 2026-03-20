@@ -290,15 +290,20 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             else:
                 layer_meta = fwd_meta
 
+            # Only save during prefill (max_query_len > 1), not decode
+            max_query_len = getattr(layer_meta, "max_query_len", 1)
+            if max_query_len <= 1:
+                return
+
             block_table = getattr(layer_meta, "block_table", None)
             seq_lens = getattr(layer_meta, "seq_lens", None)
             if block_table is None or seq_lens is None:
                 return
 
-            # For single-request batches, extract the first request's KV
+            # Single-request batches only
             num_reqs = int((seq_lens > 0).sum().item()) if seq_lens is not None else 0
             if num_reqs != 1:
-                return  # Only save for single-request batches
+                return
 
             num_tokens = int(seq_lens[0].item())
             if num_tokens <= 0:
@@ -311,9 +316,9 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             slot_mapping = _compute_slot_mapping(block_ids, self._block_size, num_tokens)
             per_request_kv = _extract_request_kv(kv_tensor, slot_mapping)
 
-            # Derive store key from request_id in forward context
-            request_id = self._extract_request_id(ctx)
-            store_key = request_id
+            # Derive store key from prompt_token_ids via scheduler metadata,
+            # or fall back to request_id from forward context
+            store_key = self._extract_request_id(ctx)
 
             with self._lock:
                 if store_key not in self._pending_saves:
