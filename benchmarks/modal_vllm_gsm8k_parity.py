@@ -95,6 +95,7 @@ def run_benchmark(mode: str = "same-model", n: int = 5):
     from avp.connectors.vllm_kv_connector import (
         compute_request_hash,
         generate_with_rosetta,
+        make_sampling_params,
         prepare_latent_prompt,
     )
 
@@ -141,20 +142,22 @@ def run_benchmark(mode: str = "same-model", n: int = 5):
             max_num_seqs=1,
         )
 
-        # Think on all problems
+        # Think on all problems (researcher prompt, different from solver)
         store_keys = []
-        think_params = vllm.SamplingParams(max_tokens=1, temperature=0.0)
         t0_think = time.monotonic()
 
         for i, q in enumerate(questions):
-            prompt = f"Solve step by step: {q}"
+            store_key = f"gsm8k-{i}"
+            store_keys.append(store_key)
+
+            researcher_prompt = f"Analyze this math problem carefully: {q}"
             ids = src_tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
+                [{"role": "user", "content": researcher_prompt}],
                 tokenize=True, add_generation_prompt=True,
             )
             padded = prepare_latent_prompt(list(ids), LATENT_STEPS)
-            store_keys.append(compute_request_hash(padded))
 
+            think_params = make_sampling_params(store_key, max_tokens=1, temperature=0.0)
             engine_a.generate(
                 [vllm.TokensPrompt(prompt_token_ids=padded)], think_params,
             )
@@ -243,18 +246,21 @@ def run_benchmark(mode: str = "same-model", n: int = 5):
             latent_correct = 0
             t0_gen = time.monotonic()
             for i, q in enumerate(questions):
-                # Same-model: Agent B must submit the PADDED prompt so the
-                # store key matches Agent A's. The KV connector sees the
-                # match and injects Agent A's enriched KV-cache as prefix.
-                prompt = f"Solve step by step: {q}"
-                ids = src_tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
+                # Same-model with explicit store key: Agent B uses a
+                # different solver prompt and the KV connector matches
+                # via kv_transfer_params, not prompt hash.
+                solver_prompt = f"Solve step by step: {q}"
+                solver_ids = tgt_tokenizer.apply_chat_template(
+                    [{"role": "user", "content": solver_prompt}],
                     tokenize=True, add_generation_prompt=True,
                 )
-                padded = prepare_latent_prompt(list(ids), LATENT_STEPS)
+                padded = prepare_latent_prompt(list(solver_ids), LATENT_STEPS)
+                gen_params_keyed = make_sampling_params(
+                    store_keys[i], max_tokens=2048, temperature=0.0,
+                )
                 outputs = engine_b.generate(
                     [vllm.TokensPrompt(prompt_token_ids=padded)],
-                    gen_params,
+                    gen_params_keyed,
                 )
                 pred = extract_answer(outputs[0].outputs[0].text)
                 if pred == gold[i]:
