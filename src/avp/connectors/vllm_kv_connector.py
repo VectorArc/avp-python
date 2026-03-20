@@ -403,11 +403,22 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                 if stored_kv is None:
                     continue
 
+                if layers_loaded == 0:
+                    logger.info(
+                        "Injecting KV: store_key=%s, kv_cache.shape=%s, "
+                        "stored_kv.shape=%s, slot_mapping[:5]=%s, "
+                        "block_ids=%s, external_tokens=%d",
+                        meta.store_key, kv_cache.shape, stored_kv.shape,
+                        slot_mapping[:5].tolist(),
+                        meta.block_ids[:3],
+                        meta.num_external_tokens,
+                    )
+
                 _inject_request_kv(kv_cache, slot_mapping, stored_kv)
                 layers_loaded += 1
 
             if layers_loaded > 0:
-                logger.debug(
+                logger.info(
                     "Loaded KV for %s: %d layers, %d tokens",
                     meta.store_key, layers_loaded, meta.num_external_tokens,
                 )
