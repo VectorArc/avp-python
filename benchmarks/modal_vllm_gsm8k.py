@@ -222,14 +222,16 @@ def run_gsm8k_benchmark(n_problems: int = 50, latent_steps: int = 20):
         # vLLM batches concurrent requests, and our latent loop only handles
         # single-request batches. Processing sequentially ensures every
         # request gets its latent steps.
+        # Uses OVERWRITE pattern (no padding) -- validated as producing
+        # baseline-level accuracy on 7B.
         t0 = time.time()
         outputs = []
-        for i, ids in enumerate(padded_ids):
+        for i, ids in enumerate(formatted_ids):  # Use original IDs, NOT padded
             prompt = vllm.TokensPrompt(prompt_token_ids=ids)
             out = engine.generate([prompt], params)
             outputs.extend(out)
             if (i + 1) % 10 == 0:
-                print(f"  Latent progress: {i + 1}/{len(padded_ids)}")
+                print(f"  Latent progress: {i + 1}/{len(formatted_ids)}")
         latent_time = time.time() - t0
 
         latent_mem_peak = torch.cuda.max_memory_allocated() / 1e9
