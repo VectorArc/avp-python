@@ -629,8 +629,10 @@ def _make_latent_model_cls(base_cls: type) -> type:
             t0 = time.monotonic()
             steps_completed = 0
 
+            _debug = os.environ.get("AVP_DEBUG", "") == "1"
+
             for step in range(N):
-                if torch.isnan(last_hiddens).any():
+                if _debug and torch.isnan(last_hiddens).any():
                     logger.warning("NaN at latent step %d/%d -- stopping", step + 1, N)
                     break
 

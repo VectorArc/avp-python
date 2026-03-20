@@ -269,11 +269,14 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         else:
             self._role = role
 
-        # Bridge latent steps config to model plugin
+        # Bridge config to model plugin via env vars. vLLM creates exactly
+        # one connector per role, so the process-wide env vars are safe.
+        # Note: the model plugin's __init__ may run BEFORE the connector's
+        # __init__ (vLLM loads the model first). Callers should pre-set
+        # these env vars before creating the engine as a workaround.
         latent_steps = self._extra_config.get("avp_latent_steps", 20)
         os.environ["AVP_LATENT_STEPS"] = str(latent_steps)
 
-        # Bridge cross-model target to model plugin
         target_model = self._extra_config.get("avp_target_model", "")
         if target_model:
             os.environ["AVP_TARGET_MODEL"] = target_model
@@ -727,6 +730,9 @@ def _parse_layer_index(layer_name: str) -> Optional[int]:
     return None
 
 
+_MAX_LATENT_STEPS = 100
+
+
 def prepare_latent_prompt(token_ids: List[int], latent_steps: int = 20) -> List[int]:
     """Pad prompt with N copies of the last token for extend-pattern latent thinking.
 
@@ -736,11 +742,19 @@ def prepare_latent_prompt(token_ids: List[int], latent_steps: int = 20) -> List[
 
     Args:
         token_ids: Original prompt token IDs.
-        latent_steps: Number of latent thinking steps (default: 20).
+        latent_steps: Number of latent thinking steps (default: 20, max: 100).
 
     Returns:
         Padded token IDs: original + N copies of the last token.
+
+    Raises:
+        ValueError: If latent_steps exceeds the maximum.
     """
+    if latent_steps > _MAX_LATENT_STEPS:
+        raise ValueError(
+            f"latent_steps={latent_steps} exceeds maximum {_MAX_LATENT_STEPS}. "
+            "Beyond 20 steps, accuracy degrades due to noise accumulation."
+        )
     if not token_ids or latent_steps <= 0:
         return list(token_ids)
     return list(token_ids) + [token_ids[-1]] * latent_steps
