@@ -414,19 +414,15 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                     continue
 
                 if layers_loaded == 0:
-                    logger.info(
-                        "Injecting KV: store_key=%s, kv_cache.shape=%s, "
-                        "stored_kv.shape=%s, slot_mapping[:5]=%s, "
-                        "block_ids=%s, external_tokens=%d",
-                        meta.store_key, kv_cache.shape, stored_kv.shape,
-                        slot_mapping[:5].tolist(),
-                        meta.block_ids[:3],
-                        meta.num_external_tokens,
+                    logger.debug(
+                        "Injecting KV: store_key=%s, %d tokens into %d slots",
+                        meta.store_key, stored_kv.shape[1],
+                        slot_mapping.shape[0],
                     )
 
-                # Truncate stored KV to match allocated slots (we may have
-                # saved more tokens than the scheduler allocated, due to the
-                # cap in get_num_new_matched_tokens leaving 1 for prefill)
+                # Align stored KV to allocated slot count. The store may
+                # have more tokens than the scheduler allocated (the -1 cap
+                # in get_num_new_matched_tokens leaves 1 token for prefill).
                 num_slots = slot_mapping.shape[0]
                 if stored_kv.shape[1] > num_slots:
                     stored_kv = stored_kv[:, :num_slots, :]
@@ -435,7 +431,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                 layers_loaded += 1
 
             if layers_loaded > 0:
-                logger.info(
+                logger.debug(
                     "Loaded KV for %s: %d layers, %d tokens",
                     meta.store_key, layers_loaded, meta.num_external_tokens,
                 )
@@ -462,21 +458,16 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         seq_len = self._store.get_seq_len(meta.store_key)
 
         if seq_len <= 0:
-            logger.info(
-                "get_num_new_matched_tokens: key=%s, seq_len=0 (not in store)",
-                meta.store_key,
-            )
             return (0, False)
-
-        logger.info(
-            "get_num_new_matched_tokens: key=%s, seq_len=%d, computed=%d",
-            meta.store_key, seq_len, num_computed_tokens,
-        )
 
         matched = max(0, seq_len - num_computed_tokens)
 
-        # Leave at least 1 token for the scheduler to process.
-        # vLLM asserts num_new_tokens > 0 (scheduler.py:670).
+        # Cap at prompt_len - 1 to leave 1 token for the scheduler.
+        # This is the standard pattern for synchronous KV connectors:
+        # vLLM requires at least 1 new token per forward pass to produce
+        # logits for the first decode token. The ExampleConnector does the
+        # same (matches prompt_token_ids[:-1]). Even the async path applies
+        # this adjustment internally in _update_waiting_for_remote_kv.
         prompt_len = getattr(request, "num_tokens", None)
         if prompt_len is None:
             prompt_ids = getattr(request, "prompt_token_ids", None)
@@ -494,11 +485,6 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         The scheduler allocated blocks for external tokens. We save the
         block_ids so start_load_kv can inject KV into the right slots.
         """
-        logger.info(
-            "update_state_after_alloc: external=%d, request=%s",
-            num_external_tokens, getattr(request, "request_id", "?"),
-        )
-
         if num_external_tokens <= 0:
             return
 
