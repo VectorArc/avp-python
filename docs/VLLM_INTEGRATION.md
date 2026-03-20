@@ -70,18 +70,25 @@ AVP_OVERRIDE_QWEN2=1 vllm serve Qwen/Qwen2.5-7B-Instruct \
 
 ### Model Plugin (latent thinking)
 
-During prefill, the model plugin runs N additional forward passes using the overwrite pattern:
+The prompt must be padded with N placeholder tokens via `prepare_latent_prompt()` before submission. During prefill, the model plugin runs N additional forward passes using the **extend pattern**:
 
-1. Extract last hidden state from the forward pass output
-2. Project it back to embedding space (softmax projection for tied-weight models, realignment matrix for untied)
-3. Feed the projected embedding as the next input at the same position
-4. Repeat N times
+1. Extract hidden state from position L-1 (the real last prompt token)
+2. Project it back to embedding space (softmax projection for tied models, realignment for untied)
+3. Forward at position L (writing NEW KV entry, overwriting placeholder KV)
+4. Next step forwards at position L+1, attending to prompt + step 1's KV
+5. Repeat N times, each step seeing all prior latent positions (causal chain)
 
-Each step reads the previous step's KV entry at the overwrite position, creating a recurrence that accumulates information. The enriched KV entry persists through all decode tokens.
+This matches the HuggingFace reference ``generate_latent_steps()`` — N additional KV entries, each attending to all previous entries. All N entries are visible to decode tokens, providing the full reasoning chain to Agent B during multi-agent transfer.
 
-The latent loop handles **multi-request batches**: it identifies prefill requests via `query_start_loc`, projects all their hidden states together, and forwards as a single batched decode-like step. Decode-only requests pass through unmodified. No `max_num_seqs=1` restriction needed.
+The latent loop handles **multi-request batches** and **chunked prefill**: it identifies prefill requests via `query_start_loc` with chunk-relative indexing.
 
-Validated: +4-8pp accuracy gain on GSM8K (Qwen 7B, A100) with ~17ms/step latency.
+```python
+from avp.connectors.vllm_kv_connector import prepare_latent_prompt
+
+# Pad prompt for extend pattern
+padded_ids = prepare_latent_prompt(prompt_token_ids, latent_steps=20)
+outputs = engine.generate([TokensPrompt(prompt_token_ids=padded_ids)], params)
+```
 
 ### KV Connector Plugin (multi-agent transfer)
 
@@ -116,7 +123,7 @@ KV Connector                           Model Plugin
 - **No tensor parallelism**: Latent steps disabled when TP > 1 (embedding table is sharded).
 - **No pipeline parallelism**: Latent steps disabled when PP > 1.
 - **`enforce_eager=True` recommended**: CUDA graph support not validated.
-- **Overwrite pattern**: Each step overwrites the same KV position (1-position information bottleneck). The extend pattern (growing KV-cache) is not yet supported in vLLM due to block allocation constraints.
+- **Prompt padding required**: The extend pattern requires N placeholder tokens appended to the prompt via `prepare_latent_prompt()`. The model plugin overwrites these positions during the latent loop.
 - **File-based store**: KV transfer uses local filesystem. Not suitable for multi-node.
 - **Validated on vLLM 0.17.x only**: Internal API dependencies may break on other versions.
 

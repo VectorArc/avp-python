@@ -5,10 +5,11 @@ Each step extracts the last hidden state, projects it back to embedding space,
 and feeds it as the next input -- building reasoning state in the KV-cache
 without generating text tokens.
 
-The latent loop uses the overwrite pattern: each step reuses the last prefill
-position's KV-cache slot. The enriched KV entry at this position persists
-through all decode tokens. Between steps, information flows through the
-single overwrite position (each step reads the previous step's KV).
+The latent loop uses the extend pattern: the prompt is padded with N
+placeholder tokens (via ``prepare_latent_prompt``). Each step writes to a
+NEW position (L, L+1, ..., L+N-1), creating a causal chain where each
+step attends to all prior latent positions. This matches the HuggingFace
+reference implementation's ``generate_latent_steps()``.
 
 Between steps, a new ForwardContext is set with decode-like attention metadata
 (max_query_len=1), following the same pattern used by vLLM's EAGLE speculative
