@@ -279,6 +279,11 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         registered KV cache buffers to extract this request's entries.
         """
         if self._kv_caches is None or not block_ids:
+            logger.info(
+                "request_finished: kv_caches=%s, block_ids=%s -- skipping extraction",
+                "registered" if self._kv_caches else "None",
+                block_ids[:3] if block_ids else None,
+            )
             return (True, None)
 
         meta = AVPReqMeta.from_request(request)
@@ -428,7 +433,11 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         start_load_kv (injection).
         """
         self._kv_caches = kv_caches
-        logger.debug("Registered %d KV cache layers", len(kv_caches))
+        logger.info(
+            "Registered %d KV cache layers: %s",
+            len(kv_caches),
+            list(kv_caches.keys())[:3],
+        )
 
     def handle_preemptions(self, **kwargs) -> None:
         pass
