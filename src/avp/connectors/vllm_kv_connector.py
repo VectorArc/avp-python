@@ -240,6 +240,8 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         # GPU KV cache buffers (set via register_kv_caches)
         self._kv_caches: Optional[Dict[str, Any]] = None
 
+        # Pending save data (from worker save_kv_layer → wait_for_save)
+        self._pending_saves: Dict[str, Dict] = {}
         # Pending load metadata (from scheduler → worker)
         self._pending_loads: Dict[str, AVPReqMeta] = {}
         self._lock = threading.RLock()
@@ -262,61 +264,95 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
 
     def save_kv_layer(self, layer_name: str, kv_tensor: Any,
                       attn_metadata: Any, **kwargs) -> None:
-        """Called per-layer during forward. Not used for save — we extract
-        at request_finished using register_kv_caches instead."""
-        pass
+        """Extract per-request KV from the paged buffer during forward.
+
+        This runs on the WORKER side where register_kv_caches was called
+        and GPU buffers are accessible. Uses attn_metadata to identify
+        which request's tokens to extract via slot_mapping.
+        """
+        layer_idx = _parse_layer_index(layer_name)
+        if layer_idx is None:
+            return
+
+        # Get block_table and seq_lens from attn_metadata to extract per-request KV
+        try:
+            from vllm.forward_context import get_forward_context
+            ctx = get_forward_context()
+            fwd_meta = getattr(ctx, "attn_metadata", None)
+            if fwd_meta is None:
+                return
+
+            # Get per-layer metadata
+            if isinstance(fwd_meta, dict):
+                layer_meta = fwd_meta.get(layer_name)
+                if layer_meta is None:
+                    return
+            else:
+                layer_meta = fwd_meta
+
+            block_table = getattr(layer_meta, "block_table", None)
+            seq_lens = getattr(layer_meta, "seq_lens", None)
+            if block_table is None or seq_lens is None:
+                return
+
+            # For single-request batches, extract the first request's KV
+            num_reqs = int((seq_lens > 0).sum().item()) if seq_lens is not None else 0
+            if num_reqs != 1:
+                return  # Only save for single-request batches
+
+            num_tokens = int(seq_lens[0].item())
+            if num_tokens <= 0:
+                return
+
+            # Compute block_ids from block_table[0]
+            num_blocks_needed = (num_tokens + self._block_size - 1) // self._block_size
+            block_ids = block_table[0, :num_blocks_needed].tolist()
+
+            slot_mapping = _compute_slot_mapping(block_ids, self._block_size, num_tokens)
+            per_request_kv = _extract_request_kv(kv_tensor, slot_mapping)
+
+            # Derive store key from request_id in forward context
+            request_id = self._extract_request_id(ctx)
+            store_key = request_id
+
+            with self._lock:
+                if store_key not in self._pending_saves:
+                    self._pending_saves[store_key] = {"num_tokens": num_tokens}
+                self._pending_saves[store_key][layer_idx] = per_request_kv
+
+        except Exception as e:
+            if not getattr(self, "_save_error_logged", False):
+                logger.warning("save_kv_layer error: %s", e)
+                self._save_error_logged = True
 
     def wait_for_save(self) -> None:
-        """No-op — saving happens synchronously in request_finished."""
-        pass
+        """Flush all pending saves to the store."""
+        with self._lock:
+            pending = dict(self._pending_saves)
+            self._pending_saves.clear()
+
+        for store_key, layers_data in pending.items():
+            num_tokens = layers_data.pop("num_tokens", 0)
+            num_layers = 0
+            try:
+                for layer_idx, kv_data in sorted(layers_data.items()):
+                    self._store.save_layer(store_key, layer_idx, kv_data)
+                    num_layers += 1
+                if num_layers > 0:
+                    self._store.save_meta(store_key, num_tokens, num_layers)
+                    logger.info(
+                        "Saved KV for %s: %d layers, %d tokens",
+                        store_key, num_layers, num_tokens,
+                    )
+            except Exception as e:
+                logger.warning("Failed to flush KV for %s: %s", store_key, e)
 
     def request_finished(
         self, request: Any, block_ids: Optional[List[int]] = None, **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """Extract per-request KV from GPU buffers and save to store.
-
-        Uses block_ids to compute slot_mapping, then indexes into the
-        registered KV cache buffers to extract this request's entries.
-        """
-        if self._kv_caches is None or not block_ids:
-            logger.info(
-                "request_finished: kv_caches=%s, block_ids=%s -- skipping extraction",
-                "registered" if self._kv_caches else "None",
-                block_ids[:3] if block_ids else None,
-            )
-            return (True, None)
-
-        meta = AVPReqMeta.from_request(request)
-        prompt_ids = getattr(request, "prompt_token_ids", None)
-        num_tokens = len(prompt_ids) if prompt_ids else 0
-
-        if num_tokens <= 0:
-            return (True, None)
-
-        # Compute slot mapping from block_ids
-        slot_mapping = _compute_slot_mapping(block_ids, self._block_size, num_tokens)
-
-        # Extract and save per-layer KV
-        num_layers_saved = 0
-        try:
-            for layer_name, kv_cache in self._kv_caches.items():
-                layer_idx = _parse_layer_index(layer_name)
-                if layer_idx is None:
-                    continue
-
-                per_request_kv = _extract_request_kv(kv_cache, slot_mapping)
-                self._store.save_layer(meta.store_key, layer_idx, per_request_kv)
-                num_layers_saved += 1
-
-            if num_layers_saved > 0:
-                self._store.save_meta(meta.store_key, num_tokens, num_layers_saved)
-                logger.debug(
-                    "Saved KV for %s: %d layers, %d tokens",
-                    meta.store_key, num_layers_saved, num_tokens,
-                )
-        except Exception as e:
-            logger.warning("Failed to save KV for %s: %s", meta.store_key, e)
-
+        """Called when a request finishes. Triggers flush of pending saves."""
+        # Flush any pending layer data from save_kv_layer
+        self.wait_for_save()
         return (True, None)
 
     # ----- Load side (Agent B starts → KV injected from store) -----

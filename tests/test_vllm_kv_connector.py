@@ -209,43 +209,26 @@ class TestConnectorInit:
 
 
 class TestRequestFinished:
-    def test_extracts_kv_when_caches_registered(self, connector):
-        """request_finished extracts KV from registered GPU buffers."""
-        block_size = connector._block_size  # 16
-        num_blocks = 20
-        num_kv_heads, head_dim = 2, 8
-
-        kv_layer_0 = torch.randn(2, num_blocks, block_size, num_kv_heads, head_dim)
-        kv_layer_1 = torch.randn(2, num_blocks, block_size, num_kv_heads, head_dim)
-        connector._kv_caches = {
-            "model.layers.0.self_attn": kv_layer_0,
-            "model.layers.1.self_attn": kv_layer_1,
+    def test_flushes_pending_saves(self, connector):
+        """request_finished triggers flush of pending layer data."""
+        # Manually populate pending saves (simulating save_kv_layer)
+        connector._pending_saves["test-key"] = {
+            "num_tokens": 5,
+            0: torch.randn(2, 5, 16),
+            1: torch.randn(2, 5, 16),
         }
 
-        req = MockRequest("req-001", prompt_token_ids=[1, 2, 3, 4, 5])
-        block_ids = [2, 3]  # 2 blocks for 5 tokens (block_size=16, ceil(5/16)=1, but 2 blocks allocated)
+        req = MockRequest("req-001")
+        connector.request_finished(req)
 
-        result = connector.request_finished(req, block_ids=block_ids)
+        # Pending should be flushed
+        assert len(connector._pending_saves) == 0
+        assert connector._store.has_key("test-key")
+        assert connector._store.get_seq_len("test-key") == 5
 
-        from avp.connectors.vllm_kv_connector import compute_request_hash
-        store_key = compute_request_hash([1, 2, 3, 4, 5])
-        assert connector._store.has_key(store_key)
-        assert connector._store.get_seq_len(store_key) == 5
-
-        layer_data = connector._store.load_layer(store_key, 0)
-        assert layer_data is not None
-        assert layer_data.shape[1] == 5  # 5 tokens
-
-    def test_no_extraction_without_caches(self, connector):
-        """request_finished does nothing if kv_caches not registered."""
-        req = MockRequest("req-002", prompt_token_ids=[1, 2, 3])
-        result = connector.request_finished(req, block_ids=[0])
-        assert result == (True, None)
-
-    def test_no_extraction_without_block_ids(self, connector):
-        connector._kv_caches = {"layer.0": torch.randn(2, 10, 4, 2, 8)}
-        req = MockRequest("req-003", prompt_token_ids=[1, 2])
-        result = connector.request_finished(req, block_ids=None)
+    def test_returns_true_none(self, connector):
+        req = MockRequest("req-002")
+        result = connector.request_finished(req)
         assert result == (True, None)
 
 
@@ -298,36 +281,29 @@ class TestUpdateStateAfterAlloc:
 
 class TestStartLoadKV:
     def test_injects_stored_kv(self, connector):
-        """Full roundtrip: save via request_finished, load via start_load_kv."""
-        # Use block_size=16 (connector default) with enough blocks
+        """Save to store manually, then inject via start_load_kv."""
         block_size = connector._block_size  # 16
         num_blocks = 20
         num_kv_heads, head_dim = 2, 8
+        features = num_kv_heads * head_dim
 
-        kv_0 = torch.randn(2, num_blocks, block_size, num_kv_heads, head_dim)
-        kv_1 = torch.randn(2, num_blocks, block_size, num_kv_heads, head_dim)
+        # Manually save KV to store (simulating save_kv_layer + wait_for_save)
+        store_key = "agent-a-key"
+        kv_data_0 = torch.randn(2, 4, features)  # 4 tokens
+        kv_data_1 = torch.randn(2, 4, features)
+        connector._store.save_layer(store_key, 0, kv_data_0)
+        connector._store.save_layer(store_key, 1, kv_data_1)
+        connector._store.save_meta(store_key, seq_len=4, num_layers=2)
+
+        # Set up Agent B's KV caches
+        fresh_kv_0 = torch.zeros(2, num_blocks, block_size, num_kv_heads, head_dim)
+        fresh_kv_1 = torch.zeros(2, num_blocks, block_size, num_kv_heads, head_dim)
         connector._kv_caches = {
-            "model.layers.0.self_attn": kv_0,
-            "model.layers.1.self_attn": kv_1,
+            "model.layers.0.self_attn.attn": fresh_kv_0,
+            "model.layers.1.self_attn.attn": fresh_kv_1,
         }
 
-        # Agent A: save KV (4 tokens → 1 block)
-        prompt_ids = [1, 2, 3, 4]
-        req_a = MockRequest("req-a", prompt_token_ids=prompt_ids)
-        connector.request_finished(req_a, block_ids=[2])
-
-        from avp.connectors.vllm_kv_connector import compute_request_hash
-        store_key = compute_request_hash(prompt_ids)
-        assert connector._store.has_key(store_key)
-
-        # Agent B: inject into fresh buffer
-        fresh_kv_0 = torch.zeros_like(kv_0)
-        fresh_kv_1 = torch.zeros_like(kv_1)
-        connector._kv_caches = {
-            "model.layers.0.self_attn": fresh_kv_0,
-            "model.layers.1.self_attn": fresh_kv_1,
-        }
-
+        # Schedule load (blocks at block 5)
         from avp.connectors.vllm_kv_connector import AVPReqMeta
         meta_b = AVPReqMeta(
             request_id="req-b", store_key=store_key,
@@ -337,11 +313,12 @@ class TestStartLoadKV:
 
         connector.start_load_kv(forward_context=MockForwardContext())
 
-        # Verify injection at block 5's slots (slot 80 = block 5 * 16)
+        # Verify injection at block 5 (slot 80 = 5 * 16)
         total_slots = num_blocks * block_size
         flat = fresh_kv_0.reshape(2, total_slots, -1)
-        slot_80 = 5 * block_size  # = 80
+        slot_80 = 5 * block_size
         assert flat[:, slot_80, :].abs().sum().item() > 0
+        assert torch.allclose(flat[:, slot_80:slot_80 + 4, :], kv_data_0)
 
 
 class TestStubMethods:
