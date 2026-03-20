@@ -38,14 +38,9 @@ _target_weights_cache: Dict[str, Tuple[Any, Any, Any]] = {}
 def register():
     """Entry point called by vLLM's plugin system.
 
-    Registers AVPLatentQwen2ForCausalLM in two ways:
-
-    1. Always registers under ``"AVPLatentQwen2ForCausalLM"`` so users can
-       activate via ``hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]}``.
-
-    2. If ``AVP_OVERRIDE_QWEN2=1``, also overrides the built-in
-       ``"Qwen2ForCausalLM"`` entry so all Qwen2 models automatically use
-       latent thinking without any ``hf_overrides``.
+    Registers AVP latent model wrappers for supported architectures:
+    Qwen2, Llama, Mistral, Gemma. Users activate via
+    ``hf_overrides={"architectures": ["AVPLatent<Arch>ForCausalLM"]}``.
 
     Uses string-form registration ("module:ClassName") for lazy loading to
     avoid CUDA re-initialization issues in vLLM worker processes.
@@ -56,18 +51,29 @@ def register():
         logger.warning("vLLM ModelRegistry not available -- AVP model plugin not registered")
         return
 
-    _cls_path = "avp.connectors.vllm_model_plugin:AVPLatentQwen2ForCausalLM"
+    _module = "avp.connectors.vllm_model_plugin"
+    _models = {
+        "AVPLatentQwen2ForCausalLM": "Qwen2ForCausalLM",
+        "AVPLatentLlamaForCausalLM": "LlamaForCausalLM",
+        "AVPLatentMistralForCausalLM": "MistralForCausalLM",
+        "AVPLatentGemmaForCausalLM": "GemmaForCausalLM",
+    }
 
-    ModelRegistry.register_model("AVPLatentQwen2ForCausalLM", _cls_path)
+    registered = []
+    for avp_name, orig_name in _models.items():
+        ModelRegistry.register_model(avp_name, f"{_module}:{avp_name}")
+        registered.append(avp_name)
 
-    override_qwen2 = os.environ.get("AVP_OVERRIDE_QWEN2", "0") == "1"
-    if override_qwen2:
-        ModelRegistry.register_model("Qwen2ForCausalLM", _cls_path)
+        # Optional: override the built-in class for auto-activation
+        env_key = f"AVP_OVERRIDE_{orig_name.replace('ForCausalLM', '').upper()}"
+        if os.environ.get(env_key, "0") == "1":
+            ModelRegistry.register_model(orig_name, f"{_module}:{avp_name}")
+            registered.append(f"{orig_name}(override)")
 
     logger.info(
-        "AVP latent model plugin registered (latent_steps=%s, override_qwen2=%s)",
+        "AVP latent model plugin registered: %s (latent_steps=%s)",
+        ", ".join(registered),
         os.environ.get("AVP_LATENT_STEPS", str(_DEFAULT_LATENT_STEPS)),
-        override_qwen2,
     )
 
 
@@ -757,13 +763,34 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
 
 # ---------------------------------------------------------------------------
-# Concrete model class (Qwen2)
+# Concrete model classes
 # ---------------------------------------------------------------------------
 
 def _build_qwen2_class():
     from ._vllm_compat import HAS_QWEN2, Qwen2ForCausalLM
     if HAS_QWEN2 and Qwen2ForCausalLM is not None:
         return _make_latent_model_cls(Qwen2ForCausalLM)
+    return None
+
+
+def _build_llama_class():
+    from ._vllm_compat import HAS_LLAMA, LlamaForCausalLM
+    if HAS_LLAMA and LlamaForCausalLM is not None:
+        return _make_latent_model_cls(LlamaForCausalLM)
+    return None
+
+
+def _build_mistral_class():
+    from ._vllm_compat import HAS_MISTRAL, MistralForCausalLM
+    if HAS_MISTRAL and MistralForCausalLM is not None:
+        return _make_latent_model_cls(MistralForCausalLM)
+    return None
+
+
+def _build_gemma_class():
+    from ._vllm_compat import HAS_GEMMA, GemmaForCausalLM
+    if HAS_GEMMA and GemmaForCausalLM is not None:
+        return _make_latent_model_cls(GemmaForCausalLM)
     return None
 
 
@@ -950,10 +977,17 @@ class _AVPLatentStub:
         return original_hidden
 
 
-_real_cls = None
-try:
-    _real_cls = _build_qwen2_class()
-except Exception:
-    pass
+def _build_or_stub(builder):
+    try:
+        cls = builder()
+        if cls is not None:
+            return cls
+    except Exception:
+        pass
+    return _AVPLatentStub
 
-AVPLatentQwen2ForCausalLM = _real_cls if _real_cls is not None else _AVPLatentStub
+
+AVPLatentQwen2ForCausalLM = _build_or_stub(_build_qwen2_class)
+AVPLatentLlamaForCausalLM = _build_or_stub(_build_llama_class)
+AVPLatentMistralForCausalLM = _build_or_stub(_build_mistral_class)
+AVPLatentGemmaForCausalLM = _build_or_stub(_build_gemma_class)

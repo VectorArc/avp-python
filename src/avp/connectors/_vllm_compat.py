@@ -81,3 +81,27 @@ try:
 except ImportError:
     HAS_QWEN2 = False
     Qwen2ForCausalLM = None  # type: ignore[assignment,misc]
+
+try:
+    from vllm.model_executor.models.llama import LlamaForCausalLM  # noqa: F401
+
+    HAS_LLAMA = True
+except ImportError:
+    HAS_LLAMA = False
+    LlamaForCausalLM = None  # type: ignore[assignment,misc]
+
+try:
+    from vllm.model_executor.models.mistral import MistralForCausalLM  # noqa: F401
+
+    HAS_MISTRAL = True
+except ImportError:
+    HAS_MISTRAL = False
+    MistralForCausalLM = None  # type: ignore[assignment,misc]
+
+try:
+    from vllm.model_executor.models.gemma import GemmaForCausalLM  # noqa: F401
+
+    HAS_GEMMA = True
+except ImportError:
+    HAS_GEMMA = False
+    GemmaForCausalLM = None  # type: ignore[assignment,misc]
