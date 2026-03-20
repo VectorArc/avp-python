@@ -42,6 +42,10 @@ _REQUEST_STORE_KEYS: Dict[str, str] = {}
 # update_state_after_alloc, worker reads via start_load_kv.
 _PENDING_LOADS: Dict[str, Any] = {}
 
+# store_key → projected embedding tensor (CPU). Model plugin sets after
+# cross-model rosetta projection, connector flushes to FileKVStore.
+_PROJECTED_EMBEDDINGS: Dict[str, Any] = {}
+
 
 # ---------------------------------------------------------------------------
 # KVStore protocol + FileKVStore implementation
@@ -106,6 +110,25 @@ class FileKVStore:
             return int(lines[1]) if len(lines) > 1 else 0
         except (ValueError, IndexError):
             return 0
+
+    def save_projected(self, key: str, tensor: Any) -> None:
+        """Save a projected embedding for cross-model transfer."""
+        import torch
+        key_dir = self._key_dir(key)
+        key_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(tensor.cpu(), key_dir / "projected.pt")
+
+    def load_projected(self, key: str) -> Optional[Any]:
+        """Load a projected embedding for cross-model transfer."""
+        import torch
+        path = self._key_dir(key) / "projected.pt"
+        if not path.exists():
+            return None
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+    def has_projected(self, key: str) -> bool:
+        """Check if a projected embedding exists for this key."""
+        return (self._key_dir(key) / "projected.pt").exists()
 
     def delete(self, key: str) -> None:
         import shutil
@@ -236,6 +259,13 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         latent_steps = self._extra_config.get("avp_latent_steps", 20)
         os.environ["AVP_LATENT_STEPS"] = str(latent_steps)
 
+        # Bridge cross-model target to model plugin
+        target_model = self._extra_config.get("avp_target_model", "")
+        if target_model:
+            os.environ["AVP_TARGET_MODEL"] = target_model
+        else:
+            os.environ.pop("AVP_TARGET_MODEL", None)
+
         # Store
         store_dir = self._extra_config.get(
             "avp_store_dir",
@@ -365,7 +395,13 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             pending = dict(self._pending_saves)
             self._pending_saves.clear()
 
-        if not pending:
+            # Also drain projected embeddings from the model plugin.
+            # Under the same lock for consistency, though in UniProcExecutor
+            # the model forward and wait_for_save are sequential.
+            projected = dict(_PROJECTED_EMBEDDINGS)
+            _PROJECTED_EMBEDDINGS.clear()
+
+        if not pending and not projected:
             return
 
         def _flush():
@@ -386,6 +422,20 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                         )
                 except Exception as e:
                     logger.warning("Failed to flush KV for %s: %s", store_key, e)
+
+            # Flush projected embeddings from cross-model rosetta
+            for store_key, emb_tensor in projected.items():
+                try:
+                    self._store.save_projected(store_key, emb_tensor)
+                    logger.debug(
+                        "Saved projected embedding for %s: shape=%s",
+                        store_key, list(emb_tensor.shape),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to flush projected embedding for %s: %s",
+                        store_key, e,
+                    )
 
         # Run in background thread to avoid blocking the model runner
         t = threading.Thread(target=_flush, daemon=True)
@@ -650,3 +700,20 @@ def prepare_latent_prompt(token_ids: List[int], latent_steps: int = 20) -> List[
 def compute_request_hash(token_ids: List[int]) -> str:
     data = ",".join(str(t) for t in token_ids).encode("utf-8")
     return hashlib.sha256(data).hexdigest()[:16]
+
+
+def load_projected_embedding(store_dir: str, store_key: str) -> Optional[Any]:
+    """Load a projected embedding from the file store.
+
+    Helper for Agent B to retrieve the rosetta-projected embedding
+    that Agent A saved after its latent thinking steps.
+
+    Args:
+        store_dir: Path to the shared AVP store directory.
+        store_key: The store key (typically from compute_request_hash).
+
+    Returns:
+        Projected embedding tensor [D_tgt], or None if not found.
+    """
+    store = FileKVStore(store_dir)
+    return store.load_projected(store_key)

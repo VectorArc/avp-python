@@ -25,11 +25,14 @@ Validated on vLLM 0.17.1 only.
 import logging
 import os
 import time
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_LATENT_STEPS = 20
+
+# Cache for loaded target model weights: model_id → (embed_weight, tokenizer, config)
+_target_weights_cache: Dict[str, Tuple[Any, Any, Any]] = {}
 
 
 def register():
@@ -66,6 +69,67 @@ def register():
         os.environ.get("AVP_LATENT_STEPS", str(_DEFAULT_LATENT_STEPS)),
         override_qwen2,
     )
+
+
+# ---------------------------------------------------------------------------
+# Target model weight loading (for cross-model rosetta)
+# ---------------------------------------------------------------------------
+
+def _load_target_model_weights(model_id: str) -> Tuple[Any, Any, Any]:
+    """Load target model's embed_tokens weight, tokenizer, and config.
+
+    Uses safetensors for minimal memory (only loads the embedding tensor).
+    Results are cached in ``_target_weights_cache`` for reuse.
+
+    Returns:
+        (embed_weight, tokenizer, config) tuple.
+    """
+    if model_id in _target_weights_cache:
+        return _target_weights_cache[model_id]
+
+    import json
+
+    from transformers import AutoConfig, AutoTokenizer
+
+    config = AutoConfig.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    embed_weight = None
+    try:
+        from huggingface_hub import hf_hub_download
+        from safetensors import safe_open
+
+        # Try single safetensors file
+        try:
+            path = hf_hub_download(model_id, "model.safetensors")
+            with safe_open(path, framework="pt") as f:
+                embed_weight = f.get_tensor("model.embed_tokens.weight")
+        except Exception:
+            # Try sharded model
+            index_path = hf_hub_download(model_id, "model.safetensors.index.json")
+            with open(index_path) as f:
+                index = json.load(f)
+            shard = index["weight_map"].get("model.embed_tokens.weight")
+            if shard:
+                shard_path = hf_hub_download(model_id, shard)
+                with safe_open(shard_path, framework="pt") as f:
+                    embed_weight = f.get_tensor("model.embed_tokens.weight")
+    except ImportError:
+        logger.warning("safetensors/huggingface_hub not available for weight loading")
+
+    if embed_weight is None:
+        raise RuntimeError(
+            f"Could not load embed_tokens.weight from {model_id}. "
+            "Ensure safetensors and huggingface_hub are installed."
+        )
+
+    result = (embed_weight, tokenizer, config)
+    _target_weights_cache[model_id] = result
+    logger.info(
+        "Loaded target model weights: %s, embed shape=%s",
+        model_id, list(embed_weight.shape),
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -157,9 +221,16 @@ def _make_latent_model_cls(base_cls: type) -> type:
             self._w_realign = None
             self._target_norm = None
 
+            # Cross-model rosetta projection state
+            self._avp_target_model = os.environ.get("AVP_TARGET_MODEL", "")
+            self._cross_model_ready = False
+            self._avp_map = None
+            self._source_lm_head_cpu = None
+
             logger.info(
-                "AVPLatentModel(%s) initialized with %d latent steps, block_size=%d",
+                "AVPLatentModel(%s) initialized with %d latent steps, block_size=%d, target=%s",
                 base_cls.__name__, self._num_latent_steps, self._block_size,
+                self._avp_target_model or "(none)",
             )
 
         def _check_parallelism(self, vllm_config: Any) -> None:
@@ -225,6 +296,147 @@ def _make_latent_model_cls(base_cls: type) -> type:
             if lm_head is not None and hasattr(lm_head, "weight"):
                 return lm_head.weight
             return None
+
+        def _setup_cross_model(self) -> None:
+            """Load target model weights and build AVPMap for rosetta projection.
+
+            Called lazily on first prefill when ``avp_target_model`` is set.
+            Loads only the target model's embed_tokens weight (~600MB) and
+            tokenizer — not the full model.
+            """
+            self._cross_model_ready = True
+            target_model_id = self._avp_target_model
+            if not target_model_id:
+                return
+
+            try:
+                target_embed, target_tokenizer, target_config = (
+                    _load_target_model_weights(target_model_id)
+                )
+
+                import torch
+
+                # Source lm_head weight (CPU float32) for projection
+                lm_head = self._get_lm_head_weight()
+                if lm_head is None:
+                    lm_head = self._get_embed_weight()  # tied weights
+                if lm_head is None:
+                    logger.warning("No lm_head weight for cross-model projection")
+                    return
+                self._source_lm_head_cpu = lm_head.detach().cpu().to(torch.float32)
+
+                # Source model identity from config
+                source_model_id = getattr(self.config, "_name_or_path", "unknown")
+                source_config_dict = (
+                    self.config.to_dict() if hasattr(self.config, "to_dict") else {}
+                )
+                target_config_dict = (
+                    target_config.to_dict() if hasattr(target_config, "to_dict") else {}
+                )
+
+                # Load source tokenizer
+                from transformers import AutoTokenizer
+                source_tokenizer = AutoTokenizer.from_pretrained(source_model_id)
+
+                # Build AVPMap via calibrate_from_weights
+                from ..rosetta.calibrate import calibrate_from_weights
+                self._avp_map = calibrate_from_weights(
+                    source_model_id=source_model_id,
+                    source_config_dict=source_config_dict,
+                    target_model_id=target_model_id,
+                    target_config_dict=target_config_dict,
+                    target_embed_weight=target_embed,
+                    source_tokenizer=source_tokenizer,
+                    target_tokenizer=target_tokenizer,
+                    auto_save=True,
+                )
+                logger.info(
+                    "Cross-model projection ready: %s -> %s (%s)",
+                    source_model_id, target_model_id, self._avp_map.method.value,
+                )
+            except Exception as e:
+                logger.warning("Cross-model setup failed: %s", e, exc_info=True)
+                self._avp_map = None
+
+        def _project_cross_model(
+            self, last_hiddens: Any, input_ids: Any,
+            query_start_loc: Any, prefill_req_indices: list,
+            num_prefill: int,
+        ) -> None:
+            """Project enriched hidden states via rosetta for cross-model transfer.
+
+            Runs after the latent loop. For each prefill request, projects the
+            enriched hidden state to the target model's embedding space and
+            stores it in the module-level ``_PROJECTED_EMBEDDINGS`` dict for
+            the KV connector to flush to disk.
+            """
+            if not self._cross_model_ready:
+                self._setup_cross_model()
+            if self._avp_map is None:
+                return
+
+            import torch
+            from ..rosetta.project import (
+                vocabulary_mediated_projection,
+                vocab_overlap_projection,
+            )
+            from ..types import ProjectionMethod
+            from .vllm_kv_connector import (
+                _PROJECTED_EMBEDDINGS,
+                _REQUEST_STORE_KEYS,
+                compute_request_hash,
+            )
+
+            for i in range(num_prefill):
+                req_idx = prefill_req_indices[i]
+                chunk_start = int(query_start_loc[req_idx].item())
+                chunk_end = int(query_start_loc[req_idx + 1].item())
+
+                # CPU-side projection (~1ms)
+                hidden_cpu = last_hiddens[i : i + 1].detach().cpu().to(torch.float32)
+
+                if self._avp_map.method == ProjectionMethod.VOCAB_OVERLAP:
+                    projected = vocab_overlap_projection(
+                        hidden_cpu,
+                        self._source_lm_head_cpu,
+                        self._avp_map.w_map,
+                        self._avp_map.src_indices,
+                        target_norm=self._avp_map.target_norm,
+                    )
+                else:
+                    projected = vocabulary_mediated_projection(
+                        hidden_cpu,
+                        self._source_lm_head_cpu,
+                        self._avp_map.w_map,
+                        target_norm=self._avp_map.target_norm,
+                    )
+
+                # Store keyed by prompt hash. Use _REQUEST_STORE_KEYS
+                # (populated by the connector's build_connector_meta from the
+                # full prompt_token_ids) when available, falling back to
+                # hashing the chunk tokens for the common single-request case.
+                try:
+                    from vllm.forward_context import get_forward_context as _gfc
+                    _ctx = _gfc()
+                    _rid = str(getattr(_ctx, "request_id", ""))
+                    if not _rid and hasattr(_ctx, "requests") and _ctx.requests:
+                        _rid = str(getattr(_ctx.requests[0], "request_id", ""))
+                except Exception:
+                    _rid = ""
+                if _rid and _rid in _REQUEST_STORE_KEYS:
+                    store_key = _REQUEST_STORE_KEYS[_rid]
+                else:
+                    # Fallback: hash the chunk tokens (correct when full
+                    # prompt is in one chunk, i.e. max_num_seqs=1).
+                    req_token_ids = input_ids[chunk_start:chunk_end].tolist()
+                    store_key = compute_request_hash(req_token_ids)
+
+                _PROJECTED_EMBEDDINGS[store_key] = projected.squeeze(0)
+
+                logger.debug(
+                    "Projected hidden state for cross-model: key=%s, shape=%s",
+                    store_key, list(projected.shape),
+                )
 
         def _is_profiling(self) -> bool:
             """Detect vLLM's profiling phase (attn_metadata is None)."""
@@ -485,6 +697,14 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     num_prefill, steps_completed, elapsed_ms,
                     elapsed_ms / steps_completed,
                 )
+
+                # Cross-model rosetta projection (if configured)
+                if self._avp_target_model:
+                    self._project_cross_model(
+                        last_hiddens, input_ids, query_start_loc,
+                        prefill_req_indices, num_prefill,
+                    )
+
                 # Replace the logit position (L+N-1) with the enriched hidden
                 original_hidden = original_hidden.clone()
                 for i, idx in enumerate(logit_indices):
@@ -526,6 +746,12 @@ class _AVPLatentStub:
         self._embed_weight = None
         self._w_realign = None
         self._target_norm = None
+
+        # Cross-model rosetta projection state
+        self._avp_target_model = os.environ.get("AVP_TARGET_MODEL", "")
+        self._cross_model_ready = False
+        self._avp_map = None
+        self._source_lm_head_cpu = None
 
     def _setup_projection(self):
         from ..realign import needs_realignment
@@ -574,6 +800,43 @@ class _AVPLatentStub:
             hidden_state, self._is_tied,
             self._embed_weight, self._w_realign, self._target_norm,
         )
+
+    def _project_cross_model_stub(self, hidden_state: Any) -> Optional[Any]:
+        """Project hidden state via rosetta (stub version for testing).
+
+        Unlike the real ``_project_cross_model`` which works with vLLM
+        metadata, this takes a single hidden state tensor directly.
+        Returns the projected embedding or None if cross-model is not set up.
+        """
+        if self._avp_map is None or self._source_lm_head_cpu is None:
+            return None
+
+        import torch
+        from ..rosetta.project import (
+            vocabulary_mediated_projection,
+            vocab_overlap_projection,
+        )
+        from ..types import ProjectionMethod
+
+        hidden_cpu = hidden_state.detach().cpu().to(torch.float32)
+        if hidden_cpu.dim() == 1:
+            hidden_cpu = hidden_cpu.unsqueeze(0)
+
+        if self._avp_map.method == ProjectionMethod.VOCAB_OVERLAP:
+            return vocab_overlap_projection(
+                hidden_cpu,
+                self._source_lm_head_cpu,
+                self._avp_map.w_map,
+                self._avp_map.src_indices,
+                target_norm=self._avp_map.target_norm,
+            )
+        else:
+            return vocabulary_mediated_projection(
+                hidden_cpu,
+                self._source_lm_head_cpu,
+                self._avp_map.w_map,
+                target_norm=self._avp_map.target_norm,
+            )
 
     def _should_think(self, seq_len: int) -> bool:
         if self._num_latent_steps <= 0:
