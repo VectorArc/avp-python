@@ -450,7 +450,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             if steps_completed > 0:
                 elapsed_ms = (time.monotonic() - t0) * 1000
-                logger.debug(
+                logger.info(
                     "Latent thinking: %d reqs, %d steps in %.1fms (%.1fms/step)",
                     num_prefill, steps_completed, elapsed_ms,
                     elapsed_ms / steps_completed,
