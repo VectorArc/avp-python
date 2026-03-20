@@ -383,16 +383,6 @@ def _make_latent_model_cls(base_cls: type) -> type:
             if not prefill_req_indices:
                 return hidden_states
 
-            logger.info(
-                "Latent batch: num_reqs=%d, prefill=%d, indices=%s, "
-                "last_tokens=%s, seq_lens=%s, query_start_loc=%s",
-                num_reqs, len(prefill_req_indices),
-                prefill_req_indices[:5],
-                last_token_indices[:5],
-                seq_lens[:5].tolist(),
-                query_start_loc[:6].tolist(),
-            )
-
             num_prefill = len(prefill_req_indices)
             device = positions.device
 
@@ -460,7 +450,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             if steps_completed > 0:
                 elapsed_ms = (time.monotonic() - t0) * 1000
-                logger.info(
+                logger.debug(
                     "Latent thinking: %d reqs, %d steps in %.1fms (%.1fms/step)",
                     num_prefill, steps_completed, elapsed_ms,
                     elapsed_ms / steps_completed,
