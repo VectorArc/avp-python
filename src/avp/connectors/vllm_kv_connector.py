@@ -377,9 +377,14 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         Uses pending load metadata (block_ids from scheduler) to compute
         slot_mapping, then writes stored KV into the allocated blocks.
         """
+        logger.info(
+            "start_load_kv called: context=%s, kv_caches=%s, pending_loads=%d",
+            type(forward_context).__name__ if forward_context else "None",
+            "registered" if self._kv_caches else "None",
+            len(self._pending_loads),
+        )
+
         if forward_context is None or self._kv_caches is None:
-            if self._kv_caches is None:
-                logger.debug("start_load_kv: KV caches not registered -- skipping")
             return
 
         with self._lock:
@@ -476,6 +481,11 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         The scheduler allocated blocks for external tokens. We save the
         block_ids so start_load_kv can inject KV into the right slots.
         """
+        logger.info(
+            "update_state_after_alloc: external=%d, request=%s",
+            num_external_tokens, getattr(request, "request_id", "?"),
+        )
+
         if num_external_tokens <= 0:
             return
 
