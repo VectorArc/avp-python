@@ -30,8 +30,10 @@ from ._vllm_compat import (
 logger = logging.getLogger(__name__)
 
 # Module-level shared state between scheduler and worker connector instances.
-# vLLM creates two connector instances (SCHEDULER and WORKER) in the same
-# EngineCore process. Instance-level dicts don't cross between them.
+# vLLM creates separate SCHEDULER and WORKER connector instances. In
+# UniProcExecutor they share a process; in MultiProcExecutor they don't.
+# We use module-level dicts (works for UniProc) with FileKVStore fallback
+# for cross-process scenarios.
 
 # request_id → store_key (prompt hash). Scheduler sets, worker reads.
 _REQUEST_STORE_KEYS: Dict[str, str] = {}
@@ -257,6 +259,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         self._pending_loads: Dict[str, AVPReqMeta] = {}
         self._lock = threading.RLock()
         self._save_error_logged = False
+        self._save_thread: Optional[threading.Thread] = None
 
         logger.info(
             "AVPKVConnectorV1Dynamic initialized: store=%s, block_size=%d, latent_steps=%s",
@@ -278,15 +281,16 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                       attn_metadata: Any, **kwargs) -> None:
         """Extract per-request KV from the paged buffer during forward.
 
-        This runs on the WORKER side where register_kv_caches was called
-        and GPU buffers are accessible. Uses attn_metadata to identify
-        which request's tokens to extract via slot_mapping.
+        Handles multi-request batches: iterates over all prefill requests
+        (query_len > 1) and extracts each one's KV independently. Decode
+        requests (query_len == 1) are skipped. Extracted data is queued
+        in memory (_pending_saves) and flushed to disk asynchronously
+        by wait_for_save.
         """
         layer_idx = _parse_layer_index(layer_name)
         if layer_idx is None:
             return
 
-        # Get block_table and seq_lens from attn_metadata to extract per-request KV
         try:
             from vllm.forward_context import get_forward_context
             ctx = get_forward_context()
@@ -294,7 +298,6 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             if fwd_meta is None:
                 return
 
-            # Get per-layer metadata
             if isinstance(fwd_meta, dict):
                 layer_meta = fwd_meta.get(layer_name)
                 if layer_meta is None:
@@ -302,76 +305,104 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             else:
                 layer_meta = fwd_meta
 
-            # Only save during prefill (max_query_len > 1), not decode
+            # Only save during prefill batches
             max_query_len = getattr(layer_meta, "max_query_len", 1)
             if max_query_len <= 1:
                 return
 
             block_table = getattr(layer_meta, "block_table", None)
             seq_lens = getattr(layer_meta, "seq_lens", None)
+            query_start_loc = getattr(layer_meta, "query_start_loc", None)
             if block_table is None or seq_lens is None:
                 return
 
-            # Single-request batches only
-            num_reqs = int((seq_lens > 0).sum().item()) if seq_lens is not None else 0
-            if num_reqs != 1:
-                return
+            num_reqs = seq_lens.shape[0]
 
-            num_tokens = int(seq_lens[0].item())
-            if num_tokens <= 0:
-                return
+            # Iterate over all requests, extract prefill ones
+            for req_idx in range(num_reqs):
+                num_tokens = int(seq_lens[req_idx].item())
+                if num_tokens <= 0:
+                    continue
 
-            # Compute block_ids from block_table[0]
-            num_blocks_needed = (num_tokens + self._block_size - 1) // self._block_size
-            block_ids = block_table[0, :num_blocks_needed].tolist()
+                # Skip decode requests (query_len == 1) in mixed batches
+                if query_start_loc is not None and req_idx + 1 < query_start_loc.shape[0]:
+                    query_len = int(query_start_loc[req_idx + 1].item()) - int(
+                        query_start_loc[req_idx].item()
+                    )
+                    if query_len <= 1:
+                        continue
 
-            slot_mapping = _compute_slot_mapping(block_ids, self._block_size, num_tokens)
-            per_request_kv = _extract_request_kv(kv_tensor, slot_mapping)
+                # Extract this request's KV
+                num_blocks_needed = (num_tokens + self._block_size - 1) // self._block_size
+                block_ids = block_table[req_idx, :num_blocks_needed].tolist()
+                slot_mapping = _compute_slot_mapping(block_ids, self._block_size, num_tokens)
+                # GPU→CPU copy (fast, ~1ms per layer for 7B)
+                per_request_kv = _extract_request_kv(kv_tensor, slot_mapping)
 
-            # Look up the store key from the scheduler→worker mapping.
-            # The scheduler registered request_id → store_key (prompt hash)
-            # in build_connector_meta. The worker reads it here.
-            request_id = self._extract_request_id(ctx)
-            store_key = _REQUEST_STORE_KEYS.get(request_id, request_id)
+                # Derive store key. For the first request, try the module-level
+                # mapping. For subsequent requests in the batch, use a block-
+                # table-derived key (unique per request).
+                if req_idx == 0:
+                    request_id = self._extract_request_id(ctx)
+                    store_key = _REQUEST_STORE_KEYS.get(request_id, request_id)
+                else:
+                    # Hash block_ids as a unique key for this request
+                    store_key = compute_request_hash(block_ids)
 
-            with self._lock:
-                if store_key not in self._pending_saves:
-                    self._pending_saves[store_key] = {"num_tokens": num_tokens}
-                self._pending_saves[store_key][layer_idx] = per_request_kv
+                with self._lock:
+                    if store_key not in self._pending_saves:
+                        self._pending_saves[store_key] = {"num_tokens": num_tokens}
+                    self._pending_saves[store_key][layer_idx] = per_request_kv
 
         except Exception as e:
-            if not getattr(self, "_save_error_logged", False):
+            if not self._save_error_logged:
                 logger.warning("save_kv_layer error: %s", e)
                 self._save_error_logged = True
 
     def wait_for_save(self) -> None:
-        """Flush all pending saves to the store."""
+        """Flush all pending saves to the store in a background thread."""
         with self._lock:
             pending = dict(self._pending_saves)
             self._pending_saves.clear()
 
-        for store_key, layers_data in pending.items():
-            num_tokens = layers_data.pop("num_tokens", 0)
-            num_layers = 0
-            try:
-                for layer_idx, kv_data in sorted(layers_data.items()):
-                    self._store.save_layer(store_key, layer_idx, kv_data)
-                    num_layers += 1
-                if num_layers > 0:
-                    self._store.save_meta(store_key, num_tokens, num_layers)
-                    logger.debug(
-                        "Saved KV for %s: %d layers, %d tokens",
-                        store_key, num_layers, num_tokens,
-                    )
-            except Exception as e:
-                logger.warning("Failed to flush KV for %s: %s", store_key, e)
+        if not pending:
+            return
+
+        def _flush():
+            for store_key, layers_data in pending.items():
+                num_tokens = layers_data.pop("num_tokens", 0)
+                num_layers = 0
+                try:
+                    for lid, kv_data in sorted(layers_data.items()):
+                        if not isinstance(lid, int):
+                            continue
+                        self._store.save_layer(store_key, lid, kv_data)
+                        num_layers += 1
+                    if num_layers > 0:
+                        self._store.save_meta(store_key, num_tokens, num_layers)
+                        logger.debug(
+                            "Saved KV for %s: %d layers, %d tokens",
+                            store_key, num_layers, num_tokens,
+                        )
+                except Exception as e:
+                    logger.warning("Failed to flush KV for %s: %s", store_key, e)
+
+        # Run in background thread to avoid blocking the model runner
+        t = threading.Thread(target=_flush, daemon=True)
+        t.start()
+        # Store thread reference so request_finished can wait if needed
+        self._save_thread = t
 
     def request_finished(
         self, request: Any, block_ids: Optional[List[int]] = None, **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """Called when a request finishes. Triggers flush of pending saves."""
-        # Flush any pending layer data from save_kv_layer
+        """Called when a request finishes. Ensures pending saves complete."""
+        # Trigger flush if there's pending data
         self.wait_for_save()
+        # Wait for background save thread if one is running
+        save_thread = getattr(self, "_save_thread", None)
+        if save_thread is not None and save_thread.is_alive():
+            save_thread.join(timeout=5.0)
         return (True, None)
 
     # ----- Load side (Agent B starts → KV injected from store) -----
