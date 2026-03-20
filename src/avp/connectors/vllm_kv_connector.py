@@ -61,11 +61,72 @@ class KVStore(Protocol):
 
 
 class FileKVStore:
-    """File-based KV store using torch.save for tensor I/O."""
+    """File-based KV store using torch.save for tensor I/O.
 
-    def __init__(self, store_dir: str):
+    Entries are cleaned up via two mechanisms:
+
+    1. **Explicit delete** — callers invoke ``delete(key)`` when done.
+       The KV connector calls this in ``request_finished`` after Agent B
+       consumes Agent A's data.
+    2. **TTL reaper** — a daemon thread deletes entries whose ``meta.txt``
+       or ``projected.pt`` is older than ``ttl`` seconds. This catches
+       leaked entries from crashes or missed cleanup. Runs every 60s.
+
+    Design decision: KV entries produced by latent thinking are assumed
+    to be consumed once and discarded. If multi-consumer reuse is needed
+    in the future, the TTL can be extended or the explicit-delete call
+    removed from request_finished.
+    """
+
+    _DEFAULT_TTL = 300  # 5 minutes
+    _REAPER_INTERVAL = 60  # seconds
+
+    def __init__(self, store_dir: str, ttl: Optional[int] = None):
         self._dir = Path(store_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._ttl = ttl if ttl is not None else self._DEFAULT_TTL
+
+        # Start background reaper thread (daemon — dies with process)
+        if self._ttl > 0:
+            self._reaper = threading.Thread(
+                target=self._reap_loop, daemon=True, name="avp-store-reaper",
+            )
+            self._reaper.start()
+
+    def _reap_loop(self) -> None:
+        """Background loop that deletes expired entries."""
+        import shutil
+        import time as _time
+
+        while True:
+            _time.sleep(self._REAPER_INTERVAL)
+            try:
+                self._reap_expired()
+            except Exception:
+                pass  # Never crash the reaper
+
+    def _reap_expired(self) -> None:
+        """Delete entries older than TTL based on file mtime."""
+        import shutil
+        import time as _time
+
+        if not self._dir.exists():
+            return
+        cutoff = _time.time() - self._ttl
+        for entry in self._dir.iterdir():
+            if not entry.is_dir():
+                continue
+            # Check mtime of meta.txt or projected.pt (whichever exists)
+            marker = entry / "meta.txt"
+            if not marker.exists():
+                marker = entry / "projected.pt"
+            if not marker.exists():
+                continue
+            try:
+                if marker.stat().st_mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except (OSError, FileNotFoundError):
+                pass
 
     def _key_dir(self, key: str) -> Path:
         safe_key = key.replace("/", "_").replace("\\", "_")
@@ -257,7 +318,10 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
     Configuration via kv_connector_extra_config:
         avp_latent_steps: Number of latent thinking steps (default: 20)
         avp_store_dir: Directory for KV-cache files (default: /tmp/avp_kv_store)
+        avp_store_ttl: TTL in seconds for store entries (default: 300)
         avp_target_model: Target model for cross-model rosetta (optional)
+        avp_source_model: Source model HF ID, needed when the model is
+            loaded from a local path (optional, auto-detected from config)
     """
 
     def __init__(self, vllm_config=None, role=None, kv_cache_config=None, **kwargs):
@@ -290,12 +354,22 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         else:
             os.environ.pop("AVP_TARGET_MODEL", None)
 
+        # Optional: explicit source model ID for tokenizer loading.
+        # Needed when the source model is loaded from a local path
+        # that doesn't match its HuggingFace ID.
+        source_model = self._extra_config.get("avp_source_model", "")
+        if source_model:
+            os.environ["AVP_SOURCE_MODEL"] = source_model
+        else:
+            os.environ.pop("AVP_SOURCE_MODEL", None)
+
         # Store
         store_dir = self._extra_config.get(
             "avp_store_dir",
             os.environ.get("AVP_KV_STORE_DIR", "/tmp/avp_kv_store"),
         )
-        self._store = FileKVStore(store_dir)
+        store_ttl = self._extra_config.get("avp_store_ttl", FileKVStore._DEFAULT_TTL)
+        self._store = FileKVStore(store_dir, ttl=store_ttl)
 
         # Block size for slot mapping computation
         self._block_size = 16
@@ -498,17 +572,31 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
     def request_finished(
         self, request: Any, block_ids: Optional[List[int]] = None, **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """Called when a request finishes. Ensures pending saves complete."""
+        """Called when a request finishes. Ensures pending saves complete.
+
+        On the consumer side (Agent B), also deletes the consumed store
+        entry. KV entries from latent thinking are single-use: produced
+        by Agent A, consumed by Agent B, then discarded. The TTL reaper
+        catches any entries missed by this explicit cleanup.
+        """
         # Trigger flush if there's pending data
         self.wait_for_save()
         # Wait for background save thread if one is running
         save_thread = getattr(self, "_save_thread", None)
         if save_thread is not None and save_thread.is_alive():
             save_thread.join(timeout=5.0)
-        # Clean up request_id → store_key mapping to prevent unbounded growth
+        # Clean up request_id → store_key mapping
         req_id = str(getattr(request, "request_id", ""))
+        store_key = ""
         if req_id:
-            _REQUEST_STORE_KEYS.pop(req_id, None)
+            store_key = _REQUEST_STORE_KEYS.pop(req_id, "")
+        # Delete consumed store entries (consumer side only).
+        # _consumed_keys is populated by start_load_kv when KV is injected.
+        consumed = getattr(self, "_consumed_keys", set())
+        if store_key and store_key in consumed:
+            self._store.delete(store_key)
+            consumed.discard(store_key)
+            logger.debug("Deleted consumed store entry: %s", store_key)
         return (True, None)
 
     # ----- Load side (Agent B starts → KV injected from store) -----
@@ -580,6 +668,10 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                         "Loaded KV for %s: %d layers, %d tokens",
                         meta.store_key, layers_loaded, meta.num_external_tokens,
                     )
+                    # Track consumed keys for cleanup in request_finished
+                    if not hasattr(self, "_consumed_keys"):
+                        self._consumed_keys: Set[str] = set()
+                    self._consumed_keys.add(meta.store_key)
             except Exception as e:
                 logger.warning("start_load_kv failed for %s: %s", req_id, e)
 

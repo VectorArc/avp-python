@@ -325,8 +325,13 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     return
                 self._source_lm_head_cpu = lm_head.detach().cpu().to(torch.float32)
 
-                # Source model identity from config
-                source_model_id = getattr(self.config, "_name_or_path", "unknown")
+                # Source model identity: prefer explicit AVP_SOURCE_MODEL
+                # (set via avp_source_model in kv_connector_extra_config),
+                # fall back to config._name_or_path.
+                source_model_id = os.environ.get(
+                    "AVP_SOURCE_MODEL",
+                    getattr(self.config, "_name_or_path", "unknown"),
+                )
                 source_config_dict = (
                     self.config.to_dict() if hasattr(self.config, "to_dict") else {}
                 )
