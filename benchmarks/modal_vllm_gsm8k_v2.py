@@ -1,8 +1,8 @@
-"""Definitive GSM8K benchmark: vLLM overwrite latent vs baseline.
+"""GSM8K benchmark: single-engine vLLM latent thinking vs baseline.
 
-Compares against published HF numbers (90.5% latent, 91.0% direct).
-Uses max_num_seqs=1 to ensure every request gets latent steps
-without the overhead of sequential engine.generate() calls.
+Single engine runs both latent (with extend-pattern padding) and
+baseline (no latent). Tests that latent thinking improves accuracy
+within one vLLM instance (no multi-agent KV transfer).
 
 Usage:
     modal run benchmarks/modal_vllm_gsm8k_v2.py
@@ -119,11 +119,18 @@ def run_benchmark(n_problems: int = 200):
         del engine
 
     # ================================================================
-    # Phase 2: Latent (overwrite, max_num_seqs=1 for single-request)
+    # Phase 2: Latent (extend pattern, padded prompts)
     # ================================================================
     print(f"\n{'=' * 60}")
-    print("PHASE 2: Latent (overwrite, 20 steps)")
+    print("PHASE 2: Latent (extend, 20 steps)")
     print(f"{'=' * 60}")
+
+    import os
+    os.environ["AVP_LATENT_STEPS"] = "20"
+
+    from avp.connectors.vllm_kv_connector import prepare_latent_prompt
+    padded_ids = [prepare_latent_prompt(ids, 20) for ids in formatted_ids]
+    padded_prompts = [vllm.TokensPrompt(prompt_token_ids=ids) for ids in padded_ids]
 
     with tempfile.TemporaryDirectory() as td:
         ktc = KVTransferConfig(
@@ -139,7 +146,7 @@ def run_benchmark(n_problems: int = 200):
         )
 
         t0 = time.time()
-        outputs = engine.generate(prompts, params)
+        outputs = engine.generate(padded_prompts, params)
         latent_time = time.time() - t0
 
         latent_correct, latent_tokens = evaluate(outputs)
