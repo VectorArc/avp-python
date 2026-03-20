@@ -401,9 +401,9 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             projected = dict(_PROJECTED_EMBEDDINGS)
             _PROJECTED_EMBEDDINGS.clear()
             if projected:
-                logger.info(
-                    "wait_for_save: draining %d projected embeddings (dict_id=%d)",
-                    len(projected), id(_PROJECTED_EMBEDDINGS),
+                logger.debug(
+                    "wait_for_save: draining %d projected embeddings",
+                    len(projected),
                 )
 
         if not pending and not projected:

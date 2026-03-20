@@ -109,6 +109,9 @@ def run_test():
             print(f"\n[{i+1}] Problem: {problem[:60]}...")
             print(f"    Tokens: {len(ids)} (+10 latent), Time: {elapsed:.2f}s")
 
+            # Wait for background flush thread to complete
+            time.sleep(1.0)
+
             # Verify projected embedding
             proj_path = Path(store_dir) / store_key / "projected.pt"
             if proj_path.exists():
@@ -118,11 +121,6 @@ def run_test():
                 results[f"proj_{i}_norm"] = proj.float().norm().item()
             else:
                 print("    WARNING: No projected embedding found!")
-                # List store contents for debugging
-                store_path = Path(store_dir)
-                if store_path.exists():
-                    for p in sorted(store_path.rglob("*")):
-                        print(f"      store: {p.relative_to(store_path)}")
 
         # Free Agent A and clean up env vars
         del engine_a
