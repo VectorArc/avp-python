@@ -424,6 +424,13 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                         meta.num_external_tokens,
                     )
 
+                # Truncate stored KV to match allocated slots (we may have
+                # saved more tokens than the scheduler allocated, due to the
+                # cap in get_num_new_matched_tokens leaving 1 for prefill)
+                num_slots = slot_mapping.shape[0]
+                if stored_kv.shape[1] > num_slots:
+                    stored_kv = stored_kv[:, :num_slots, :]
+
                 _inject_request_kv(kv_cache, slot_mapping, stored_kv)
                 layers_loaded += 1
 
