@@ -25,6 +25,7 @@ image = (
 @app.function(image=image, gpu="A100-40GB", timeout=3600)
 def run_test():
     import gc
+    import os
     import tempfile
     import time
     from pathlib import Path
