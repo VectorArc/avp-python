@@ -400,6 +400,11 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             # the model forward and wait_for_save are sequential.
             projected = dict(_PROJECTED_EMBEDDINGS)
             _PROJECTED_EMBEDDINGS.clear()
+            if projected:
+                logger.info(
+                    "wait_for_save: draining %d projected embeddings (dict_id=%d)",
+                    len(projected), id(_PROJECTED_EMBEDDINGS),
+                )
 
         if not pending and not projected:
             return

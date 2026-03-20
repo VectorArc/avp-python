@@ -387,6 +387,12 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 compute_request_hash,
             )
 
+            logger.info(
+                "Cross-model projection: num_prefill=%d, avp_map=%s, dict_id=%d",
+                num_prefill, self._avp_map.method.value if self._avp_map else "None",
+                id(_PROJECTED_EMBEDDINGS),
+            )
+
             for i in range(num_prefill):
                 req_idx = prefill_req_indices[i]
                 chunk_start = int(query_start_loc[req_idx].item())
@@ -433,9 +439,9 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
                 _PROJECTED_EMBEDDINGS[store_key] = projected.squeeze(0)
 
-                logger.debug(
-                    "Projected hidden state for cross-model: key=%s, shape=%s",
-                    store_key, list(projected.shape),
+                logger.info(
+                    "Stored projected embedding: key=%s, shape=%s, dict_len=%d",
+                    store_key, list(projected.shape), len(_PROJECTED_EMBEDDINGS),
                 )
 
         def _is_profiling(self) -> bool:
