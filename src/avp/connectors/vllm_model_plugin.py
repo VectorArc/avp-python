@@ -378,15 +378,31 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 total_len = int(seq_lens[i].item())
                 if total_len <= N:
                     continue
-                query_len = int(query_start_loc[i + 1].item()) - int(query_start_loc[i].item())
+                chunk_start = int(query_start_loc[i].item())
+                chunk_end = int(query_start_loc[i + 1].item())
+                query_len = chunk_end - chunk_start
                 if query_len <= 1:
                     continue
+
                 # This is a padded prefill request: total_len = L + N
                 L = total_len - N
-                batch_offset = int(query_start_loc[i].item())
+
+                # With chunked prefill, only part of the prompt may be in
+                # this chunk. We need the FULL prompt's last N positions
+                # to be in this chunk for extend to work.
+                # The chunk covers positions (total_len - query_len)..total_len-1.
+                chunk_first_pos = total_len - query_len
+                if chunk_first_pos > L - 1:
+                    # Position L-1 (seed) is not in this chunk — skip
+                    continue
+
+                # Chunk-relative indices
+                seed_chunk_idx = chunk_start + (L - 1 - chunk_first_pos)
+                logit_chunk_idx = chunk_end - 1  # last token in chunk = L+N-1
+
                 prefill_req_indices.append(i)
-                real_last_indices.append(batch_offset + L - 1)  # position L-1
-                logit_indices.append(batch_offset + total_len - 1)  # position L+N-1
+                real_last_indices.append(seed_chunk_idx)
+                logit_indices.append(logit_chunk_idx)
                 real_prompt_lens.append(L)
 
             if not prefill_req_indices:
