@@ -717,13 +717,22 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 per_layer_meta = {name: latent_meta for name in attn_metadata}
                 per_layer_slots = {name: step_slots for name in attn_metadata}
 
+                # Pass a dummy input_ids alongside inputs_embeds. When
+                # CUDA graphs / torch.compile are active, the compiled
+                # forward traces input_ids.size() which fails on None.
+                # The model uses inputs_embeds when provided, so the
+                # dummy IDs are ignored.
+                dummy_ids = torch.zeros(
+                    num_prefill, dtype=torch.long, device=device,
+                )
+
                 with set_forward_context(
                     per_layer_meta, self._vllm_config,
                     num_tokens=num_prefill, slot_mapping=per_layer_slots,
                 ):
                     step_hidden = base_cls.forward(
                         self,
-                        input_ids=None,
+                        input_ids=dummy_ids,
                         positions=step_positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=projected,
