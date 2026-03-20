@@ -5,15 +5,20 @@ Each step extracts the last hidden state, projects it back to embedding space,
 and feeds it as the next input -- building reasoning state in the KV-cache
 without generating text tokens.
 
+The latent loop uses the overwrite pattern: each step reuses the last prefill
+position's KV-cache slot. The enriched KV entry at this position persists
+through all decode tokens. Between steps, information flows through the
+single overwrite position (each step reads the previous step's KV).
+
+Between steps, a new ForwardContext is set with decode-like attention metadata
+(max_query_len=1), following the same pattern used by vLLM's EAGLE speculative
+decoding proposer.
+
 Registered via the ``vllm.general_plugins`` entry point so it is auto-discovered
 by all vLLM processes (including workers spawned via multiprocessing).
 
-The latent loop uses the overwrite pattern: each step reuses the last prefill
-position's KV-cache slot. Between steps, a new ForwardContext is set with
-decode-like attention metadata (max_query_len=1), following the same pattern
-used by vLLM's EAGLE speculative decoding proposer.
-
 FRAGILE(vllm): F8 -- Qwen2ForCausalLM import path, F9 -- ModelRegistry API.
+Validated on vLLM 0.17.1 only.
 """
 
 import logging
@@ -24,7 +29,6 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _DEFAULT_LATENT_STEPS = 20
-_PREFILL_SEQ_LEN_THRESHOLD = 2  # seq_len > this triggers thinking (skip decode)
 
 
 def register():
@@ -50,10 +54,8 @@ def register():
 
     _cls_path = "avp.connectors.vllm_model_plugin:AVPLatentQwen2ForCausalLM"
 
-    # Always register under custom name (activated via hf_overrides)
     ModelRegistry.register_model("AVPLatentQwen2ForCausalLM", _cls_path)
 
-    # Optionally override built-in Qwen2 (opt-in via env var)
     override_qwen2 = os.environ.get("AVP_OVERRIDE_QWEN2", "0") == "1"
     if override_qwen2:
         ModelRegistry.register_model("Qwen2ForCausalLM", _cls_path)
@@ -65,18 +67,69 @@ def register():
     )
 
 
+# ---------------------------------------------------------------------------
+# Shared projection logic (used by both real and stub classes)
+# ---------------------------------------------------------------------------
+
+def _setup_projection_from_weights(embed_weight, lm_head_weight, is_tied):
+    """Compute projection state from model weights.
+
+    Returns (is_tied, embed_weight, w_realign, target_norm) or raises.
+    """
+    import torch
+
+    if is_tied:
+        target_norm = (
+            embed_weight.detach().to(device="cpu", dtype=torch.float32)
+            .norm(dim=1).mean().to(device=str(embed_weight.device))
+        )
+        return True, embed_weight.detach(), None, target_norm
+    else:
+        gpu_device = str(embed_weight.device)
+        in_w = embed_weight.detach().to(device="cpu", dtype=torch.float32)
+        out_w = lm_head_weight.detach().to(device="cpu", dtype=torch.float32)
+
+        min_vocab = min(in_w.shape[0], out_w.shape[0])
+        in_w = in_w[:min_vocab]
+        out_w = out_w[:min_vocab]
+
+        gram = torch.matmul(out_w.T, out_w)
+        reg = 1e-5 * torch.eye(gram.shape[0], device=gram.device, dtype=gram.dtype)
+        gram = gram + reg
+        rhs = torch.matmul(out_w.T, in_w)
+        w_realign = torch.linalg.solve(gram, rhs)
+
+        return (
+            False,
+            None,
+            w_realign.to(device=gpu_device),
+            in_w.norm(dim=1).mean().detach().to(device=gpu_device),
+        )
+
+
+def _project_hidden_state(hidden_state, is_tied, embed_weight, w_realign, target_norm):
+    """Project hidden state back to embedding space."""
+    from ..realign import apply_realignment, normalize_to_target, project_to_embedding_space
+
+    if is_tied:
+        projected = project_to_embedding_space(hidden_state, embed_weight, temperature=1.0)
+        if target_norm is not None:
+            projected = normalize_to_target(projected, target_norm)
+    else:
+        projected = apply_realignment(hidden_state, w_realign, target_norm)
+
+    return projected
+
+
+# ---------------------------------------------------------------------------
+# Factory for real vLLM model class
+# ---------------------------------------------------------------------------
+
 def _make_latent_model_cls(base_cls: type) -> type:
     """Factory that creates a latent thinking wrapper for any vLLM model class.
 
-    This avoids runtime ``__bases__`` mutation (which breaks with metaclasses
-    and pickle/cloudpickle serialization). The returned class inherits from
-    ``base_cls`` at definition time.
-
-    Args:
-        base_cls: A vLLM model class (e.g., Qwen2ForCausalLM).
-
-    Returns:
-        A new class that wraps ``base_cls`` with latent thinking steps.
+    The returned class inherits from ``base_cls`` at definition time,
+    avoiding runtime ``__bases__`` mutation.
     """
 
     class _AVPLatentModel(base_cls):
@@ -88,20 +141,15 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             base_cls.__init__(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-            # Store vllm_config for set_forward_context calls during latent steps
             self._vllm_config = vllm_config
-
-            # Check for TP/PP and disable latent steps if needed
             self._check_parallelism(vllm_config)
 
-            # Extract block_size from cache config for slot computation
-            self._block_size = 16  # default
+            self._block_size = 16
             if vllm_config is not None:
                 cache_config = getattr(vllm_config, "cache_config", None)
                 if cache_config is not None:
                     self._block_size = getattr(cache_config, "block_size", 16)
 
-            # Projection state (lazily initialized on first forward)
             self._projection_ready = False
             self._is_tied = True
             self._embed_weight = None
@@ -123,77 +171,43 @@ def _make_latent_model_cls(base_cls: type) -> type:
             tp = getattr(parallel_config, "tensor_parallel_size", 1)
             pp = getattr(parallel_config, "pipeline_parallel_size", 1)
             if tp > 1:
-                logger.warning(
-                    "Tensor parallelism (TP=%d) detected -- latent steps disabled.", tp,
-                )
+                logger.warning("TP=%d detected -- latent steps disabled.", tp)
                 self._num_latent_steps = 0
             if pp > 1:
-                logger.warning(
-                    "Pipeline parallelism (PP=%d) detected -- latent steps disabled.", pp,
-                )
+                logger.warning("PP=%d detected -- latent steps disabled.", pp)
                 self._num_latent_steps = 0
 
         def _setup_projection(self):
             """Detect tied/untied weights and cache projection state."""
-            import torch
-
             from ..realign import needs_realignment
 
             config = self.config if hasattr(self, "config") else None
             if config is None:
-                logger.warning("No model config -- defaulting to tied-weight projection")
                 self._is_tied = True
                 self._projection_ready = True
                 return
 
-            self._is_tied = not needs_realignment(config)
+            is_tied = not needs_realignment(config)
+            embed = self._get_embed_weight()
+            lm_head = self._get_lm_head_weight()
 
-            if self._is_tied:
-                embed = self._get_embed_weight()
-                if embed is not None:
-                    self._embed_weight = embed.detach()
-                    # Compute target norm on CPU to avoid GPU OOM
-                    self._target_norm = (
-                        embed.detach().to(device="cpu", dtype=torch.float32)
-                        .norm(dim=1).mean().to(device=str(embed.device))
-                    )
-                else:
-                    logger.warning("Cannot access embedding weights -- latent steps disabled")
-                    self._num_latent_steps = 0
-            else:
-                try:
-                    embed_in = self._get_embed_weight()
-                    lm_head_weight = self._get_lm_head_weight()
-                    if embed_in is not None and lm_head_weight is not None:
-                        # Compute realignment on CPU to avoid GPU OOM.
-                        # For 7B, the float32 matmuls need ~2 GB transient.
-                        gpu_device = str(embed_in.device)
-                        in_w = embed_in.detach().to(device="cpu", dtype=torch.float32)
-                        out_w = lm_head_weight.detach().to(device="cpu", dtype=torch.float32)
-                        min_vocab = min(in_w.shape[0], out_w.shape[0])
-                        in_w = in_w[:min_vocab]
-                        out_w = out_w[:min_vocab]
-                        gram = torch.matmul(out_w.T, out_w)
-                        reg = 1e-5 * torch.eye(
-                            gram.shape[0], device=gram.device, dtype=gram.dtype
-                        )
-                        gram = gram + reg
-                        rhs = torch.matmul(out_w.T, in_w)
-                        w_realign = torch.linalg.solve(gram, rhs)
-                        # Move result back to GPU (small: hidden_dim x hidden_dim)
-                        self._w_realign = w_realign.to(device=gpu_device)
-                        self._target_norm = in_w.norm(dim=1).mean().detach().to(device=gpu_device)
-                    else:
-                        logger.warning("Cannot access embedding/lm_head weights -- disabled")
-                        self._num_latent_steps = 0
-                except Exception as e:
-                    logger.warning("Realignment failed: %s -- latent steps disabled", e)
-                    self._num_latent_steps = 0
+            if embed is None or (not is_tied and lm_head is None):
+                logger.warning("Cannot access model weights -- latent steps disabled")
+                self._num_latent_steps = 0
+                self._projection_ready = True
+                return
+
+            try:
+                self._is_tied, self._embed_weight, self._w_realign, self._target_norm = (
+                    _setup_projection_from_weights(embed, lm_head, is_tied)
+                )
+            except Exception as e:
+                logger.warning("Projection setup failed: %s -- latent steps disabled", e)
+                self._num_latent_steps = 0
 
             self._projection_ready = True
 
         def _get_embed_weight(self) -> Optional[Any]:
-            """Get input embedding weight tensor."""
             model = getattr(self, "model", None)
             if model is not None:
                 embed = getattr(model, "embed_tokens", None)
@@ -206,47 +220,13 @@ def _make_latent_model_cls(base_cls: type) -> type:
             return None
 
         def _get_lm_head_weight(self) -> Optional[Any]:
-            """Get output (lm_head) embedding weight tensor."""
             lm_head = getattr(self, "lm_head", None)
             if lm_head is not None and hasattr(lm_head, "weight"):
                 return lm_head.weight
             return None
 
-        def _project_hidden(self, hidden_state: Any) -> Any:
-            """Project last hidden state back to embedding space.
-
-            After projection, normalizes to target_norm. Without this,
-            softmax-weighted average has norm ~0.05 while real embeddings
-            have norm ~100, causing NaN in bfloat16 attention.
-            """
-            from ..realign import (
-                apply_realignment,
-                normalize_to_target,
-                project_to_embedding_space,
-            )
-
-            if self._is_tied:
-                projected = project_to_embedding_space(
-                    hidden_state, self._embed_weight, temperature=1.0
-                )
-                # Tied: project_to_embedding_space doesn't normalize
-                if self._target_norm is not None:
-                    projected = normalize_to_target(projected, self._target_norm)
-            else:
-                # Untied: apply_realignment already normalizes to target_norm
-                projected = apply_realignment(
-                    hidden_state, self._w_realign, self._target_norm
-                )
-
-            return projected
-
         def _is_profiling(self) -> bool:
-            """Detect vLLM's profiling/dummy-run phase via forward context.
-
-            During profile_run(), attn_metadata is None. Running the latent
-            loop in that state changes hidden_states shape and crashes
-            _dummy_run's logit_indices post-processing.
-            """
+            """Detect vLLM's profiling phase (attn_metadata is None)."""
             try:
                 from vllm.forward_context import get_forward_context
                 ctx = get_forward_context()
@@ -257,12 +237,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
             return False
 
         def _is_prefill(self) -> bool:
-            """Detect prefill using max_query_len from attention metadata.
-
-            In vLLM v1:
-              - Decode-only batch: max_query_len == 1
-              - Prefill or mixed batch: max_query_len > 1
-            """
+            """Detect prefill using max_query_len from attention metadata."""
             try:
                 from vllm.forward_context import get_forward_context
                 ctx = get_forward_context()
@@ -277,7 +252,6 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 return False
 
         def _should_think(self) -> bool:
-            """Determine if latent thinking should run this forward pass."""
             if self._num_latent_steps <= 0:
                 return False
             if self._is_profiling():
@@ -288,27 +262,17 @@ def _make_latent_model_cls(base_cls: type) -> type:
             self, original_meta: Any, slot_mapping_1tok: Any,
             seq_len_override: int = 0,
         ) -> Any:
-            """Build decode-like FlashAttentionMetadata for a single-token step.
-
-            Creates metadata for 1 request with 1 query token (decode-like).
-            Uses block_table from the original prefill. If ``seq_len_override``
-            is provided, uses that as the sequence length (for extend pattern
-            where seq_lens grows each step).
-            """
+            """Build decode-like FlashAttentionMetadata for a single-token step."""
             import torch
 
             try:
                 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
             except ImportError:
-                logger.warning("FlashAttentionMetadata not importable")
                 return None
 
             device = original_meta.seq_lens.device
-
-            # query_start_loc for decode with 1 request: [0, 1]
             query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
 
-            # Use override seq_len if provided, otherwise from original metadata
             if seq_len_override > 0:
                 seq_lens = torch.tensor(
                     [seq_len_override], dtype=original_meta.seq_lens.dtype, device=device,
@@ -316,15 +280,13 @@ def _make_latent_model_cls(base_cls: type) -> type:
             else:
                 seq_lens = original_meta.seq_lens[:1].clone()
 
-            block_table = original_meta.block_table[:1].clone()
-
             return FlashAttentionMetadata(
                 num_actual_tokens=1,
                 max_query_len=1,
                 query_start_loc=query_start_loc,
                 max_seq_len=int(seq_lens.max().item()),
                 seq_lens=seq_lens,
-                block_table=block_table,
+                block_table=original_meta.block_table[:1].clone(),
                 slot_mapping=slot_mapping_1tok,
                 use_cascade=False,
                 common_prefix_len=0,
@@ -333,16 +295,11 @@ def _make_latent_model_cls(base_cls: type) -> type:
                 suffix_kv_lens=None,
             )
 
-        def _compute_overwrite_slot(
-            self, position: Any, block_table: Any, req_idx: int = 0,
-        ) -> int:
-            """Compute the KV-cache slot index for a given position.
-
-            slot = block_table[req, pos // block_size] * block_size + pos % block_size
-            """
-            block_idx = int(position) // self._block_size
+        def _compute_slot(self, position: int, block_table: Any, req_idx: int = 0) -> int:
+            """Compute physical KV-cache slot for a position."""
+            block_idx = position // self._block_size
             block_number = block_table[req_idx, block_idx].item()
-            return block_number * self._block_size + (int(position) % self._block_size)
+            return block_number * self._block_size + (position % self._block_size)
 
         def forward(
             self,
@@ -352,31 +309,21 @@ def _make_latent_model_cls(base_cls: type) -> type:
             inputs_embeds: Optional[Any] = None,
             **kwargs,
         ) -> Any:
-            """Forward pass with optional latent thinking steps (extend pattern).
+            """Forward pass with optional latent thinking steps.
 
-            The prompt must be padded with N dummy tokens before submission.
-            The scheduler then allocates KV blocks for L+N positions, and
-            ``seq_lens = L+N`` during decode -- so ALL decode tokens attend
-            to ALL latent entries.
+            On prefill, runs N additional forward passes using the overwrite
+            pattern: each step projects the last hidden state back to
+            embedding space and re-computes at the last position. The
+            enriched KV entry at this position persists through all decode
+            tokens, influencing the entire generation.
 
-            The extend pattern:
-            1. Initial prefill processes L real + N dummy tokens. Causal mask
-               means position L-1's hidden state is unaffected by dummy tokens.
-            2. For each latent step k (0..N-1):
-               - Project hidden state to embedding space
-               - Forward at position L+k (overwrites dummy KV at that slot)
-               - Attention sees prompt (0..L-1) + prior latent steps (L..L+k-1)
-               - This creates the causal chain matching HuggingFace extend
-            3. Replace hidden_states at position L+N-1 (last dummy) with
-               the enriched hidden state for logits computation.
+            Between steps, a new ForwardContext is set with decode-like
+            attention metadata so the attention kernels see consistent shapes.
 
-            CRITICAL: Output shape must match input shape [num_tokens, D].
+            Output shape is preserved: [num_tokens, hidden_dim].
             """
             import torch
 
-            N = self._num_latent_steps
-
-            # Initial forward pass (uses existing ForwardContext from model runner)
             hidden_states = base_cls.forward(
                 self,
                 input_ids=input_ids,
@@ -391,19 +338,13 @@ def _make_latent_model_cls(base_cls: type) -> type:
 
             # Lazy projection setup
             if not self._projection_ready:
-                try:
-                    self._setup_projection()
-                except Exception as e:
-                    logger.warning("Projection setup failed: %s -- skipping", e)
-                    self._num_latent_steps = 0
-                    return hidden_states
+                self._setup_projection()
 
-            # Re-read N after projection setup (setup may have disabled steps on OOM)
             N = self._num_latent_steps
             if N <= 0:
                 return hidden_states
 
-            # Get current ForwardContext for metadata extraction
+            # Get ForwardContext for metadata
             try:
                 from vllm.forward_context import get_forward_context, set_forward_context
                 fwd_ctx = get_forward_context()
@@ -413,132 +354,69 @@ def _make_latent_model_cls(base_cls: type) -> type:
             except Exception:
                 return hidden_states
 
-            # Extract original attention metadata from first layer
             first_layer_name = next(iter(attn_metadata))
             original_meta = attn_metadata[first_layer_name]
 
-            # Guard: skip for multi-request batches (single-request only)
+            # Guard: single-request batches only
             meta_seq_lens = original_meta.seq_lens
-            actual_num_reqs = int(
-                (meta_seq_lens > 0).sum().item()
-            ) if meta_seq_lens is not None else 1
-            if actual_num_reqs > 1:
-                logger.info(
-                    "Skipping latent steps: batch has %d requests",
-                    actual_num_reqs,
-                )
+            if meta_seq_lens is not None and int((meta_seq_lens > 0).sum().item()) > 1:
                 return hidden_states
 
-            num_tokens = hidden_states.shape[0]
+            # Overwrite position and slot
+            overwrite_pos = int(positions[-1])
+            slot_idx = self._compute_slot(overwrite_pos, original_meta.block_table)
+            slot_mapping = torch.tensor([slot_idx], dtype=torch.int64, device=positions.device)
+            pos_tensor = torch.tensor([overwrite_pos], dtype=positions.dtype, device=positions.device)
 
-            # Determine if prompt was padded for extend pattern.
-            # If num_tokens > prompt length (i.e., padding detected), use
-            # extend. Otherwise, use overwrite (no extra blocks needed).
-            use_extend = num_tokens > N and os.environ.get("AVP_LATENT_MODE", "") == "extend"
+            # Build metadata once (overwrite uses same position/seq_len every step)
+            latent_meta = self._build_latent_attn_metadata(original_meta, slot_mapping)
+            if latent_meta is None:
+                return hidden_states
 
-            if use_extend:
-                L = num_tokens - N
-                last_hidden = hidden_states[L - 1 : L, :]
-            else:
-                # Overwrite pattern: reuse last position
-                L = num_tokens
-                last_hidden = hidden_states[-1:, :]
-
-            # Extract block_table for slot computation
-            block_table = original_meta.block_table
-
-            mode_label = "extend" if use_extend else "overwrite"
-            logger.debug(
-                "Latent thinking (%s): L=%d, N=%d, total=%d",
-                mode_label, L, N, num_tokens,
-            )
-
-            # Save original hidden states for shape preservation
-            original_hidden = hidden_states
+            per_layer_meta = {name: latent_meta for name in attn_metadata}
+            per_layer_slots = {name: slot_mapping for name in attn_metadata}
 
             # Latent thinking loop
+            original_hidden = hidden_states
+            last_hidden = hidden_states[-1:, :]
             t0 = time.monotonic()
             steps_completed = 0
 
-            # For overwrite: reuse same position and slot every step.
-            # For extend: increment position and seq_len each step.
-            overwrite_position = positions[-1]  # last prompt position
-
             for step in range(N):
-                # NaN safety check
                 if torch.isnan(last_hidden).any():
-                    logger.warning(
-                        "NaN at latent step %d/%d -- stopping", step + 1, N,
-                    )
+                    logger.warning("NaN at latent step %d/%d -- stopping", step + 1, N)
                     break
 
-                # Project back to embedding space + normalize
-                projected = self._project_hidden(last_hidden)
+                projected = _project_hidden_state(
+                    last_hidden, self._is_tied,
+                    self._embed_weight, self._w_realign, self._target_norm,
+                )
                 if projected.dim() == 1:
                     projected = projected.unsqueeze(0)
                 projected = projected.to(dtype=hidden_states.dtype)
 
-                if use_extend:
-                    # Extend: new position each step, seq_len grows
-                    step_position = L + step
-                    current_seq_len = L + step + 1
-                else:
-                    # Overwrite: same position every step, seq_len unchanged
-                    step_position = int(overwrite_position)
-                    current_seq_len = L  # unchanged
-
-                step_pos_tensor = torch.tensor(
-                    [step_position], dtype=positions.dtype, device=positions.device,
-                )
-
-                # Compute KV slot for this position
-                slot_idx = self._compute_overwrite_slot(
-                    step_position, block_table, req_idx=0,
-                )
-                slot_mapping_1tok = torch.tensor(
-                    [slot_idx], dtype=torch.int64, device=positions.device,
-                )
-
-                latent_meta = self._build_latent_attn_metadata(
-                    original_meta, slot_mapping_1tok,
-                    seq_len_override=current_seq_len,
-                )
-                if latent_meta is None:
-                    break
-
-                per_layer_meta = {name: latent_meta for name in attn_metadata}
-                per_layer_slots = {name: slot_mapping_1tok for name in attn_metadata}
-
-                # Forward with new ForwardContext
                 with set_forward_context(
-                    per_layer_meta,
-                    self._vllm_config,
-                    num_tokens=1,
-                    slot_mapping=per_layer_slots,
+                    per_layer_meta, self._vllm_config,
+                    num_tokens=1, slot_mapping=per_layer_slots,
                 ):
                     step_hidden = base_cls.forward(
                         self,
                         input_ids=None,
-                        positions=step_pos_tensor,
+                        positions=pos_tensor,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=projected,
                         **kwargs,
                     )
 
-                # Extract hidden for next iteration
                 last_hidden = step_hidden[-1:, :] if step_hidden.dim() == 2 else step_hidden
                 steps_completed = step + 1
 
-            elapsed_ms = (time.monotonic() - t0) * 1000
             if steps_completed > 0:
+                elapsed_ms = (time.monotonic() - t0) * 1000
                 logger.debug(
-                    "Latent thinking (%s): %d steps in %.1fms (%.1fms/step)",
-                    mode_label, steps_completed, elapsed_ms,
-                    elapsed_ms / steps_completed,
+                    "Latent thinking: %d steps in %.1fms (%.1fms/step)",
+                    steps_completed, elapsed_ms, elapsed_ms / steps_completed,
                 )
-
-            # Replace the last position's hidden state with enriched result.
-            if steps_completed > 0:
                 original_hidden = original_hidden.clone()
                 original_hidden[-1:, :] = last_hidden
 
@@ -554,20 +432,16 @@ def _make_latent_model_cls(base_cls: type) -> type:
 # ---------------------------------------------------------------------------
 
 def _build_qwen2_class():
-    """Build AVPLatentQwen2ForCausalLM using the factory pattern."""
     from ._vllm_compat import HAS_QWEN2, Qwen2ForCausalLM
-
     if HAS_QWEN2 and Qwen2ForCausalLM is not None:
         return _make_latent_model_cls(Qwen2ForCausalLM)
     return None
 
 
 class _AVPLatentStub:
-    """Stub class for testing without vLLM.
+    """Stub class for testing without vLLM."""
 
-    Provides the same interface as the factory-generated class but without
-    any real vLLM base class. Tests inject a ``_mock_forward`` callable.
-    """
+    _PREFILL_THRESHOLD = 2
 
     def __init__(self, *, vllm_config=None, prefix: str = "", **kwargs):
         self._num_latent_steps = int(
@@ -584,53 +458,33 @@ class _AVPLatentStub:
         self._target_norm = None
 
     def _setup_projection(self):
-        """Detect tied/untied weights and cache projection state."""
-        import torch
-
         from ..realign import needs_realignment
 
-        config = self.config if hasattr(self, "config") else None
+        config = self.config
         if config is None:
             self._is_tied = True
             self._projection_ready = True
             return
 
-        self._is_tied = not needs_realignment(config)
+        is_tied = not needs_realignment(config)
+        embed = self._get_embed_weight()
+        lm_head = self._get_lm_head_weight()
 
-        if self._is_tied:
-            embed = self._get_embed_weight()
-            if embed is not None:
-                self._embed_weight = embed.detach()
-                self._target_norm = embed.detach().to(torch.float32).norm(dim=1).mean()
-            else:
-                self._num_latent_steps = 0
-        else:
-            try:
-                embed_in = self._get_embed_weight()
-                lm_head_weight = self._get_lm_head_weight()
-                if embed_in is not None and lm_head_weight is not None:
-                    device = str(embed_in.device)
-                    in_w = embed_in.detach().to(device=device, dtype=torch.float32)
-                    out_w = lm_head_weight.detach().to(device=device, dtype=torch.float32)
-                    min_vocab = min(in_w.shape[0], out_w.shape[0])
-                    in_w = in_w[:min_vocab]
-                    out_w = out_w[:min_vocab]
-                    gram = torch.matmul(out_w.T, out_w)
-                    reg = 1e-5 * torch.eye(
-                        gram.shape[0], device=gram.device, dtype=gram.dtype
-                    )
-                    gram = gram + reg
-                    rhs = torch.matmul(out_w.T, in_w)
-                    self._w_realign = torch.linalg.solve(gram, rhs)
-                    self._target_norm = in_w.norm(dim=1).mean().detach()
-                else:
-                    self._num_latent_steps = 0
-            except Exception:
-                self._num_latent_steps = 0
+        if embed is None or (not is_tied and lm_head is None):
+            self._num_latent_steps = 0
+            self._projection_ready = True
+            return
+
+        try:
+            self._is_tied, self._embed_weight, self._w_realign, self._target_norm = (
+                _setup_projection_from_weights(embed, lm_head, is_tied)
+            )
+        except Exception:
+            self._num_latent_steps = 0
 
         self._projection_ready = True
 
-    def _get_embed_weight(self) -> Optional[Any]:
+    def _get_embed_weight(self):
         model = getattr(self, "model", None)
         if model is not None:
             embed = getattr(model, "embed_tokens", None)
@@ -638,116 +492,92 @@ class _AVPLatentStub:
                 return embed.weight
         return None
 
-    def _get_lm_head_weight(self) -> Optional[Any]:
+    def _get_lm_head_weight(self):
         lm_head = getattr(self, "lm_head", None)
         if lm_head is not None and hasattr(lm_head, "weight"):
             return lm_head.weight
         return None
 
     def _project_hidden(self, hidden_state: Any) -> Any:
-        from ..realign import (
-            apply_realignment,
-            normalize_to_target,
-            project_to_embedding_space,
+        """Convenience wrapper for tests."""
+        return _project_hidden_state(
+            hidden_state, self._is_tied,
+            self._embed_weight, self._w_realign, self._target_norm,
         )
 
-        if self._is_tied:
-            projected = project_to_embedding_space(
-                hidden_state, self._embed_weight, temperature=1.0
-            )
-            if self._target_norm is not None:
-                projected = normalize_to_target(projected, self._target_norm)
-        else:
-            projected = apply_realignment(
-                hidden_state, self._w_realign, self._target_norm
-            )
-        return projected
-
     def _should_think(self, seq_len: int) -> bool:
-        """Stub version uses seq_len (no ForwardContext in test mode)."""
         if self._num_latent_steps <= 0:
             return False
-        return seq_len > _PREFILL_SEQ_LEN_THRESHOLD
+        return seq_len > self._PREFILL_THRESHOLD
 
-    def forward(
-        self,
-        input_ids: Any,
-        positions: Any,
-        intermediate_tensors: Optional[Any] = None,
-        inputs_embeds: Optional[Any] = None,
-        **kwargs,
-    ) -> Any:
+    def forward(self, input_ids, positions, intermediate_tensors=None,
+                inputs_embeds=None, **kwargs):
         import torch
 
         if not hasattr(self, "_mock_forward"):
-            raise RuntimeError("No vLLM model backend available and no _mock_forward set")
+            raise RuntimeError("No backend available and no _mock_forward set")
 
         hidden_states = self._mock_forward(
-            input_ids=input_ids,
-            positions=positions,
+            input_ids=input_ids, positions=positions,
             intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            **kwargs,
+            inputs_embeds=inputs_embeds, **kwargs,
         )
 
-        if input_ids is not None:
-            seq_len = input_ids.shape[-1] if hasattr(input_ids, "shape") else 1
-        elif inputs_embeds is not None:
-            seq_len = inputs_embeds.shape[-2] if hasattr(inputs_embeds, "shape") else 1
-        else:
-            seq_len = 1
+        seq_len = 1
+        if input_ids is not None and hasattr(input_ids, "shape"):
+            seq_len = input_ids.shape[-1]
+        elif inputs_embeds is not None and hasattr(inputs_embeds, "shape"):
+            seq_len = inputs_embeds.shape[-2]
 
         if not self._should_think(seq_len):
             return hidden_states
 
         if not self._projection_ready:
-            try:
-                self._setup_projection()
-            except Exception:
-                self._num_latent_steps = 0
-                return hidden_states
-
+            self._setup_projection()
         if self._num_latent_steps <= 0:
             return hidden_states
 
         original_hidden = hidden_states
         last_pos = positions[-1:] if positions is not None else None
-        last_hidden = hidden_states[-1:, :] if hidden_states.dim() == 2 else hidden_states[:, -1, :]
+        last_hidden = (
+            hidden_states[-1:, :] if hidden_states.dim() == 2
+            else hidden_states[:, -1, :]
+        )
 
         steps_completed = 0
         for step in range(self._num_latent_steps):
             if torch.isnan(last_hidden).any():
                 break
 
-            projected = self._project_hidden(last_hidden)
+            projected = _project_hidden_state(
+                last_hidden, self._is_tied,
+                self._embed_weight, self._w_realign, self._target_norm,
+            )
             if projected.dim() == 1:
                 projected = projected.unsqueeze(0)
 
             step_hidden = self._mock_forward(
-                input_ids=None,
-                positions=last_pos,
+                input_ids=None, positions=last_pos,
                 intermediate_tensors=intermediate_tensors,
-                inputs_embeds=projected,
-                **kwargs,
+                inputs_embeds=projected, **kwargs,
             )
 
-            if step_hidden.dim() == 3:
-                last_hidden = step_hidden[:, -1, :]
-            else:
-                last_hidden = step_hidden[-1:, :]
+            last_hidden = (
+                step_hidden[:, -1, :] if step_hidden.dim() == 3
+                else step_hidden[-1:, :]
+            )
             steps_completed = step + 1
 
-        if steps_completed > 0 and original_hidden.dim() == 3:
+        if steps_completed > 0:
             original_hidden = original_hidden.clone()
-            original_hidden[:, -1, :] = last_hidden
-        elif steps_completed > 0 and original_hidden.dim() == 2:
-            original_hidden = original_hidden.clone()
-            original_hidden[-1:, :] = last_hidden
+            if original_hidden.dim() == 3:
+                original_hidden[:, -1, :] = last_hidden
+            else:
+                original_hidden[-1:, :] = last_hidden
 
         return original_hidden
 
 
-# Try to build the real class; fall back to stub
 _real_cls = None
 try:
     _real_cls = _build_qwen2_class()
