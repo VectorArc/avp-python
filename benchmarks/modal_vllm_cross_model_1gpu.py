@@ -49,11 +49,17 @@ def run_test():
 
     with tempfile.TemporaryDirectory() as store_dir:
         # ==============================================================
-        # AGENT A: Qwen 7B — think + rosetta project to Llama space
+        # AGENT A: Qwen 7B — think + rosetta project to target space
         # ==============================================================
         print("\n" + "=" * 60)
         print(f"AGENT A: {SRC_MODEL}")
         print("=" * 60)
+
+        # Set env vars BEFORE creating the engine — vLLM loads the model
+        # before the KV connector, so the model plugin reads env vars
+        # before the connector has a chance to set them.
+        os.environ["AVP_LATENT_STEPS"] = "10"
+        os.environ["AVP_TARGET_MODEL"] = TGT_MODEL
 
         ktc_a = KVTransferConfig(
             kv_connector="AVPKVConnectorV1Dynamic",
@@ -117,10 +123,12 @@ def run_test():
                     for p in sorted(store_path.rglob("*")):
                         print(f"      store: {p.relative_to(store_path)}")
 
-        # Free Agent A
+        # Free Agent A and clean up env vars
         del engine_a
         gc.collect()
         torch.cuda.empty_cache()
+        os.environ.pop("AVP_TARGET_MODEL", None)
+        os.environ.pop("AVP_LATENT_STEPS", None)
         print("\n--- Agent A freed, GPU memory released ---")
 
         # ==============================================================

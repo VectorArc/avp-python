@@ -221,16 +221,16 @@ def _make_latent_model_cls(base_cls: type) -> type:
             self._w_realign = None
             self._target_norm = None
 
-            # Cross-model rosetta projection state
-            self._avp_target_model = os.environ.get("AVP_TARGET_MODEL", "")
+            # Cross-model rosetta projection state (read lazily — the KV
+            # connector sets AVP_TARGET_MODEL during its __init__, which runs
+            # AFTER the model is loaded in vLLM's init sequence).
             self._cross_model_ready = False
             self._avp_map = None
             self._source_lm_head_cpu = None
 
             logger.info(
-                "AVPLatentModel(%s) initialized with %d latent steps, block_size=%d, target=%s",
+                "AVPLatentModel(%s) initialized with %d latent steps, block_size=%d",
                 base_cls.__name__, self._num_latent_steps, self._block_size,
-                self._avp_target_model or "(none)",
             )
 
         def _check_parallelism(self, vllm_config: Any) -> None:
@@ -305,7 +305,7 @@ def _make_latent_model_cls(base_cls: type) -> type:
             tokenizer — not the full model.
             """
             self._cross_model_ready = True
-            target_model_id = self._avp_target_model
+            target_model_id = os.environ.get("AVP_TARGET_MODEL", "")
             if not target_model_id:
                 return
 
@@ -698,8 +698,10 @@ def _make_latent_model_cls(base_cls: type) -> type:
                     elapsed_ms / steps_completed,
                 )
 
-                # Cross-model rosetta projection (if configured)
-                if self._avp_target_model:
+                # Cross-model rosetta projection (if configured).
+                # Read env var lazily — the KV connector sets it after model init.
+                avp_target = os.environ.get("AVP_TARGET_MODEL", "")
+                if avp_target:
                     self._project_cross_model(
                         last_hiddens, input_ids, query_start_loc,
                         prefill_req_indices, num_prefill,
