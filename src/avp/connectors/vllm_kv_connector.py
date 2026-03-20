@@ -628,6 +628,25 @@ def _parse_layer_index(layer_name: str) -> Optional[int]:
     return None
 
 
+def prepare_latent_prompt(token_ids: List[int], latent_steps: int = 20) -> List[int]:
+    """Pad prompt with N copies of the last token for extend-pattern latent thinking.
+
+    The model plugin detects the padding and runs N latent steps at
+    positions L..L+N-1, creating a causal chain of enriched KV entries.
+    The placeholder KV is overwritten before being read (safe for any token).
+
+    Args:
+        token_ids: Original prompt token IDs.
+        latent_steps: Number of latent thinking steps (default: 20).
+
+    Returns:
+        Padded token IDs: original + N copies of the last token.
+    """
+    if not token_ids or latent_steps <= 0:
+        return list(token_ids)
+    return list(token_ids) + [token_ids[-1]] * latent_steps
+
+
 def compute_request_hash(token_ids: List[int]) -> str:
     data = ",".join(str(t) for t in token_ids).encode("utf-8")
     return hashlib.sha256(data).hexdigest()[:16]
