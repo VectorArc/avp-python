@@ -35,7 +35,7 @@ def run_test():
     from vllm.config import KVTransferConfig
 
     SRC_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-    TGT_MODEL = "meta-llama/Llama-3.2-3B-Instruct"
+    TGT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"  # ungated, same-family (vocab-mediated)
 
     src_tokenizer = AutoTokenizer.from_pretrained(SRC_MODEL)
     tgt_tokenizer = AutoTokenizer.from_pretrained(TGT_MODEL)
