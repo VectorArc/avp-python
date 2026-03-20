@@ -337,8 +337,8 @@ class TestStubMethods:
     def test_get_stats_returns_none(self, connector):
         assert connector.get_kv_connector_stats() is None
 
-    def test_save_kv_layer_noop(self, connector):
-        """save_kv_layer is a no-op (extraction happens in request_finished)."""
+    def test_save_kv_layer_no_context(self, connector):
+        """save_kv_layer returns early without ForwardContext (no vLLM runtime)."""
         connector.save_kv_layer("model.layers.0", torch.zeros(1), None)
 
 

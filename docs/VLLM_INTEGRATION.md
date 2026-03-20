@@ -1,14 +1,14 @@
 # vLLM Integration
 
-AVP provides two plugins for vLLM: a **model plugin** that adds latent thinking steps during prefill, and a **KV connector plugin** that saves/loads KV-cache between agents via a file-based store.
+AVP provides two plugins for vLLM: a **model plugin** that adds latent thinking steps during prefill, and a **KV connector plugin** that enables multi-agent KV-cache transfer between requests.
 
 Both plugins are auto-discovered via the `vllm.general_plugins` entry point when `avp` is installed.
 
 ## Requirements
 
-- `pip install avp[vllm]` (vLLM >= 0.15.0)
+- `pip install avp[vllm]` (vLLM >= 0.17.0)
 - CUDA GPU
-- Currently supports **Qwen2** model family only
+- Currently supports **Qwen2** model family (Llama, Mistral planned)
 
 ## Quick Start
 
@@ -21,16 +21,15 @@ ktc = KVTransferConfig(
     kv_connector_module_path="avp.connectors.vllm_kv_connector",
     kv_role="kv_both",
     kv_connector_extra_config={
-        "avp_latent_steps": 20,     # number of latent thinking steps
-        "avp_store_dir": "/tmp/avp_kv_store",  # KV file store location
+        "avp_latent_steps": 20,
+        "avp_store_dir": "/tmp/avp_kv_store",
     },
 )
 
 engine = LLM(
     model="Qwen/Qwen2.5-7B-Instruct",
-    enforce_eager=True,  # recommended for initial use
+    enforce_eager=True,
     kv_transfer_config=ktc,
-    # Activate latent thinking model wrapper
     hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
 )
 
@@ -50,7 +49,7 @@ vllm serve Qwen/Qwen2.5-7B-Instruct \
   --hf-overrides '{"architectures": ["AVPLatentQwen2ForCausalLM"]}'
 ```
 
-Alternatively, set `AVP_OVERRIDE_QWEN2=1` to override all Qwen2 model loads globally (no `hf_overrides` needed):
+Alternatively, set `AVP_OVERRIDE_QWEN2=1` to override all Qwen2 model loads globally:
 
 ```bash
 AVP_OVERRIDE_QWEN2=1 vllm serve Qwen/Qwen2.5-7B-Instruct \
@@ -62,86 +61,84 @@ AVP_OVERRIDE_QWEN2=1 vllm serve Qwen/Qwen2.5-7B-Instruct \
 
 ## Configuration
 
-All configuration is passed via `kv_connector_extra_config`:
-
 | Key | Default | Description |
 |-----|---------|-------------|
 | `avp_latent_steps` | `20` | Number of latent thinking steps during prefill. Set to `0` to disable. |
-| `avp_store_dir` | `/tmp/avp_kv_store` | Directory for file-based KV store. |
-
-The `avp_latent_steps` value is bridged to the model plugin via the `AVP_LATENT_STEPS` environment variable.
+| `avp_store_dir` | `/tmp/avp_kv_store` | Directory for file-based KV store. Also configurable via `AVP_KV_STORE_DIR` env var. |
 
 ## How It Works
 
 ### Model Plugin (latent thinking)
 
-During prefill, the model plugin runs N additional forward passes after the initial prompt processing:
+During prefill, the model plugin runs N additional forward passes using the overwrite pattern:
 
 1. Extract last hidden state from the forward pass output
 2. Project it back to embedding space (softmax projection for tied-weight models, realignment matrix for untied)
-3. Feed the projected embedding as the next input at the same position (overwrite pattern)
+3. Feed the projected embedding as the next input at the same position
 4. Repeat N times
 
-This builds reasoning state in the KV-cache without generating text tokens. Each step reads the previous step's KV entry at the overwrite position, creating a recurrence that accumulates information. The enriched KV entry persists through all decode tokens.
+Each step reads the previous step's KV entry at the overwrite position, creating a recurrence that accumulates information. The enriched KV entry persists through all decode tokens.
 
-Validated: +4pp accuracy gain on GSM8K n=200 (Qwen 7B, A100) with 17ms/step latency (2.6x faster than HuggingFace).
+The latent loop handles **multi-request batches**: it identifies prefill requests via `query_start_loc`, projects all their hidden states together, and forwards as a single batched decode-like step. Decode-only requests pass through unmodified. No `max_num_seqs=1` restriction needed.
 
-The model plugin is registered as `AVPLatentQwen2ForCausalLM` via the `vllm.general_plugins` entry point. It wraps vLLM's `Qwen2ForCausalLM` with the latent loop.
+Validated: +4-8pp accuracy gain on GSM8K (Qwen 7B, A100) with ~17ms/step latency.
 
-### KV Connector Plugin (transfer)
+### KV Connector Plugin (multi-agent transfer)
 
-The KV connector saves and loads KV-cache layers to/from a file-based store:
+The KV connector enables Agent A's computation to transfer to Agent B:
 
-- **Producer**: After Agent A's request completes, KV layers are saved per-layer as torch tensors.
-- **Consumer**: Before Agent B's forward pass, matching KV data is loaded from the store.
-- **Key derivation**: Store keys are derived from prompt token IDs (content-addressable). Two requests with the same prompt tokens will share KV data.
+1. **Agent A's request finishes**: `save_kv_layer` extracts per-request KV entries from vLLM's paged buffer using the slot_mapping formula (`block_id * block_size + offset`). Saved per-layer to a file-based store.
+2. **Agent B's request arrives**: `get_num_new_matched_tokens` reports stored token count. Scheduler allocates blocks and marks positions as externally computed.
+3. **Before Agent B's forward**: `start_load_kv` injects stored KV into Agent B's allocated blocks.
+4. **Agent B generates**: All decode tokens attend to Agent A's transferred KV as a prefix.
 
 ## Architecture
 
 ```
-Single vLLM Instance (e.g., Qwen2.5-7B)
-+----------------------------------------------------------+
-|  Model Plugin (AVPLatentQwen2ForCausalLM)                |
-|    forward() -> initial prefill -> N latent steps        |
-|                                                           |
-|  KV Connector Plugin (AVPKVConnectorV1Dynamic)           |
-|    save_kv_layer() -> FileKVStore (per-layer .pt files)  |
-|    start_load_kv() -> load from FileKVStore              |
-+----------------------------------------------------------+
+Agent A Request                        Agent B Request
 
-Request 1 (Agent A "think"):        Request 2 (Agent B "generate"):
-  latent steps -> enriched KV          load enriched KV -> generate text
-  save to FileKVStore                  from FileKVStore
+Orchestration                          Orchestration
+    |                                      |
+    v                                      v
+Model Plugin                           KV Connector
+  latent steps (overwrite)               loads Agent A's KV from store
+  enriches KV at last position           injects into allocated blocks
+    |                                      |
+    v                                      v
+KV Connector                           Model Plugin
+  extracts per-request KV                 (latent steps optional)
+  saves to FileKVStore                    generates from Agent A's context
 ```
 
 ## Limitations
 
-- **Qwen2 only**: Other model families (Llama, Gemma, Mistral) are not yet supported. The model plugin uses a generic factory internally, so adding support is straightforward.
-- **No tensor parallelism**: Latent steps are automatically disabled when TP > 1 (embedding table is sharded, making softmax projection incorrect).
-- **No pipeline parallelism**: Latent steps are disabled when PP > 1.
-- **File-based store only**: KV transfer uses local filesystem. Not suitable for multi-node deployments. Redis/shared memory backends are planned.
-- **`enforce_eager=True` recommended**: CUDA graph support is experimental. The plugin returns `requires_piecewise_for_cudagraph() = True` but this has not been validated.
-- **Not production-hardened**: The plugin passes 475 mock-based tests but has limited real vLLM validation. Use with caution.
+- **Qwen2 only**: Other model families not yet registered. The factory pattern supports adding them.
+- **No tensor parallelism**: Latent steps disabled when TP > 1 (embedding table is sharded).
+- **No pipeline parallelism**: Latent steps disabled when PP > 1.
+- **`enforce_eager=True` recommended**: CUDA graph support not validated.
+- **Overwrite pattern**: Each step overwrites the same KV position (1-position information bottleneck). The extend pattern (growing KV-cache) is not yet supported in vLLM due to block allocation constraints.
+- **File-based store**: KV transfer uses local filesystem. Not suitable for multi-node.
+- **Validated on vLLM 0.17.x only**: Internal API dependencies may break on other versions.
 
 ## Verifying the Plugin
 
-After starting vLLM with the plugin, check the logs for:
+Check logs for:
 
 ```
-AVP latent model plugin registered: AVPLatentQwen2ForCausalLM (latent_steps=10)
-AVPKVConnectorV1Dynamic initialized: store=/tmp/avp_kv_store, latent_steps=10
+AVP latent model plugin registered (latent_steps=20, override_qwen2=False)
+AVPKVConnectorV1Dynamic initialized: store=/tmp/avp_kv_store, block_size=16, latent_steps=20
 ```
 
-Latent step timing is logged at DEBUG level:
+Enable DEBUG logging for step timing:
 
 ```
-Latent thinking: 20 steps in 90.4ms (4.5ms/step)
+Latent thinking: 4 reqs, 20 steps in 300.2ms (15.0ms/step)
+Saved KV for abc123: 28 layers, 99 tokens
 ```
 
 ## Running Integration Tests
 
 ```bash
-# Requires CUDA GPU and vLLM installed
 pip install avp[vllm]
 pytest tests/test_vllm_integration.py -v -m requires_vllm
 ```

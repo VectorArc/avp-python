@@ -245,10 +245,11 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         # Pending load metadata (from scheduler → worker)
         self._pending_loads: Dict[str, AVPReqMeta] = {}
         self._lock = threading.RLock()
+        self._save_error_logged = False
 
         logger.info(
-            "AVPKVConnectorV1Dynamic initialized: store=%s, block_size=%d",
-            store_dir, self._block_size,
+            "AVPKVConnectorV1Dynamic initialized: store=%s, block_size=%d, latent_steps=%s",
+            store_dir, self._block_size, latent_steps,
         )
 
     @property
@@ -316,9 +317,9 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             slot_mapping = _compute_slot_mapping(block_ids, self._block_size, num_tokens)
             per_request_kv = _extract_request_kv(kv_tensor, slot_mapping)
 
-            # Derive store key from prompt_token_ids via scheduler metadata,
-            # or fall back to request_id from forward context
-            store_key = self._extract_request_id(ctx)
+            # Derive store key — tries prompt_token_ids hash first, falls
+            # back to request_id from forward context
+            store_key = self._derive_store_key(ctx)
 
             with self._lock:
                 if store_key not in self._pending_saves:
@@ -345,7 +346,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                     num_layers += 1
                 if num_layers > 0:
                     self._store.save_meta(store_key, num_tokens, num_layers)
-                    logger.info(
+                    logger.debug(
                         "Saved KV for %s: %d layers, %d tokens",
                         store_key, num_layers, num_tokens,
                     )
@@ -369,6 +370,8 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         slot_mapping, then writes stored KV into the allocated blocks.
         """
         if forward_context is None or self._kv_caches is None:
+            if self._kv_caches is None:
+                logger.debug("start_load_kv: KV caches not registered -- skipping")
             return
 
         with self._lock:
@@ -474,7 +477,7 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         start_load_kv (injection).
         """
         self._kv_caches = kv_caches
-        logger.info(
+        logger.debug(
             "Registered %d KV cache layers: %s",
             len(kv_caches),
             list(kv_caches.keys())[:3],
