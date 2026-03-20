@@ -136,7 +136,6 @@ def run_benchmark(n_problems: int = 200):
             model=MODEL, enforce_eager=True, max_model_len=2048,
             gpu_memory_utilization=0.85, kv_transfer_config=ktc,
             hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
-            max_num_seqs=1,  # Force single-request so latent steps fire
         )
 
         t0 = time.time()
