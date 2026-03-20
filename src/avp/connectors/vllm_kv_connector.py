@@ -29,6 +29,12 @@ from ._vllm_compat import (
 
 logger = logging.getLogger(__name__)
 
+# Module-level mapping from request_id → store_key (prompt hash).
+# The scheduler sets this (has prompt_token_ids), the worker reads it
+# (needs the key in save_kv_layer). Shared via module-level dict because
+# scheduler and worker are separate connector instances in the same process.
+_REQUEST_STORE_KEYS: Dict[str, str] = {}
+
 
 # ---------------------------------------------------------------------------
 # KVStore protocol + FileKVStore implementation
@@ -317,9 +323,11 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
             slot_mapping = _compute_slot_mapping(block_ids, self._block_size, num_tokens)
             per_request_kv = _extract_request_kv(kv_tensor, slot_mapping)
 
-            # Derive store key — tries prompt_token_ids hash first, falls
-            # back to request_id from forward context
-            store_key = self._derive_store_key(ctx)
+            # Look up the store key from the scheduler→worker mapping.
+            # The scheduler registered request_id → store_key (prompt hash)
+            # in build_connector_meta. The worker reads it here.
+            request_id = self._extract_request_id(ctx)
+            store_key = _REQUEST_STORE_KEYS.get(request_id, request_id)
 
             with self._lock:
                 if store_key not in self._pending_saves:
@@ -466,7 +474,27 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         )
 
     def build_connector_meta(self, scheduler_output: Any) -> "KVConnectorMetadata":
-        return AVPConnectorMetadata()
+        """Build metadata to pass store keys from scheduler to worker.
+
+        The scheduler has access to prompt_token_ids (for hashing).
+        The worker needs the store key for save_kv_layer. This bridges them.
+        """
+        req_metas = []
+        try:
+            new_reqs = getattr(scheduler_output, "scheduled_new_reqs", None)
+            if new_reqs:
+                for req in new_reqs:
+                    meta = AVPReqMeta.from_request(req)
+                    # Register request_id → store_key mapping for worker
+                    _REQUEST_STORE_KEYS[meta.request_id] = meta.store_key
+                    # Check if we have KV for this request (load path)
+                    if self._store.has_key(meta.store_key):
+                        meta.num_external_tokens = self._store.get_seq_len(meta.store_key)
+                    req_metas.append(meta)
+        except Exception as e:
+            logger.debug("build_connector_meta: %s", e)
+
+        return AVPConnectorMetadata(requests=req_metas)
 
     # ----- Registration and stats -----
 
