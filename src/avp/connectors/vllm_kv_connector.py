@@ -444,7 +444,16 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         seq_len = self._store.get_seq_len(meta.store_key)
 
         if seq_len <= 0:
+            logger.info(
+                "get_num_new_matched_tokens: key=%s, seq_len=0 (not in store)",
+                meta.store_key,
+            )
             return (0, False)
+
+        logger.info(
+            "get_num_new_matched_tokens: key=%s, seq_len=%d, computed=%d",
+            meta.store_key, seq_len, num_computed_tokens,
+        )
 
         matched = max(0, seq_len - num_computed_tokens)
 
