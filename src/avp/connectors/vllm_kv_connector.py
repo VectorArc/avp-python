@@ -795,12 +795,11 @@ def generate_with_rosetta(
     Loads the projected embedding that Agent A saved, prepends it to
     the prompt as a virtual context token, and generates via vLLM's
     ``prompt_embeds`` pathway. Falls back to normal token-based
-    generation if no projected embedding is found.
-
-    The engine must be created with ``enable_prompt_embeds=True``.
+    generation if no projected embedding is found or if the engine
+    does not support prompt embeddings.
 
     Args:
-        engine: vLLM ``LLM`` instance for Agent B.
+        engine: vLLM ``LLM`` instance for Agent B (no special config needed).
         prompt_token_ids: Agent B's prompt token IDs.
         store_dir: Path to the shared AVP store directory.
         store_key: Store key from Agent A (from ``compute_request_hash``).
@@ -812,12 +811,33 @@ def generate_with_rosetta(
         vLLM ``RequestOutput`` list (same as ``engine.generate``).
     """
     import torch
+    import vllm
 
     projected = load_projected_embedding(store_dir, store_key)
 
     if projected is None:
         # No rosetta embedding — generate normally from tokens
-        import vllm
+        return engine.generate(
+            [vllm.TokensPrompt(prompt_token_ids=list(prompt_token_ids))],
+            sampling_params,
+        )
+
+    # Check if engine supports prompt_embeds (enabled by default in vLLM 0.17+)
+    _prompt_embeds_ok = True
+    try:
+        _prompt_embeds_ok = getattr(
+            engine.llm_engine.model_config, "enable_prompt_embeds", True,
+        )
+    except AttributeError:
+        pass
+
+    if not _prompt_embeds_ok:
+        logger.warning(
+            "Engine has enable_prompt_embeds=False — falling back to text-only "
+            "generation. Rosetta projected embedding will not be used. "
+            "Set enable_prompt_embeds=True when creating the engine to enable "
+            "cross-model latent communication.",
+        )
         return engine.generate(
             [vllm.TokensPrompt(prompt_token_ids=list(prompt_token_ids))],
             sampling_params,

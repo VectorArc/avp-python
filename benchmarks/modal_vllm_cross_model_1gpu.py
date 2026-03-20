@@ -139,7 +139,7 @@ def run_test():
             enforce_eager=True,
             max_model_len=512,
             gpu_memory_utilization=0.7,
-            enable_prompt_embeds=True,
+            # enable_prompt_embeds defaults to True in vLLM 0.17+
             max_num_seqs=1,
         )
 
