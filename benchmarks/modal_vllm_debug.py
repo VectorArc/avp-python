@@ -73,15 +73,29 @@ def run_debug():
 
     params = vllm.SamplingParams(max_tokens=512, temperature=0.7, top_p=0.95, seed=42)
 
+    num_pattern = re.compile(r"-?\d[\d,]*")
+
+    def extract_last_num(text):
+        nums = num_pattern.findall(text)
+        return nums[-1].replace(",", "") if nums else ""
+
     def eval_outputs(outputs):
         correct = 0
         for i, out in enumerate(outputs):
-            text = out.outputs[0].text
-            nums = re.findall(r"-?\d[\d,]*", text)
-            predicted = nums[-1].replace(",", "") if nums else ""
+            predicted = extract_last_num(out.outputs[0].text)
             if predicted == gold[i]:
                 correct += 1
         return correct
+
+    def print_results(label, outputs):
+        c = eval_outputs(outputs)
+        print(f"{label}: {c}/{N_PROBLEMS}")
+        for i, out in enumerate(outputs):
+            text = out.outputs[0].text
+            pred = extract_last_num(text)
+            mark = "Y" if pred == gold[i] else "N"
+            print(f"  Q{i}: {mark} (gold={gold[i]}, pred={pred}, out={text[:80]})")
+        return c
 
     results = {}
 
@@ -105,11 +119,7 @@ def run_debug():
         )
         prompts = [vllm.TokensPrompt(prompt_token_ids=ids) for ids in base_ids]
         outputs = engine.generate(prompts, params)
-        c = eval_outputs(outputs)
-        print(f"Baseline: {c}/{N_PROBLEMS}")
-        for i, out in enumerate(outputs):
-            print(f"  Q{i}: {'✓' if re.findall(r'-?\\d[\\d,]*', out.outputs[0].text)[-1:] == [gold[i]] else '✗'} (gold={gold[i]}, last_num={re.findall(r'-?\\d[\\d,]*', out.outputs[0].text)[-1:]})")
-        results["1_baseline"] = c
+        results["1_baseline"] = print_results("Baseline", outputs)
         del engine
 
     # ================================================================
@@ -132,11 +142,7 @@ def run_debug():
         )
         prompts = [vllm.TokensPrompt(prompt_token_ids=ids) for ids in padded_ids]
         outputs = engine.generate(prompts, params)
-        c = eval_outputs(outputs)
-        print(f"Padding only: {c}/{N_PROBLEMS}")
-        for i, out in enumerate(outputs):
-            print(f"  Q{i}: {'✓' if re.findall(r'-?\\d[\\d,]*', out.outputs[0].text)[-1:] == [gold[i]] else '✗'} (gold={gold[i]}, out={out.outputs[0].text[:80]})")
-        results["2_padding_only"] = c
+        results["2_padding_only"] = print_results("Padding only", outputs)
         del engine
 
     # ================================================================
@@ -160,9 +166,7 @@ def run_debug():
         )
         prompts = [vllm.TokensPrompt(prompt_token_ids=ids) for ids in base_ids]
         outputs = engine.generate(prompts, params)
-        c = eval_outputs(outputs)
-        print(f"Wrapper only: {c}/{N_PROBLEMS}")
-        results["3_wrapper_only"] = c
+        results["3_wrapper_only"] = print_results("Wrapper only", outputs)
         del engine
 
     # ================================================================
@@ -189,11 +193,7 @@ def run_debug():
         for i, ids in enumerate(padded_ids):
             out = engine.generate([vllm.TokensPrompt(prompt_token_ids=ids)], params)
             outputs.extend(out)
-        c = eval_outputs(outputs)
-        print(f"Extend: {c}/{N_PROBLEMS}")
-        for i, out in enumerate(outputs):
-            print(f"  Q{i}: {'✓' if re.findall(r'-?\\d[\\d,]*', out.outputs[0].text)[-1:] == [gold[i]] else '✗'} (gold={gold[i]}, out={out.outputs[0].text[:80]})")
-        results["4_extend"] = c
+        results["4_extend"] = print_results("Extend", outputs)
         del engine
 
     # ================================================================
