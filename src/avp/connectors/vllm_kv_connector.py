@@ -158,6 +158,7 @@ class AVPReqMeta:
     store_key: str
     num_tokens: int = 0
     num_external_tokens: int = 0
+    num_computed_tokens: int = 0
     block_ids: List[int] = field(default_factory=list)
 
     @classmethod
@@ -557,12 +558,19 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
                             slot_mapping.shape[0],
                         )
 
-                    # Align stored KV to allocated slot count. The store may
-                    # have more tokens than the scheduler allocated (the -1 cap
-                    # in get_num_new_matched_tokens leaves 1 token for prefill).
+                    # Offset by num_computed_tokens: when prefix caching is
+                    # active, positions 0..K are already in the KV cache.
+                    # The scheduler allocated slots for positions K..K+matched.
+                    # We must inject stored_kv[K:K+matched], not [0:matched].
+                    offset = meta.num_computed_tokens
                     num_slots = slot_mapping.shape[0]
-                    if stored_kv.shape[1] > num_slots:
-                        stored_kv = stored_kv[:, :num_slots, :]
+                    end = offset + num_slots
+                    if end > stored_kv.shape[1]:
+                        end = stored_kv.shape[1]
+                    stored_kv = stored_kv[:, offset:end, :]
+                    # Truncate slot_mapping if stored_kv has fewer tokens
+                    if stored_kv.shape[1] < num_slots:
+                        slot_mapping = slot_mapping[:stored_kv.shape[1]]
 
                     _inject_request_kv(kv_cache, slot_mapping, stored_kv)
                     layers_loaded += 1
@@ -614,6 +622,12 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
         if prompt_len > 0 and matched >= prompt_len - num_computed_tokens:
             matched = max(0, prompt_len - num_computed_tokens - 1)
 
+        # Cache num_computed_tokens so update_state_after_alloc can record
+        # it in AVPReqMeta. start_load_kv needs this offset to inject
+        # stored KV at the correct positions when prefix caching is active.
+        self._last_num_computed: Dict[str, int] = getattr(self, "_last_num_computed", {})
+        self._last_num_computed[meta.request_id] = num_computed_tokens
+
         return (matched, False)
 
     def update_state_after_alloc(
@@ -642,6 +656,12 @@ class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
 
         meta.block_ids = block_list
         meta.num_external_tokens = num_external_tokens
+
+        # Retrieve num_computed_tokens cached by get_num_new_matched_tokens.
+        # start_load_kv uses this to offset into the stored KV so that
+        # prefix-cached positions are not duplicated.
+        _last = getattr(self, "_last_num_computed", {})
+        meta.num_computed_tokens = _last.pop(meta.request_id, 0)
 
         # Use module-level dict (shared between scheduler and worker instances)
         _PENDING_LOADS[meta.request_id] = meta

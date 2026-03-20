@@ -236,7 +236,6 @@ def run_benchmark(mode: str = "same-model", n: int = 5):
                 gpu_memory_utilization=0.85,
                 kv_transfer_config=ktc_b,
                 max_num_seqs=1,
-                enable_prefix_caching=False,  # Avoid conflict with KV connector
             )
 
             gen_params = vllm.SamplingParams(
