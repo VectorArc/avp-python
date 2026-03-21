@@ -39,7 +39,7 @@ Requires: ``pip install langchain-core>=1.0``
 """
 
 import logging
-from typing import Any, Iterator, List, Optional, Union
+from typing import Any, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 

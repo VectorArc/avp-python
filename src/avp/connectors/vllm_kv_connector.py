@@ -95,7 +95,6 @@ class FileKVStore:
 
     def _reap_loop(self) -> None:
         """Background loop that deletes expired entries."""
-        import shutil
         import time as _time
 
         while True:

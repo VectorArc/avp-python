@@ -30,7 +30,7 @@ Requires: ``pip install autogen-core``
 """
 
 import logging
-from typing import Any, AsyncGenerator, List, Mapping, Optional, Sequence, Union
+from typing import Any, AsyncGenerator, Mapping, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 

@@ -216,7 +216,7 @@ class TestForward:
         input_ids = torch.tensor([[1, 2, 3, 4, 5]])
         positions = torch.tensor([0, 1, 2, 3, 4])
 
-        result = plugin.forward(input_ids, positions)
+        plugin.forward(input_ids, positions)
 
         # Should exit early: 1 initial + 1 step (NaN detected) = 2
         assert call_count["n"] == 2

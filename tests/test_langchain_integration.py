@@ -4,7 +4,6 @@ import pytest
 
 try:
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-    from langchain_core.outputs import ChatResult
 
     HAS_LANGCHAIN = True
 except ImportError:

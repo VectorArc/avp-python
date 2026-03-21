@@ -3,7 +3,7 @@
 import pytest
 
 try:
-    from autogen_core.models import ChatCompletionClient, CreateResult, RequestUsage
+    from autogen_core.models import ChatCompletionClient, RequestUsage
 
     HAS_AUTOGEN = True
 except ImportError:
