@@ -38,7 +38,19 @@ image = (
 
 @app.function(image=image, gpu="A100-40GB", timeout=1800)
 def run_test():
+    import os
     import time
+
+    # Set LD_LIBRARY_PATH before any llama_cpp import
+    import torch
+    torch_lib = os.path.join(torch.__path__[0], "lib")
+    os.environ["LD_LIBRARY_PATH"] = f"{torch_lib}:{os.environ.get('LD_LIBRARY_PATH', '')}"
+    # Also set for ctypes to find it
+    import ctypes
+    try:
+        ctypes.CDLL(os.path.join(torch_lib, "libcudart.so.12"))
+    except OSError:
+        print("Warning: could not preload libcudart.so.12")
 
     from huggingface_hub import hf_hub_download
 

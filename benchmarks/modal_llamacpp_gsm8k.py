@@ -41,8 +41,19 @@ image = (
 
 @app.function(image=image, gpu="A100-40GB", timeout=7200)
 def run_benchmark(n: int = 50):
+    import os
     import re
     import time
+
+    # Preload CUDA runtime from torch before llama_cpp imports
+    import torch
+    import ctypes
+    torch_lib = os.path.join(torch.__path__[0], "lib")
+    os.environ["LD_LIBRARY_PATH"] = f"{torch_lib}:{os.environ.get('LD_LIBRARY_PATH', '')}"
+    try:
+        ctypes.CDLL(os.path.join(torch_lib, "libcudart.so.12"))
+    except OSError:
+        pass
 
     from datasets import load_dataset
     from huggingface_hub import hf_hub_download
