@@ -13,7 +13,7 @@ import modal
 app = modal.App("avp-llamacpp-sanity")
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11")
     .apt_install("git", "cmake", "build-essential")
     .pip_install(
         "torch>=2.0",
