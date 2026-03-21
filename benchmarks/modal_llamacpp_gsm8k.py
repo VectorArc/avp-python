@@ -128,13 +128,13 @@ def run_benchmark(n: int = 50):
             answer = connector.generate(
                 f"Solve step by step: {q}",
                 context=context,
-                max_tokens=512,
+                max_tokens=1024,
                 temperature=0.0,
             )
         else:
             answer = connector.generate(
                 f"Solve step by step: {q}",
-                max_tokens=512,
+                max_tokens=1024,
                 temperature=0.0,
             )
 
