@@ -287,26 +287,46 @@ class LlamaCppConnector(EngineConnector):
         return context
 
     def _apply_chat_template(self, prompt: str) -> list:
-        """Apply the model's chat template and tokenize.
+        """Apply chat template and tokenize.
 
-        Wraps the prompt in the instruct format (e.g.,
-        ``<|im_start|>user\\n...prompt...<|im_end|>\\n<|im_start|>assistant\\n``
-        for Qwen/ChatML models). Without this, the model doesn't know
-        when to start or stop generating.
+        Uses llama-cpp-python's ``create_chat_completion`` chat format
+        detection, falling back to ChatML (Qwen/many instruct models).
+        Without the template markers, instruct models ramble indefinitely.
         """
+        # Try the model's built-in chat format via metadata
         try:
-            # Use llama-cpp-python's built-in chat handler to format
-            formatted = self._model.tokenize(
-                self._model._model.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True,
-                ).encode("utf-8"),
-                add_bos=False,  # Template includes BOS
-            )
-            return formatted
-        except (AttributeError, TypeError):
-            # Fallback: raw tokenization with BOS
-            return self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
+            meta = self._model.metadata or {}
+            chat_template = None
+            for key, val in meta.items():
+                if "chat_template" in key:
+                    chat_template = val
+                    break
+
+            if chat_template and "im_start" in chat_template:
+                # ChatML format (Qwen, many others)
+                formatted = (
+                    f"<|im_start|>user\n{prompt}<|im_end|>\n"
+                    f"<|im_start|>assistant\n"
+                )
+                return self._model.tokenize(
+                    formatted.encode("utf-8"), add_bos=True,
+                )
+
+            if chat_template and "[INST]" in chat_template:
+                # Llama/Mistral instruct format
+                formatted = f"[INST] {prompt} [/INST]"
+                return self._model.tokenize(
+                    formatted.encode("utf-8"), add_bos=True,
+                )
+        except Exception:
+            pass
+
+        # Default fallback: ChatML (works for most instruct models)
+        formatted = (
+            f"<|im_start|>user\n{prompt}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        return self._model.tokenize(formatted.encode("utf-8"), add_bos=True)
 
     @staticmethod
     def _get_embeddings(lc: Any, ctx: Any, n_embd: int) -> Any:

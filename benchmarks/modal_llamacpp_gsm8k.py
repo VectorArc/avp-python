@@ -118,15 +118,13 @@ def run_benchmark(n: int = 50):
 
     for i, q in enumerate(questions):
         # Think
-        context = connector.think(
-            f"Analyze this math problem carefully: {q}",
-            steps=10,
-        )
+        solve_prompt = f"Solve step by step: {q}"
+        context = connector.think(solve_prompt, steps=10)
 
-        # Generate
+        # Generate — same prompt, continue from enriched KV
         if context is not None:
             answer = connector.generate(
-                f"Solve step by step: {q}",
+                "",  # Empty = continue from think context
                 context=context,
                 max_tokens=2048,
                 temperature=0.0,
