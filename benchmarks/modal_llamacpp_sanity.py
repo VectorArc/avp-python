@@ -22,7 +22,7 @@ image = (
         "gguf>=0.6",
     )
     .run_commands(
-        'CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python>=0.3 --no-cache-dir',
+        'CC=gcc CXX=g++ CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python>=0.3 --no-cache-dir',
     )
     .pip_install(
         "git+https://github.com/VectorArc/avp-python.git@main",
