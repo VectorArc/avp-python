@@ -13,7 +13,7 @@ import modal
 app = modal.App("avp-llamacpp-sanity")
 
 image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.from_registry("nvidia/cuda:12.4.1-runtime-ubuntu22.04", add_python="3.11")
     .apt_install("git")
     .pip_install(
         "llama-cpp-python>=0.3",
