@@ -399,8 +399,10 @@ class LlamaCppConnector(EngineConnector):
         self._capture["active"] = False
 
         try:
-            # Decode solver prompt tokens onto the think context
-            tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
+            # Decode solver prompt tokens onto the think context.
+            # Don't add BOS — the think prompt already starts with BOS
+            # at position 0. A second BOS confuses the model.
+            tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=False)
             n_prompt = len(tokens)
 
             batch = lc.llama_batch_init(n_prompt, 0, 1)
