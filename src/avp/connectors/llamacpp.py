@@ -428,21 +428,8 @@ class LlamaCppConnector(EngineConnector):
                     n_cur = n_past + len(tokens)
 
             # Autoregressive generation
-            sampler_params = lc.llama_sampler_chain_default_params()
-            sampler = lc.llama_sampler_chain_init(sampler_params)
-
-            top_k_s = lc.llama_sampler_init_top_k(40)
-            lc.llama_sampler_chain_add(sampler, top_k_s)
-
-            top_p_s = lc.llama_sampler_init_top_p(top_p, 1)
-            lc.llama_sampler_chain_add(sampler, top_p_s)
-
-            temp_s = lc.llama_sampler_init_temp(temperature)
-            lc.llama_sampler_chain_add(sampler, temp_s)
-
-            dist_s = lc.llama_sampler_init_dist(0)
-            lc.llama_sampler_chain_add(sampler, dist_s)
-
+            sampler = self._make_sampler(lc, temperature, top_p)
+            next_batch = lc.llama_batch_init(1, 0, 1)
             generated_tokens = []
             eos_token = self._model.token_eos()
 
@@ -456,23 +443,20 @@ class LlamaCppConnector(EngineConnector):
 
                     generated_tokens.append(token_id)
 
-                    next_batch = lc.llama_batch_init(1, 0, 1)
-                    try:
-                        next_batch.token[0] = token_id
-                        next_batch.pos[0] = n_cur
-                        next_batch.seq_id[0][0] = 0
-                        next_batch.n_seq_id[0] = 1
-                        next_batch.logits[0] = 1
-                        next_batch.n_tokens = 1
-                        n_cur += 1
+                    next_batch.token[0] = token_id
+                    next_batch.pos[0] = n_cur
+                    next_batch.seq_id[0][0] = 0
+                    next_batch.n_seq_id[0] = 1
+                    next_batch.logits[0] = 1
+                    next_batch.n_tokens = 1
+                    n_cur += 1
 
-                        rc = lc.llama_decode(think_ctx, next_batch)
-                        if rc != 0:
-                            break
-                    finally:
-                        lc.llama_batch_free(next_batch)
+                    rc = lc.llama_decode(think_ctx, next_batch)
+                    if rc != 0:
+                        break
             finally:
                 lc.llama_sampler_free(sampler)
+                lc.llama_batch_free(next_batch)
 
             text = self._model.detokenize(generated_tokens).decode(
                 "utf-8", errors="replace",
@@ -577,30 +561,15 @@ class LlamaCppConnector(EngineConnector):
             llama_cpp.llama_batch_free(tok_batch)
 
         # Step 3: Autoregressive generation
-        # Set up sampler
-        sampler_params = llama_cpp.llama_sampler_chain_default_params()
-        sampler = llama_cpp.llama_sampler_chain_init(sampler_params)
-
-        # Add sampling steps: top_k → top_p → temperature → dist
-        top_k_s = llama_cpp.llama_sampler_init_top_k(40)
-        llama_cpp.llama_sampler_chain_add(sampler, top_k_s)
-
-        top_p_s = llama_cpp.llama_sampler_init_top_p(top_p, 1)
-        llama_cpp.llama_sampler_chain_add(sampler, top_p_s)
-
-        temp_s = llama_cpp.llama_sampler_init_temp(temperature)
-        llama_cpp.llama_sampler_chain_add(sampler, temp_s)
-
-        dist_s = llama_cpp.llama_sampler_init_dist(0)
-        llama_cpp.llama_sampler_chain_add(sampler, dist_s)
+        sampler = self._make_sampler(llama_cpp, temperature, top_p)
 
         generated_tokens = []
         n_cur = 1 + n_prompt  # current position (1 embd + L prompt)
         eos_token = self._model.token_eos()
 
+        next_batch = llama_cpp.llama_batch_init(1, 0, 1)
         try:
             for _ in range(max_tokens):
-                # Sample from last position
                 token_id = llama_cpp.llama_sampler_sample(sampler, ctx, -1)
                 llama_cpp.llama_sampler_accept(sampler, token_id)
 
@@ -609,24 +578,20 @@ class LlamaCppConnector(EngineConnector):
 
                 generated_tokens.append(token_id)
 
-                # Decode next token
-                next_batch = llama_cpp.llama_batch_init(1, 0, 1)
-                try:
-                    next_batch.token[0] = token_id
-                    next_batch.pos[0] = n_cur
-                    next_batch.seq_id[0][0] = 0
-                    next_batch.n_seq_id[0] = 1
-                    next_batch.logits[0] = 1
-                    next_batch.n_tokens = 1
-                    n_cur += 1
+                next_batch.token[0] = token_id
+                next_batch.pos[0] = n_cur
+                next_batch.seq_id[0][0] = 0
+                next_batch.n_seq_id[0] = 1
+                next_batch.logits[0] = 1
+                next_batch.n_tokens = 1
+                n_cur += 1
 
-                    rc = llama_cpp.llama_decode(ctx, next_batch)
-                    if rc != 0:
-                        break
-                finally:
-                    llama_cpp.llama_batch_free(next_batch)
+                rc = llama_cpp.llama_decode(ctx, next_batch)
+                if rc != 0:
+                    break
         finally:
             llama_cpp.llama_sampler_free(sampler)
+            llama_cpp.llama_batch_free(next_batch)
 
         # Detokenize
         text = self._model.detokenize(generated_tokens).decode("utf-8", errors="replace")
@@ -636,6 +601,36 @@ class LlamaCppConnector(EngineConnector):
             n_prompt, len(generated_tokens),
         )
         return text
+
+    @staticmethod
+    def _make_sampler(lc: Any, temperature: float, top_p: float) -> Any:
+        """Create a sampler chain matching llama-cpp-python's behavior.
+
+        When temperature=0, uses greedy sampling only (no top_k/top_p/dist).
+        This matches llama-cpp-python's _init_sampler which switches to
+        greedy for temp=0. Using temp(0)+dist(0) produces garbage due to
+        -inf logit handling in the softmax.
+        """
+        sampler_params = lc.llama_sampler_chain_default_params()
+        sampler = lc.llama_sampler_chain_init(sampler_params)
+
+        if temperature == 0.0:
+            greedy_s = lc.llama_sampler_init_greedy()
+            lc.llama_sampler_chain_add(sampler, greedy_s)
+        else:
+            top_k_s = lc.llama_sampler_init_top_k(40)
+            lc.llama_sampler_chain_add(sampler, top_k_s)
+
+            top_p_s = lc.llama_sampler_init_top_p(top_p, 1)
+            lc.llama_sampler_chain_add(sampler, top_p_s)
+
+            temp_s = lc.llama_sampler_init_temp(temperature)
+            lc.llama_sampler_chain_add(sampler, temp_s)
+
+            dist_s = lc.llama_sampler_init_dist(0)
+            lc.llama_sampler_chain_add(sampler, dist_s)
+
+        return sampler
 
     def _project_rosetta(self, hidden: Any, source: "LlamaCppConnector") -> Any:
         """Project hidden state from source to target model space.
