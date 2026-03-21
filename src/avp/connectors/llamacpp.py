@@ -394,6 +394,10 @@ class LlamaCppConnector(EngineConnector):
         think_ctx = context._llamacpp_ctx
         n_past = context._llamacpp_n_past
 
+        # Disable cb_eval during generation — the callback syncs tensor
+        # data to CPU on every decode, which interferes with generation.
+        self._capture["active"] = False
+
         try:
             # Decode solver prompt tokens onto the think context
             tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
@@ -477,6 +481,7 @@ class LlamaCppConnector(EngineConnector):
             return text
 
         finally:
+            self._capture["active"] = True
             lc.llama_free(think_ctx)
             context._llamacpp_ctx = None
 

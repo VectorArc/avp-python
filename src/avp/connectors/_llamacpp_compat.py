@@ -127,6 +127,11 @@ def make_eval_callback(
     @EVAL_CALLBACK_TYPE
     def callback(tensor_ptr, ask, user_data):
         try:
+            # Check active flag — disabled during generation to avoid
+            # interfering with normal forward pass (data sync overhead)
+            if not capture_dict.get("active", True):
+                return False
+
             name = get_tensor_name(tensor_ptr)
 
             if ask:
