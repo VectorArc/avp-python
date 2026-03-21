@@ -13,16 +13,17 @@ import modal
 app = modal.App("avp-llamacpp-sanity")
 
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11")
-    .apt_install("git", "cmake", "build-essential")
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git")
+    .pip_install(
+        "llama-cpp-python>=0.3",
+        extra_index_url="https://abetlen.github.io/llama-cpp-python/whl/cu124",
+    )
     .pip_install(
         "torch>=2.0",
         "numpy>=1.24",
         "huggingface-hub>=0.20",
         "gguf>=0.6",
-    )
-    .run_commands(
-        'CC=gcc CXX=g++ CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python>=0.3 --no-cache-dir',
     )
     .pip_install(
         "git+https://github.com/VectorArc/avp-python.git@main",
