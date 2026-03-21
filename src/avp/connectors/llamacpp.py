@@ -234,9 +234,15 @@ class LlamaCppConnector(EngineConnector):
         cross_model: bool = False,
         max_tokens: int = 512,
         temperature: float = 0.7,
+        top_p: float = 0.95,
         **kwargs: Any,
     ) -> str:
         """Generate text, optionally using latent context.
+
+        When ``context`` is provided, the hidden state is injected via
+        llama.cpp's ``batch.embd`` as a prefix embedding before the
+        prompt tokens. The model attends to this virtual context token
+        during generation.
 
         Args:
             prompt: The input prompt.
@@ -245,6 +251,7 @@ class LlamaCppConnector(EngineConnector):
             cross_model: Enable cross-model projection.
             max_tokens: Maximum tokens to generate.
             temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
 
         Returns:
             Generated text string.
@@ -255,17 +262,18 @@ class LlamaCppConnector(EngineConnector):
                 prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                top_p=top_p,
             )
             return output["choices"][0]["text"]
 
-        # With context: project if cross-model, then generate
+        # With context: inject hidden state via batch.embd
         hidden = getattr(context, "hidden_state", None)
         if hidden is None:
-            # Fallback to text-only
             output = self._model(
                 prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                top_p=top_p,
             )
             return output["choices"][0]["text"]
 
@@ -273,28 +281,163 @@ class LlamaCppConnector(EngineConnector):
         if cross_model and source is not None:
             hidden = self._project_rosetta(hidden, source)
 
-        # For now, prepend context info to prompt as text
-        # (embedding injection via batch.embd requires deeper integration
-        # with llama-cpp-python's internals — planned for next iteration)
-        logger.debug(
-            "generate(): using latent context, hidden shape=%s",
-            list(hidden.shape),
+        return self._generate_with_embedding(
+            prompt, hidden, max_tokens, temperature, top_p,
         )
 
-        # Generate with the prompt
-        output = self._model(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
+    def _generate_with_embedding(
+        self,
+        prompt: str,
+        embedding: Any,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+    ) -> str:
+        """Generate text with a prepended embedding via batch.embd.
+
+        Pipeline:
+        1. Inject embedding as position 0 via batch.embd
+        2. Decode prompt tokens at positions 1..L
+        3. Autoregressive generation from position L+1
+        """
+        import ctypes
+        import numpy as np
+        from llama_cpp import llama_cpp
+
+        ctx = self._model._ctx.ctx
+        n_embd = self._n_embd
+
+        # Ensure embedding is float32 numpy [n_embd]
+        if hasattr(embedding, "numpy"):
+            emb_np = embedding.detach().cpu().float().numpy()
+        else:
+            emb_np = np.asarray(embedding, dtype=np.float32)
+        emb_np = emb_np.reshape(-1).astype(np.float32)
+        if emb_np.shape[0] != n_embd:
+            logger.warning(
+                "Embedding dim %d != model n_embd %d, skipping injection",
+                emb_np.shape[0], n_embd,
+            )
+            output = self._model(
+                prompt, max_tokens=max_tokens, temperature=temperature,
+            )
+            return output["choices"][0]["text"]
+
+        # Clear KV cache for a fresh context
+        llama_cpp.llama_kv_self_clear(ctx)
+
+        # Step 1: Inject embedding at position 0 via batch.embd
+        emb_batch = llama_cpp.llama_batch_init(1, n_embd, 1)
+        try:
+            ctypes.memmove(
+                emb_batch.embd,
+                emb_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ctypes.sizeof(ctypes.c_float) * n_embd,
+            )
+            emb_batch.n_tokens = 1
+            emb_batch.pos[0] = 0
+            emb_batch.seq_id[0][0] = 0
+            emb_batch.n_seq_id[0] = 1
+            emb_batch.logits[0] = 0  # No logits needed for prefix
+
+            rc = llama_cpp.llama_decode(ctx, emb_batch)
+            if rc != 0:
+                logger.warning("Embedding decode failed (rc=%d), falling back to text", rc)
+                output = self._model(
+                    prompt, max_tokens=max_tokens, temperature=temperature,
+                )
+                return output["choices"][0]["text"]
+        finally:
+            llama_cpp.llama_batch_free(emb_batch)
+
+        # Step 2: Decode prompt tokens at positions 1..L
+        tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
+        n_prompt = len(tokens)
+
+        tok_batch = llama_cpp.llama_batch_init(n_prompt, 0, 1)
+        try:
+            for i, tok in enumerate(tokens):
+                tok_batch.token[i] = tok
+                tok_batch.pos[i] = i + 1  # offset by 1 for the embedding prefix
+                tok_batch.seq_id[i][0] = 0
+                tok_batch.n_seq_id[i] = 1
+                tok_batch.logits[i] = 1 if i == n_prompt - 1 else 0
+            tok_batch.n_tokens = n_prompt
+
+            rc = llama_cpp.llama_decode(ctx, tok_batch)
+            if rc != 0:
+                logger.warning("Prompt decode failed (rc=%d)", rc)
+                return ""
+        finally:
+            llama_cpp.llama_batch_free(tok_batch)
+
+        # Step 3: Autoregressive generation
+        # Set up sampler
+        sampler_params = llama_cpp.llama_sampler_chain_default_params()
+        sampler = llama_cpp.llama_sampler_chain_init(sampler_params)
+
+        # Add sampling steps: top_k → top_p → temperature → dist
+        top_k_s = llama_cpp.llama_sampler_init_top_k(40)
+        llama_cpp.llama_sampler_chain_add(sampler, top_k_s)
+
+        top_p_s = llama_cpp.llama_sampler_init_top_p(top_p, 1)
+        llama_cpp.llama_sampler_chain_add(sampler, top_p_s)
+
+        temp_s = llama_cpp.llama_sampler_init_temp(temperature)
+        llama_cpp.llama_sampler_chain_add(sampler, temp_s)
+
+        dist_s = llama_cpp.llama_sampler_init_dist(0)
+        llama_cpp.llama_sampler_chain_add(sampler, dist_s)
+
+        generated_tokens = []
+        n_cur = 1 + n_prompt  # current position (1 embd + L prompt)
+        eos_token = self._model.token_eos()
+
+        try:
+            for _ in range(max_tokens):
+                # Sample from last position
+                token_id = llama_cpp.llama_sampler_sample(sampler, ctx, -1)
+                llama_cpp.llama_sampler_accept(sampler, token_id)
+
+                if token_id == eos_token:
+                    break
+
+                generated_tokens.append(token_id)
+
+                # Decode next token
+                next_batch = llama_cpp.llama_batch_init(1, 0, 1)
+                try:
+                    next_batch.token[0] = token_id
+                    next_batch.pos[0] = n_cur
+                    next_batch.seq_id[0][0] = 0
+                    next_batch.n_seq_id[0] = 1
+                    next_batch.logits[0] = 1
+                    next_batch.n_tokens = 1
+                    n_cur += 1
+
+                    rc = llama_cpp.llama_decode(ctx, next_batch)
+                    if rc != 0:
+                        break
+                finally:
+                    llama_cpp.llama_batch_free(next_batch)
+        finally:
+            llama_cpp.llama_sampler_free(sampler)
+
+        # Detokenize
+        text = self._model.detokenize(generated_tokens).decode("utf-8", errors="replace")
+
+        logger.debug(
+            "generate(): injected embedding + %d prompt tokens, generated %d tokens",
+            n_prompt, len(generated_tokens),
         )
-        return output["choices"][0]["text"]
+        return text
 
     def _project_rosetta(self, hidden: Any, source: "LlamaCppConnector") -> Any:
-        """Project hidden state from source model to target model space."""
+        """Project hidden state from source model to target model space.
 
-        # This is a placeholder — full rosetta projection requires
-        # source/target tokenizers and embed weights, which need to be
-        # extracted from the GGUF metadata. Planned for next iteration.
+        Currently experimental — full rosetta projection requires
+        source/target tokenizers and embed weights from GGUF metadata.
+        """
         logger.warning(
             "Cross-model rosetta for llama.cpp is experimental. "
             "Use HuggingFace connector for validated cross-model projection."
