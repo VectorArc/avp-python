@@ -89,7 +89,7 @@ def run_benchmark(n: int = 50):
     from avp.connectors.llamacpp import LlamaCppConnector
 
     connector = LlamaCppConnector.from_pretrained(
-        model_path, n_ctx=2048, n_gpu_layers=gpu_layers, verbose=False,
+        model_path, n_ctx=4096, n_gpu_layers=gpu_layers, verbose=False,
     )
 
     # Load GSM8K
@@ -128,13 +128,13 @@ def run_benchmark(n: int = 50):
             answer = connector.generate(
                 f"Solve step by step: {q}",
                 context=context,
-                max_tokens=1024,
+                max_tokens=2048,
                 temperature=0.0,
             )
         else:
             answer = connector.generate(
                 f"Solve step by step: {q}",
-                max_tokens=1024,
+                max_tokens=2048,
                 temperature=0.0,
             )
 
