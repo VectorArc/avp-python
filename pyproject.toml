@@ -39,6 +39,7 @@ vllm = ["vllm>=0.17.0,<0.19.0", "safetensors>=0.4", "huggingface-hub>=0.20"]
 langchain = ["langchain-core>=1.0"]
 crewai = ["crewai>=0.86"]
 autogen = ["autogen-core>=0.4"]
+llamacpp = ["llama-cpp-python>=0.3"]
 transport = ["httpx[http2]>=0.25"]
 server = ["avp[transport]", "fastapi>=0.104", "uvicorn[standard]>=0.24"]
 # Development
