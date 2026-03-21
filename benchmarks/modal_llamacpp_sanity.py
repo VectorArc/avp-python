@@ -152,6 +152,67 @@ def run_test():
         diag_text = connector._model.detokenize(gen_tokens).decode("utf-8", errors="replace")
         print(f"  Low-level output: {diag_text[:200]!r}")
         results["diag_no_cb"] = {"text": diag_text[:200], "ok": len(diag_text) > 5}
+
+        # Test: can we get embeddings without cb_eval?
+        # Recreate context with embeddings=True
+        ctx_params2 = lc.llama_context_default_params()
+        ctx_params2.n_ctx = 2048
+        ctx_params2.n_batch = 512
+        ctx_params2.embeddings = True
+        emb_ctx = lc.llama_new_context_with_model(model_ptr, ctx_params2)
+        batch2 = lc.llama_batch_init(len(tokens), 0, 1)
+        for i, tok in enumerate(tokens):
+            batch2.token[i] = tok
+            batch2.pos[i] = i
+            batch2.seq_id[i][0] = 0
+            batch2.n_seq_id[i] = 1
+            batch2.logits[i] = 1 if i == len(tokens) - 1 else 0
+        batch2.n_tokens = len(tokens)
+        lc.llama_decode(emb_ctx, batch2)
+        lc.llama_batch_free(batch2)
+
+        # Try llama_get_embeddings_ith
+        emb_ptr = lc.llama_get_embeddings_ith(emb_ctx, -1)
+        if emb_ptr:
+            import ctypes
+            import numpy as np
+            n_embd = connector._n_embd
+            emb_arr = (ctypes.c_float * n_embd).from_address(ctypes.addressof(emb_ptr.contents))
+            emb_np = np.array(emb_arr, dtype=np.float32, copy=True)
+            emb_norm = float(np.linalg.norm(emb_np))
+            print(f"  Embeddings via llama_get_embeddings_ith: norm={emb_norm:.3f}, shape=({n_embd},)")
+            results["emb_api"] = {"norm": emb_norm, "ok": emb_norm > 0}
+        else:
+            print("  llama_get_embeddings_ith returned NULL")
+            results["emb_api"] = {"ok": False}
+
+        # Now test: greedy sampling AFTER embeddings=True decode
+        sampler2 = lc.llama_sampler_chain_init(lc.llama_sampler_chain_default_params())
+        lc.llama_sampler_chain_add(sampler2, lc.llama_sampler_init_greedy())
+        gen2 = []
+        n_cur2 = len(tokens)
+        nb2 = lc.llama_batch_init(1, 0, 1)
+        for _ in range(50):
+            tid = lc.llama_sampler_sample(sampler2, emb_ctx, -1)
+            lc.llama_sampler_accept(sampler2, tid)
+            if tid == eos:
+                break
+            gen2.append(tid)
+            nb2.token[0] = tid
+            nb2.pos[0] = n_cur2
+            nb2.seq_id[0][0] = 0
+            nb2.n_seq_id[0] = 1
+            nb2.logits[0] = 1
+            nb2.n_tokens = 1
+            n_cur2 += 1
+            lc.llama_decode(emb_ctx, nb2)
+        lc.llama_batch_free(nb2)
+        lc.llama_sampler_free(sampler2)
+        emb_gen_text = connector._model.detokenize(gen2).decode("utf-8", errors="replace")
+        print(f"  Sampling after embeddings=True: {emb_gen_text[:150]!r}")
+        results["emb_gen"] = {"text": emb_gen_text[:150], "ok": len(emb_gen_text) > 5}
+
+        lc.llama_free(emb_ctx)
     except Exception as e:
         print(f"  FAILED: {e}")
         import traceback
