@@ -191,6 +191,7 @@ def extract_gguf_embedding_weights(model_path: str) -> Any:
 
     try:
         from gguf import GGUFReader
+        from gguf.quants import dequantize as gguf_dequantize
     except ImportError:
         raise ImportError(
             "GGUF weight extraction requires the gguf package. "
@@ -213,9 +214,9 @@ def extract_gguf_embedding_weights(model_path: str) -> Any:
             f"Available tensors (first 10): {available}"
         )
 
-    # tensor.data is dequantized by the gguf package.
-    # For quantized tensors, the data may be in block format.
-    data = np.array(tensor.data, dtype=np.float32).flatten()
+    # Dequantize: tensor.data is raw quantized bytes for Q4/Q6/Q8 etc.
+    # gguf.quants.dequantize handles all quantization formats correctly.
+    data = gguf_dequantize(tensor.data, tensor.tensor_type).astype(np.float32).flatten()
 
     # Infer shape from GGUF metadata (more reliable than tensor.shape
     # which may reflect quantized block layout, not logical dimensions)
@@ -245,7 +246,18 @@ def extract_gguf_embedding_weights(model_path: str) -> Any:
             f"Data size {data.size} not divisible by n_embd={n_embd_val}"
         )
 
-    return data.reshape(n_vocab_val, n_embd_val)
+    result = data.reshape(n_vocab_val, n_embd_val)
+
+    # Sanity check: dequantized embedding norms should be reasonable
+    mean_norm = float(np.linalg.norm(result, axis=1).mean())
+    if mean_norm > 100:
+        logger.warning(
+            "Dequantized embedding norms look high (mean=%.1f). "
+            "Expected ~0.5-2.0 for most models.",
+            mean_norm,
+        )
+
+    return result
 
 
 def set_batch_embeddings(batch_ptr: int, embeddings_ptr: int) -> None:
