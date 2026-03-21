@@ -232,9 +232,11 @@ class LlamaCppConnector(EngineConnector):
         context = AVPContext(
             past_key_values=None,
             model_hash="",
-            model_id=self._model_path,
-            hidden_state=hidden,
-            n_embd=self._n_embd,
+            num_steps=steps,
+            seq_len=n_tokens,
+            hidden_dim=self._n_embd,
+            num_layers=self._n_layer or 0,
+            last_hidden_state=hidden,
         )
 
         logger.info(
@@ -287,7 +289,7 @@ class LlamaCppConnector(EngineConnector):
             return output["choices"][0]["text"]
 
         # With context: inject hidden state via batch.embd
-        hidden = getattr(context, "hidden_state", None)
+        hidden = getattr(context, "last_hidden_state", None)
         if hidden is None:
             output = self._model(
                 prompt,
