@@ -265,7 +265,9 @@ class LlamaCppConnector(EngineConnector):
                 emb_batch.pos[0] = n_past
                 emb_batch.seq_id[0][0] = 0
                 emb_batch.n_seq_id[0] = 1
-                emb_batch.logits[0] = 0
+                # Request logits on the last step so generate() can
+                # sample immediately without an extra decode call.
+                emb_batch.logits[0] = 1 if step == steps - 1 else 0
 
                 rc = lc.llama_decode(think_ctx, emb_batch)
                 if rc != 0:
@@ -394,35 +396,36 @@ class LlamaCppConnector(EngineConnector):
         think_ctx = context._llamacpp_ctx
         n_past = context._llamacpp_n_past
 
-        # Disable cb_eval during generation — the callback syncs tensor
-        # data to CPU on every decode, which interferes with generation.
+        # Disable cb_eval during generation
         self._capture["active"] = False
 
         try:
-            # Decode solver prompt tokens onto the think context.
-            # Don't add BOS — the think prompt already starts with BOS
-            # at position 0. A second BOS confuses the model.
-            tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=False)
-            n_prompt = len(tokens)
+            # If the solver prompt is different from the think prompt,
+            # decode it onto the think context so the model can attend
+            # to both. If same prompt (or empty), skip — the KV-cache
+            # already has everything we need.
+            n_cur = n_past
 
-            batch = lc.llama_batch_init(n_prompt, 0, 1)
-            try:
-                for i, tok in enumerate(tokens):
-                    batch.token[i] = tok
-                    batch.pos[i] = n_past + i
-                    batch.seq_id[i][0] = 0
-                    batch.n_seq_id[i] = 1
-                    batch.logits[i] = 1 if i == n_prompt - 1 else 0
-                batch.n_tokens = n_prompt
+            if prompt:
+                tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=False)
+                if tokens:
+                    batch = lc.llama_batch_init(len(tokens), 0, 1)
+                    try:
+                        for i, tok in enumerate(tokens):
+                            batch.token[i] = tok
+                            batch.pos[i] = n_past + i
+                            batch.seq_id[i][0] = 0
+                            batch.n_seq_id[i] = 1
+                            batch.logits[i] = 1 if i == len(tokens) - 1 else 0
+                        batch.n_tokens = len(tokens)
 
-                rc = lc.llama_decode(think_ctx, batch)
-                if rc != 0:
-                    logger.warning("generate(): prompt decode failed (rc=%d)", rc)
-                    return ""
-            finally:
-                lc.llama_batch_free(batch)
-
-            n_cur = n_past + n_prompt
+                        rc = lc.llama_decode(think_ctx, batch)
+                        if rc != 0:
+                            logger.warning("generate(): prompt decode failed (rc=%d)", rc)
+                            return ""
+                    finally:
+                        lc.llama_batch_free(batch)
+                    n_cur = n_past + len(tokens)
 
             # Autoregressive generation
             sampler_params = lc.llama_sampler_chain_default_params()
@@ -478,7 +481,7 @@ class LlamaCppConnector(EngineConnector):
             logger.debug(
                 "generate(): think_ctx with %d enriched positions + "
                 "%d prompt tokens, generated %d tokens",
-                n_past, n_prompt, len(generated_tokens),
+                n_past, n_cur - n_past, len(generated_tokens),
             )
             return text
 
