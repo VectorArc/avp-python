@@ -144,8 +144,8 @@ def run_benchmark(n: int = 50):
         else:
             # Log first 3 wrong answers for debugging
             if latent_correct == 0 and i < 3:
-                print(f"    [debug] q{i}: gold={gold[i]}, pred={pred!r}")
-                print(f"    [debug] answer: {answer[:200]!r}")
+                print(f"    [debug] q{i}: gold={gold[i]}, pred={pred!r}, len={len(answer)}")
+                print(f"    [debug] answer[-200:]: {answer[-200:]!r}")
 
         if (i + 1) % 10 == 0 or i == n - 1:
             pct = latent_correct / (i + 1) * 100
