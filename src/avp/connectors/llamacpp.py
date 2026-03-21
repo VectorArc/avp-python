@@ -69,6 +69,9 @@ class LlamaCppConnector(EngineConnector):
 
         self._model_path = model_path
         self._verbose = verbose
+        self._n_ctx = n_ctx
+        self._n_gpu_layers = n_gpu_layers
+        self._init_kwargs = kwargs
 
         # Capture dict for hidden states (populated by cb_eval callback)
         self._capture: dict = {}
@@ -78,11 +81,10 @@ class LlamaCppConnector(EngineConnector):
         self._callback = make_eval_callback(
             target_layer=-1, capture_dict=self._capture,
         )
+        # Keep a reference to prevent garbage collection
+        self._callback_ref = self._callback
 
-        # Load model with cb_eval callback enabled.
-        # We use the low-level API to set cb_eval on context_params
-        # before context creation, since the high-level Llama class
-        # doesn't expose this parameter.
+        # Load model — used for generate() and text-only operations
         self._model = llama_cpp.Llama(
             model_path=model_path,
             n_ctx=n_ctx,
@@ -91,26 +93,6 @@ class LlamaCppConnector(EngineConnector):
             embedding=True,
             **kwargs,
         )
-
-        # Inject cb_eval into the context params for future context recreations.
-        # Note: for the FIRST context, we need to set it post-creation
-        # which means the first think() may not capture hidden states.
-        # We work around this by accessing the internal context params.
-        try:
-            ctx_params = self._model.context_params
-            ctx_params.cb_eval = self._callback
-            # Store reference to prevent GC
-            self._callback_ref = self._callback
-            logger.info(
-                "LlamaCppConnector: cb_eval callback registered for %s",
-                model_path,
-            )
-        except (AttributeError, TypeError) as e:
-            logger.warning(
-                "Could not set cb_eval on context_params: %s. "
-                "Hidden state extraction may not work.",
-                e,
-            )
 
         # Extract model identity
         self._n_embd = self._model.n_embd()
@@ -185,19 +167,57 @@ class LlamaCppConnector(EngineConnector):
             AVPContext containing the captured hidden state.
         """
         from ..context import AVPContext
+        from llama_cpp import llama_cpp as lc
 
         # Clear previous capture
         self._capture.clear()
 
-        # Tokenize
-        tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
+        # Get the raw model pointer from the Llama instance
+        model_ptr = self._model._model.model
 
-        # Run forward pass (eval) — cb_eval callback captures hidden states
-        self._model.eval(tokens)
+        # Create a dedicated context with cb_eval set at creation time.
+        # The callback MUST be in context_params BEFORE llama_new_context_with_model
+        # is called — setting it after has no effect (llama.cpp copies the params).
+        ctx_params = lc.llama_context_default_params()
+        ctx_params.n_ctx = self._n_ctx
+        ctx_params.n_batch = 512
+        ctx_params.cb_eval = self._callback
+        ctx_params.cb_eval_user_data = None
+
+        think_ctx = lc.llama_new_context_with_model(model_ptr, ctx_params)
+        if not think_ctx:
+            logger.warning("think(): Failed to create context with cb_eval")
+            return None
+
+        try:
+            # Tokenize
+            tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
+            n_tokens = len(tokens)
+
+            # Create batch and decode
+            batch = lc.llama_batch_init(n_tokens, 0, 1)
+            try:
+                for i, tok in enumerate(tokens):
+                    batch.token[i] = tok
+                    batch.pos[i] = i
+                    batch.seq_id[i][0] = 0
+                    batch.n_seq_id[i] = 1
+                    batch.logits[i] = 1 if i == n_tokens - 1 else 0
+                batch.n_tokens = n_tokens
+
+                rc = lc.llama_decode(think_ctx, batch)
+                if rc != 0:
+                    logger.warning("think(): decode failed (rc=%d)", rc)
+                    return None
+            finally:
+                lc.llama_batch_free(batch)
+        finally:
+            lc.llama_free(think_ctx)
 
         if "data" not in self._capture:
             logger.warning(
-                "think(): No hidden state captured. cb_eval may not be active."
+                "think(): No hidden state captured. cb_eval callback "
+                "may not have matched any l_out-* tensors."
             )
             return None
 
@@ -209,19 +229,19 @@ class LlamaCppConnector(EngineConnector):
         if hidden.dim() == 2:
             hidden = hidden[-1:, :]  # [1, n_embd]
 
-        # Create a minimal AVPContext
         context = AVPContext(
-            past_key_values=None,  # No KV-cache transfer for llama.cpp
+            past_key_values=None,
             model_hash="",
             model_id=self._model_path,
             hidden_state=hidden,
             n_embd=self._n_embd,
         )
 
-        logger.debug(
-            "think(): captured layer %s, shape=%s",
+        logger.info(
+            "think(): captured layer %s, shape=%s, norm=%.3f",
             self._capture.get("layer"),
             self._capture.get("shape"),
+            hidden.float().norm().item(),
         )
 
         return context
