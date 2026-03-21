@@ -152,32 +152,35 @@ class LlamaCppConnector(EngineConnector):
         steps: int = 10,
         **kwargs: Any,
     ) -> Any:
-        """Run latent thinking steps and return an AVPContext.
+        """Run N latent thinking steps and return an AVPContext.
 
-        Tokenizes the prompt, runs a forward pass with the cb_eval
-        callback active to capture the last-layer hidden state, then
-        wraps it in an AVPContext for transfer to generate().
+        Creates a dedicated context with ``cb_eval`` to capture hidden
+        states. Runs an initial forward pass on the prompt, then loops
+        N times: project hidden → normalize → inject via ``batch.embd``
+        → decode → capture new hidden. Matches the HuggingFace connector's
+        ``generate_latent_steps()`` pattern.
 
         Args:
             prompt: The input prompt.
-            steps: Number of latent thinking steps (currently 1 forward
-                pass — multi-step latent loop planned).
+            steps: Number of latent thinking steps (default: 10).
 
         Returns:
-            AVPContext containing the captured hidden state.
+            AVPContext containing the enriched hidden state.
         """
-        from ..context import AVPContext
+        import ctypes
+
+        import numpy as np
+        import torch
         from llama_cpp import llama_cpp as lc
 
-        # Clear previous capture
-        self._capture.clear()
+        from ..context import AVPContext
+        from ..realign import normalize_to_target
 
-        # Get the raw model pointer from the Llama instance
+        # Get the raw model pointer
         model_ptr = self._model._model.model
+        n_embd = self._n_embd
 
-        # Create a dedicated context with cb_eval set at creation time.
-        # The callback MUST be in context_params BEFORE llama_new_context_with_model
-        # is called — setting it after has no effect (llama.cpp copies the params).
+        # Create a dedicated context with cb_eval at creation time
         ctx_params = lc.llama_context_default_params()
         ctx_params.n_ctx = self._n_ctx
         ctx_params.n_batch = 512
@@ -194,7 +197,8 @@ class LlamaCppConnector(EngineConnector):
             tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
             n_tokens = len(tokens)
 
-            # Create batch and decode
+            # Step 0: Initial forward pass on prompt tokens
+            self._capture.clear()
             batch = lc.llama_batch_init(n_tokens, 0, 1)
             try:
                 for i, tok in enumerate(tokens):
@@ -207,43 +211,87 @@ class LlamaCppConnector(EngineConnector):
 
                 rc = lc.llama_decode(think_ctx, batch)
                 if rc != 0:
-                    logger.warning("think(): decode failed (rc=%d)", rc)
+                    logger.warning("think(): initial decode failed (rc=%d)", rc)
                     return None
             finally:
                 lc.llama_batch_free(batch)
+
+            if "data" not in self._capture:
+                logger.warning("think(): No hidden state captured on initial pass")
+                return None
+
+            # Extract initial hidden state (last token)
+            hidden = torch.from_numpy(self._capture["data"].copy()).float()
+            if hidden.dim() == 2:
+                hidden = hidden[-1:, :]  # [1, n_embd]
+
+            # Compute target norm from the model's embedding table.
+            # For GGUF quantized models, we use the hidden state norm
+            # as an approximation (the actual embed_tokens is quantized).
+            target_norm = hidden.norm(dim=-1).mean().detach()
+
+            n_past = n_tokens  # KV-cache position counter
+            steps_completed = 0
+
+            # Steps 1..N: latent thinking loop
+            for step in range(steps):
+                # Project hidden state back to embedding space.
+                # For llama.cpp, we use normalize_to_target as the
+                # projection (since we don't have access to the embedding
+                # weight matrix for softmax projection).
+                projected = normalize_to_target(hidden, target_norm)
+                proj_np = projected.squeeze(0).numpy().astype(np.float32)
+
+                # Inject projected embedding via batch.embd
+                self._capture.clear()
+                emb_batch = lc.llama_batch_init(1, n_embd, 1)
+                try:
+                    ctypes.memmove(
+                        emb_batch.embd,
+                        proj_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                        ctypes.sizeof(ctypes.c_float) * n_embd,
+                    )
+                    emb_batch.n_tokens = 1
+                    emb_batch.pos[0] = n_past
+                    emb_batch.seq_id[0][0] = 0
+                    emb_batch.n_seq_id[0] = 1
+                    emb_batch.logits[0] = 0  # No logits needed for latent steps
+
+                    rc = lc.llama_decode(think_ctx, emb_batch)
+                    if rc != 0:
+                        logger.warning("think(): step %d decode failed (rc=%d)", step, rc)
+                        break
+                finally:
+                    lc.llama_batch_free(emb_batch)
+
+                n_past += 1
+                steps_completed += 1
+
+                # Capture the new hidden state from this step
+                if "data" in self._capture:
+                    hidden = torch.from_numpy(self._capture["data"].copy()).float()
+                    if hidden.dim() == 2:
+                        hidden = hidden[-1:, :]
+
         finally:
             lc.llama_free(think_ctx)
 
-        if "data" not in self._capture:
-            logger.warning(
-                "think(): No hidden state captured. cb_eval callback "
-                "may not have matched any l_out-* tensors."
-            )
-            return None
-
-        # Build AVPContext from captured hidden state
-        import torch
-
-        hidden = torch.from_numpy(self._capture["data"].copy()).float()
-        # Take the last token's hidden state
-        if hidden.dim() == 2:
-            hidden = hidden[-1:, :]  # [1, n_embd]
+        # Normalize final hidden state before storing
+        hidden = normalize_to_target(hidden, target_norm)
 
         context = AVPContext(
             past_key_values=None,
             model_hash="",
-            num_steps=steps,
-            seq_len=n_tokens,
-            hidden_dim=self._n_embd,
+            num_steps=steps_completed,
+            seq_len=n_tokens + steps_completed,
+            hidden_dim=n_embd,
             num_layers=self._n_layer or 0,
             last_hidden_state=hidden,
         )
 
         logger.info(
-            "think(): captured layer %s, shape=%s, norm=%.3f",
-            self._capture.get("layer"),
-            self._capture.get("shape"),
-            hidden.float().norm().item(),
+            "think(): %d/%d latent steps, final hidden norm=%.3f",
+            steps_completed, steps, hidden.float().norm().item(),
         )
 
         return context
@@ -455,16 +503,51 @@ class LlamaCppConnector(EngineConnector):
         return text
 
     def _project_rosetta(self, hidden: Any, source: "LlamaCppConnector") -> Any:
-        """Project hidden state from source model to target model space.
+        """Project hidden state from source to target model space.
 
-        Currently experimental — full rosetta projection requires
-        source/target tokenizers and embed weights from GGUF metadata.
+        Extracts embedding weights from both GGUF files and uses
+        vocabulary-mediated projection (same algorithm as HuggingFace
+        connector). Requires the ``gguf`` package for dequantization.
         """
-        logger.warning(
-            "Cross-model rosetta for llama.cpp is experimental. "
-            "Use HuggingFace connector for validated cross-model projection."
+        import torch
+        from ..rosetta.project import vocabulary_mediated_projection
+        from ._llamacpp_compat import extract_gguf_embedding_weights
+
+        # Cache extracted weights
+        if not hasattr(self, "_tgt_embed_weight"):
+            try:
+                tgt_np = extract_gguf_embedding_weights(self._model_path)
+                self._tgt_embed_weight = torch.from_numpy(tgt_np).float()
+            except Exception as e:
+                logger.warning("Cannot load target embed weights: %s", e)
+                return hidden
+
+        if not hasattr(source, "_src_embed_weight"):
+            try:
+                src_np = extract_gguf_embedding_weights(source._model_path)
+                source._src_embed_weight = torch.from_numpy(src_np).float()
+            except Exception as e:
+                logger.warning("Cannot load source embed weights: %s", e)
+                return hidden
+
+        # Use source embed weight as lm_head (GGUF models typically have
+        # tied weights, so embed_tokens == lm_head)
+        target_norm = self._tgt_embed_weight.norm(dim=1).mean().detach()
+
+        projected = vocabulary_mediated_projection(
+            hidden.float(),
+            source._src_embed_weight,
+            self._tgt_embed_weight,
+            temperature=1.0,
+            target_norm=target_norm,
         )
-        return hidden
+
+        logger.info(
+            "Rosetta projection: [%d] -> [%d], norm=%.3f",
+            hidden.shape[-1], projected.shape[-1],
+            projected.float().norm().item(),
+        )
+        return projected
 
     # --- EngineConnector ABC implementation ---
 

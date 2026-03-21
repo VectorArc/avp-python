@@ -172,6 +172,62 @@ def make_eval_callback(
 _BATCH_EMBD_OFFSET = 16  # float* embd (after n_tokens + padding + token ptr)
 
 
+def extract_gguf_embedding_weights(model_path: str) -> Any:
+    """Extract and dequantize embed_tokens weight from a GGUF file.
+
+    Reads the ``token_embd.weight`` tensor from the GGUF file and
+    returns it as a float32 numpy array of shape ``[vocab_size, n_embd]``.
+
+    Supports all quantization formats via the gguf package's built-in
+    dequantization.
+
+    Args:
+        model_path: Path to the GGUF model file.
+
+    Returns:
+        numpy array [vocab_size, n_embd] in float32.
+    """
+    import numpy as np
+
+    try:
+        from gguf import GGUFReader
+    except ImportError:
+        raise ImportError(
+            "GGUF weight extraction requires the gguf package. "
+            "Install with: pip install gguf"
+        )
+
+    reader = GGUFReader(model_path)
+    tensor = reader.get_tensor("token_embd.weight")
+    if tensor is None:
+        raise ValueError(
+            f"token_embd.weight not found in {model_path}. "
+            "Available tensors can be listed with gguf.GGUFReader."
+        )
+
+    # The gguf package returns dequantized data via tensor.data
+    data = tensor.data
+    if not isinstance(data, np.ndarray):
+        data = np.array(data, dtype=np.float32)
+
+    # Shape: tensor.shape gives [vocab_size, n_embd]
+    shape = tensor.shape
+    if len(shape) == 2:
+        return data.reshape(shape).astype(np.float32)
+
+    # Fallback: try to infer shape from metadata
+    n_embd = reader.get_field("llama.embedding_length")
+    n_vocab = reader.get_field("llama.vocab_size")
+    if n_embd is not None and n_vocab is not None:
+        n_embd_val = int(n_embd.parts[-1])
+        n_vocab_val = int(n_vocab.parts[-1])
+        return data.reshape(n_vocab_val, n_embd_val).astype(np.float32)
+
+    raise ValueError(
+        f"Cannot determine embedding shape from {model_path}"
+    )
+
+
 def set_batch_embeddings(batch_ptr: int, embeddings_ptr: int) -> None:
     """Set the embd pointer on a llama_batch struct.
 
