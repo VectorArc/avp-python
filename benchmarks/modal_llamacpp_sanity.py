@@ -86,7 +86,7 @@ def run_test():
     elapsed = time.monotonic() - t0
 
     if context is not None:
-        hidden = getattr(context, "hidden_state", None)
+        hidden = getattr(context, "last_hidden_state", None)
         if hidden is not None:
             print(f"  Hidden state shape: {list(hidden.shape)}")
             print(f"  Hidden state norm: {hidden.float().norm():.3f}")
