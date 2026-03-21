@@ -110,7 +110,7 @@ def run_test():
     print("TEST 3: Generate with latent context (embedding injection)")
     print("=" * 60)
 
-    if context is not None and getattr(context, "hidden_state", None) is not None:
+    if context is not None and getattr(context, "last_hidden_state", None) is not None:
         t0 = time.monotonic()
         answer = connector.generate(
             "Solve step by step: 24 * 17 + 3",
