@@ -35,7 +35,7 @@ Changelog = "https://github.com/VectorArc/avp-python/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # User-facing extras
-vllm = ["vllm>=0.15.0"]
+vllm = ["vllm>=0.17.0,<0.19.0", "safetensors>=0.4", "huggingface-hub>=0.20"]
 transport = ["httpx[http2]>=0.25"]
 server = ["avp[transport]", "fastapi>=0.104", "uvicorn[standard]>=0.24"]
 # Development
@@ -47,6 +47,9 @@ dev = [
     "ruff>=0.1",
     "grpcio-tools>=1.59",
 ]
+
+[project.entry-points."vllm.general_plugins"]
+avp_latent = "avp.connectors.vllm_model_plugin:register"
 
 [tool.hatch.version]
 path = "src/avp/version.py"

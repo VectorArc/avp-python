@@ -245,11 +245,17 @@ def test_kv_connector_file_roundtrip():
     from avp.connectors.vllm_kv_connector import AVPKVConnectorV1Dynamic
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        os.environ["AVP_KV_STORE_DIR"] = tmpdir
-        os.environ["AVP_NUM_LAYERS"] = "2"
-        os.environ["AVP_BLOCK_SIZE"] = "16"
 
-        conn = AVPKVConnectorV1Dynamic()
+        class MockKVConfig:
+            kv_connector_extra_config = {
+                "avp_store_dir": tmpdir,
+                "avp_latent_steps": 0,
+            }
+
+        class MockVLLMConfig:
+            kv_transfer_config = MockKVConfig()
+
+        conn = AVPKVConnectorV1Dynamic(vllm_config=MockVLLMConfig(), role=None)
 
         # Simulate vLLM saving KV layers during forward pass
         # Shape: [batch=1, 2(K/V), num_kv_heads=2, seq_len=32, head_dim=64]
@@ -264,11 +270,8 @@ def test_kv_connector_file_roundtrip():
         conn.save_kv_layer("model.layers.1.self_attn", layer1, meta)
         conn.wait_for_save()
 
-        # Verify file was written
-        store_path = os.path.join(tmpdir, "test-req-001.avp")
-        assert os.path.exists(store_path)
-        file_size = os.path.getsize(store_path)
-        assert file_size > 0
+        # Store uses request_id as key since no prompt_token_ids
+        assert conn._store.has_key("test-req-001")
 
         # Load it back
         class Ctx:
@@ -283,6 +286,42 @@ def test_kv_connector_file_roundtrip():
         assert result0 is not None
         assert result1 is not None
         assert result0.shape[0] == 2  # K and V stacked
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Latent thinking model plugin end-to-end (requires GPU + vLLM)
+# ---------------------------------------------------------------------------
+
+
+def test_latent_thinking_end_to_end():
+    """Model plugin adds latent steps and produces non-degenerate output."""
+    from vllm.config import KVTransferConfig
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ktc = KVTransferConfig(
+            kv_connector="AVPKVConnectorV1Dynamic",
+            kv_connector_module_path="avp.connectors.vllm_kv_connector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "avp_latent_steps": 20,
+                "avp_store_dir": tmpdir,
+            },
+        )
+        engine = vllm.LLM(
+            model=MODEL_ID,
+            enforce_eager=True,
+            max_model_len=256,
+            gpu_memory_utilization=0.5,
+            kv_transfer_config=ktc,
+        )
+
+        params = vllm.SamplingParams(max_tokens=50, temperature=0.0)
+        outputs = engine.generate(["Solve step by step: 24 * 17 + 3"], params)
+
+        text = outputs[0].outputs[0].text
+        assert len(text) > 0
+        # Should contain digits (math answer)
+        assert any(c.isdigit() for c in text)
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ and fits a linear map via ridge regression or orthogonal Procrustes.
 
 import logging
 from dataclasses import dataclass
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from ..errors import RealignmentError
 from ..types import ProjectionMethod
@@ -533,6 +533,122 @@ def calibrate(
         anchor_count=n_train,
         validation_score=validation_score,
     )
+    if auto_save:
+        _auto_save_map(avp_map)
+    return avp_map
+
+
+def calibrate_from_weights(
+    source_model_id: str,
+    source_config_dict: Dict[str, Any],
+    target_model_id: str,
+    target_config_dict: Dict[str, Any],
+    target_embed_weight: Any,
+    source_tokenizer: Any,
+    target_tokenizer: Any,
+    auto_save: bool = True,
+) -> AVPMap:
+    """Create an AVPMap from raw weight tensors without full model loading.
+
+    Used by the vLLM model plugin where source model weights are already
+    loaded in the engine and target model embed weights are loaded separately
+    from safetensors. Supports vocab-mediated (same tokenizer) and
+    vocab-overlap (different tokenizers with shared tokens) methods.
+
+    Args:
+        source_model_id: Source model HuggingFace ID.
+        source_config_dict: Source model config as dict.
+        target_model_id: Target model HuggingFace ID.
+        target_config_dict: Target model config as dict.
+        target_embed_weight: Target model's embed_tokens weight [vocab, D_tgt].
+        source_tokenizer: Source model's tokenizer.
+        target_tokenizer: Target model's tokenizer.
+        auto_save: If True, save the AVPMap to the registry.
+
+    Returns:
+        AVPMap for cross-model projection.
+    """
+    torch = _require_torch()
+    from ..handshake import compute_model_hash
+
+    src_hash = compute_model_hash(source_config_dict)
+    tgt_hash = compute_model_hash(target_config_dict)
+
+    src_dim = source_config_dict.get("hidden_size", 0) or source_config_dict.get("n_embd", 0)
+    tgt_dim = target_config_dict.get("hidden_size", 0) or target_config_dict.get("n_embd", 0)
+
+    if src_dim <= 0 or tgt_dim <= 0:
+        raise ValueError(
+            f"Invalid hidden dimensions: source={src_dim}, target={tgt_dim}. "
+            "Config dicts must contain 'hidden_size' or 'n_embd'."
+        )
+
+    # Compute target norm directly from embed weights
+    embed_f32 = target_embed_weight.detach().to(dtype=torch.float32)
+    target_norm = embed_f32.norm(dim=1).mean().detach()
+
+    if torch.isnan(target_norm) or target_norm.item() <= 0:
+        raise ValueError(
+            f"Invalid target_norm ({target_norm.item():.4f}). "
+            "Check target_embed_weight for NaN or all-zero rows."
+        )
+
+    # Determine projection method from tokenizer compatibility
+    shared_vocab = _have_shared_vocab(source_tokenizer, target_tokenizer)
+
+    if shared_vocab:
+        avp_map = AVPMap(
+            source_model_id=source_model_id,
+            source_hash=src_hash,
+            source_dim=src_dim,
+            target_model_id=target_model_id,
+            target_hash=tgt_hash,
+            target_dim=tgt_dim,
+            w_map=embed_f32.cpu(),
+            bias=None,
+            target_norm=target_norm.cpu(),
+            method=ProjectionMethod.VOCAB_MEDIATED,
+            anchor_count=0,
+            validation_score=1.0,
+        )
+    else:
+        overlap_result = _compute_vocab_overlap(source_tokenizer, target_tokenizer)
+        if overlap_result is None:
+            raise ValueError(
+                "Insufficient vocabulary overlap (< 100 shared tokens) "
+                "between source and target tokenizers."
+            )
+        src_idx, tgt_idx, shared_tokens = overlap_result
+        src_vocab_size = len(source_tokenizer.get_vocab())
+        tgt_vocab_size = len(target_tokenizer.get_vocab())
+        overlap_ratio = len(shared_tokens) / min(src_vocab_size, tgt_vocab_size)
+
+        w_map = embed_f32[tgt_idx].cpu()
+
+        logger.info(
+            "calibrate_from_weights: vocab overlap %d tokens (%.1f%%)",
+            len(shared_tokens), overlap_ratio * 100,
+        )
+
+        avp_map = AVPMap(
+            source_model_id=source_model_id,
+            source_hash=src_hash,
+            source_dim=src_dim,
+            target_model_id=target_model_id,
+            target_hash=tgt_hash,
+            target_dim=tgt_dim,
+            w_map=w_map,
+            bias=None,
+            target_norm=target_norm.cpu(),
+            method=ProjectionMethod.VOCAB_OVERLAP,
+            anchor_count=0,
+            validation_score=overlap_ratio,
+            src_indices=src_idx,
+            tgt_indices=tgt_idx,
+            overlap_count=len(shared_tokens),
+            overlap_ratio=overlap_ratio,
+        )
+
     if auto_save:
         _auto_save_map(avp_map)
     return avp_map

@@ -1,461 +1,1030 @@
 """AVP KV-cache connector plugin for vLLM.
 
-Implements KVConnectorBase_V1 to intercept KV-cache save/load in vLLM's
-attention pipeline. Converts between vLLM's PagedAttention format and AVP's
-contiguous binary wire format.
+Implements KVConnectorBase_V1 for multi-agent KV-cache transfer.
+Agent A's request produces a KV-cache that is saved to a file-based store.
+Agent B's request loads it as a prefix and generates from Agent A's computation.
 
-Loaded by vLLM at runtime via:
-    KVTransferConfig(
-        kv_connector="AVPKVConnectorV1Dynamic",
-        kv_role="kv_both",
-        kv_connector_module_path="avp.connectors.vllm_kv_connector"
-    )
+The connector handles per-request KV extraction from vLLM's paged attention
+buffer using block_ids and slot_mapping, following the same pattern as
+vLLM's ExampleConnector.
 
-Uses a file-based store for KV-cache exchange between agents.
-Extendable to Redis/HTTP backends later.
+FRAGILE(vllm): F1 -- block_ids[0] single cache group
 """
 
 import hashlib
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Set, Tuple, runtime_checkable
+
+from ._vllm_compat import (
+    HAS_VLLM,
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
 
 logger = logging.getLogger(__name__)
 
-# Import vLLM base class or use stub for development on non-Linux platforms
-try:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-        KVConnectorBase_V1,
-        KVConnectorMetadata,
-        KVConnectorRole,
-    )
-    HAS_VLLM = True
-except ImportError:
-    HAS_VLLM = False
+# Module-level shared state between scheduler and worker connector instances.
+# vLLM creates separate SCHEDULER and WORKER connector instances. In
+# UniProcExecutor they share a process; in MultiProcExecutor they don't.
+# We use module-level dicts (works for UniProc) with FileKVStore fallback
+# for cross-process scenarios.
 
-    class KVConnectorRole:
-        """Stub for development."""
-        SCHEDULER = 0
-        WORKER = 1
+# request_id → store_key (prompt hash). Scheduler sets, worker reads.
+_REQUEST_STORE_KEYS: Dict[str, str] = {}
 
-    class KVConnectorBase_V1:
-        """Stub base class for development on non-Linux platforms."""
-        def __init__(self, **kwargs):
-            pass
+# request_id → AVPReqMeta for pending loads. Scheduler sets via
+# update_state_after_alloc, worker reads via start_load_kv.
+_PENDING_LOADS: Dict[str, Any] = {}
 
-    class KVConnectorMetadata:
-        """Stub metadata class."""
-        pass
+# store_key → projected embedding tensor (CPU). Model plugin sets after
+# cross-model rosetta projection, connector flushes to FileKVStore.
+_PROJECTED_EMBEDDINGS: Dict[str, Any] = {}
 
 
-def _require_torch():
-    try:
-        import torch
-        return torch
-    except ImportError:
-        raise ImportError(
-            "torch is required for AVP KV connector. pip install avp should include this dependency"
-        )
+# ---------------------------------------------------------------------------
+# KVStore protocol + FileKVStore implementation
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class KVStore(Protocol):
+    def save_layer(self, key: str, layer_idx: int, tensor: Any) -> None: ...
+    def load_layer(self, key: str, layer_idx: int) -> Optional[Any]: ...
+    def has_key(self, key: str) -> bool: ...
+    def get_seq_len(self, key: str) -> int: ...
+    def delete(self, key: str) -> None: ...
 
 
-@dataclass
-class _LayerBuffer:
-    """Buffers per-layer KV tensors during a single request's forward pass."""
-    tensors: Dict[str, Any] = field(default_factory=dict)  # layer_name → tensor
+class FileKVStore:
+    """File-based KV store using torch.save for tensor I/O.
 
+    Entries are cleaned up via two mechanisms:
 
-class _AVPConnectorMetadata(KVConnectorMetadata):
-    """Minimal metadata for AVP's file-based KV store."""
-    pass
+    1. **Explicit delete** — callers invoke ``delete(key)`` when done.
+       The KV connector calls this in ``request_finished`` after Agent B
+       consumes Agent A's data.
+    2. **TTL reaper** — a daemon thread deletes entries whose ``meta.txt``
+       or ``projected.pt`` is older than ``ttl`` seconds. This catches
+       leaked entries from crashes or missed cleanup. Runs every 60s.
 
-
-class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
-    """AVP KV-cache connector for vLLM.
-
-    .. warning::
-        **Experimental — not validated end-to-end.** This plugin has known issues
-        with PagedAttention format conversion, CUDA graph compatibility, and
-        concurrent request isolation. It passes unit tests against mocks but has
-        not been tested with a real vLLM engine. Do not use in production.
-        See the v0.3.0 changelog and the vLLM integration plan for details.
-
-    Intercepts save_kv_layer/wait_for_layer_load calls in vLLM's attention
-    pipeline to serialize/deserialize KV-cache in AVP binary format.
-
-    KV-cache exchange uses a file-based store: each file is named by
-    ``{request_hash}.avp`` in the configured store directory. The request_hash
-    is derived from the prompt token IDs so that a consumer can look up
-    pre-computed KV-cache from a producer.
-
-    Configuration via environment variables:
-        AVP_KV_STORE_DIR: Directory for KV-cache files (default: /tmp/avp_kv_store)
-        AVP_NUM_LAYERS: Number of transformer layers (required for load)
-        AVP_BLOCK_SIZE: PagedAttention block size (default: 16)
+    Design decision: KV entries produced by latent thinking are assumed
+    to be consumed once and discarded. If multi-consumer reuse is needed
+    in the future, the TTL can be extended or the explicit-delete call
+    removed from request_finished.
     """
 
-    def __init__(self, vllm_config=None, role=None, **kwargs):
+    _DEFAULT_TTL = 300  # 5 minutes
+    _REAPER_INTERVAL = 60  # seconds
+
+    def __init__(self, store_dir: str, ttl: Optional[int] = None):
+        self._dir = Path(store_dir)
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._ttl = ttl if ttl is not None else self._DEFAULT_TTL
+
+        # Start background reaper thread (daemon — dies with process)
+        if self._ttl > 0:
+            self._reaper = threading.Thread(
+                target=self._reap_loop, daemon=True, name="avp-store-reaper",
+            )
+            self._reaper.start()
+
+    def _reap_loop(self) -> None:
+        """Background loop that deletes expired entries."""
+        import shutil
+        import time as _time
+
+        while True:
+            _time.sleep(self._REAPER_INTERVAL)
+            try:
+                self._reap_expired()
+            except Exception:
+                pass  # Never crash the reaper
+
+    def _reap_expired(self) -> None:
+        """Delete entries older than TTL based on file mtime."""
+        import shutil
+        import time as _time
+
+        if not self._dir.exists():
+            return
+        cutoff = _time.time() - self._ttl
+        for entry in self._dir.iterdir():
+            if not entry.is_dir():
+                continue
+            # Check mtime of meta.txt or projected.pt (whichever exists)
+            marker = entry / "meta.txt"
+            if not marker.exists():
+                marker = entry / "projected.pt"
+            if not marker.exists():
+                continue
+            try:
+                if marker.stat().st_mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except (OSError, FileNotFoundError):
+                pass
+
+    def _key_dir(self, key: str) -> Path:
+        safe_key = key.replace("/", "_").replace("\\", "_")
+        return self._dir / safe_key
+
+    def save_layer(self, key: str, layer_idx: int, tensor: Any) -> None:
+        import torch
+        key_dir = self._key_dir(key)
+        key_dir.mkdir(parents=True, exist_ok=True)
+        target = key_dir / f"layer_{layer_idx}.pt"
+        tmp = target.with_suffix(".pt.tmp")
+        torch.save(tensor.cpu(), tmp)
+        os.rename(str(tmp), str(target))
+
+    def load_layer(self, key: str, layer_idx: int) -> Optional[Any]:
+        import torch
+        path = self._key_dir(key) / f"layer_{layer_idx}.pt"
+        if not path.exists():
+            return None
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+    def save_meta(self, key: str, seq_len: int, num_layers: int) -> None:
+        key_dir = self._key_dir(key)
+        key_dir.mkdir(parents=True, exist_ok=True)
+        target = key_dir / "meta.txt"
+        tmp = target.with_suffix(".txt.tmp")
+        tmp.write_text(f"{seq_len}\n{num_layers}\n")
+        os.rename(str(tmp), str(target))
+
+    def has_key(self, key: str) -> bool:
+        return (self._key_dir(key) / "meta.txt").exists()
+
+    def get_seq_len(self, key: str) -> int:
+        meta = self._key_dir(key) / "meta.txt"
+        if not meta.exists():
+            return 0
+        try:
+            return int(meta.read_text().strip().split("\n")[0])
+        except (ValueError, IndexError):
+            return 0
+
+    def get_num_layers(self, key: str) -> int:
+        meta = self._key_dir(key) / "meta.txt"
+        if not meta.exists():
+            return 0
+        try:
+            lines = meta.read_text().strip().split("\n")
+            return int(lines[1]) if len(lines) > 1 else 0
+        except (ValueError, IndexError):
+            return 0
+
+    def save_projected(self, key: str, tensor: Any) -> None:
+        """Save a projected embedding for cross-model transfer."""
+        import torch
+        key_dir = self._key_dir(key)
+        key_dir.mkdir(parents=True, exist_ok=True)
+        target = key_dir / "projected.pt"
+        tmp = target.with_suffix(".pt.tmp")
+        torch.save(tensor.cpu(), tmp)
+        os.rename(str(tmp), str(target))
+
+    def load_projected(self, key: str) -> Optional[Any]:
+        """Load a projected embedding for cross-model transfer."""
+        import torch
+        path = self._key_dir(key) / "projected.pt"
+        if not path.exists():
+            return None
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+    def has_projected(self, key: str) -> bool:
+        """Check if a projected embedding exists for this key."""
+        return (self._key_dir(key) / "projected.pt").exists()
+
+    def delete(self, key: str) -> None:
+        import shutil
+        key_dir = self._key_dir(key)
+        if key_dir.exists():
+            shutil.rmtree(key_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AVPReqMeta:
+    """Per-request metadata for KV connector operations."""
+
+    request_id: str
+    store_key: str
+    num_tokens: int = 0
+    num_external_tokens: int = 0
+    num_computed_tokens: int = 0
+    block_ids: List[int] = field(default_factory=list)
+
+    @classmethod
+    def from_request(cls, request: Any, store_key: str = "") -> "AVPReqMeta":
+        req_id = str(getattr(request, "request_id", "default"))
+        if not store_key:
+            # Check kv_transfer_params for explicit store_key (set via
+            # SamplingParams(extra_args={"kv_transfer_params": {"store_key": "..."}})
+            kv_params = getattr(request, "kv_transfer_params", None)
+            if isinstance(kv_params, dict):
+                store_key = kv_params.get("store_key", "")
+            if not store_key:
+                prompt_ids = getattr(request, "prompt_token_ids", None)
+                if prompt_ids:
+                    store_key = compute_request_hash(prompt_ids)
+                else:
+                    store_key = req_id
+        return cls(request_id=req_id, store_key=store_key)
+
+
+class AVPConnectorMetadata(KVConnectorMetadata):
+    def __init__(self, requests: Optional[List[AVPReqMeta]] = None):
+        self.requests: List[AVPReqMeta] = requests or []
+
+
+# ---------------------------------------------------------------------------
+# Slot mapping helpers
+# ---------------------------------------------------------------------------
+
+def _compute_slot_mapping(block_ids: List[int], block_size: int, num_tokens: int) -> Any:
+    """Compute physical slot indices from block IDs.
+
+    slot = block_id * block_size + offset_within_block
+
+    Following the ExampleConnector pattern from vLLM.
+    """
+    import torch
+
+    block_ids_t = torch.tensor(block_ids, dtype=torch.long)
+    offsets = torch.arange(block_size, dtype=torch.long)
+    mapping = block_ids_t.reshape(-1, 1) * block_size + offsets.reshape(1, -1)
+    return mapping.flatten()[:num_tokens]
+
+
+def _extract_request_kv(kv_cache: Any, slot_mapping: Any) -> Any:
+    """Extract per-request KV entries from the full paged buffer.
+
+    Args:
+        kv_cache: Full paged buffer [2, num_blocks, block_size, num_kv_heads, head_dim]
+        slot_mapping: Physical slot indices [num_tokens]
+
+    Returns:
+        Per-request KV [2, num_tokens, num_kv_heads * head_dim]
+    """
+    slot_mapping = slot_mapping.to(kv_cache.device)
+    num_pages = kv_cache.shape[1]
+    page_size = kv_cache.shape[2]
+    flat = kv_cache.reshape(2, num_pages * page_size, -1)
+    return flat[:, slot_mapping, :].clone()
+
+
+def _inject_request_kv(kv_cache: Any, slot_mapping: Any, kv_data: Any) -> None:
+    """Inject per-request KV entries into the paged buffer.
+
+    Args:
+        kv_cache: Full paged buffer [2, num_blocks, block_size, num_kv_heads, head_dim]
+        slot_mapping: Physical slot indices [num_tokens]
+        kv_data: Per-request KV [2, num_tokens, num_kv_heads * head_dim]
+    """
+    slot_mapping = slot_mapping.to(kv_cache.device)
+    kv_data = kv_data.to(kv_cache.device)
+    num_pages = kv_cache.shape[1]
+    page_size = kv_cache.shape[2]
+    flat = kv_cache.reshape(2, num_pages * page_size, -1)
+    flat[:, slot_mapping, :] = kv_data
+
+
+# ---------------------------------------------------------------------------
+# Main connector
+# ---------------------------------------------------------------------------
+
+class AVPKVConnectorV1Dynamic(KVConnectorBase_V1):
+    """AVP KV-cache connector for multi-agent transfer via vLLM.
+
+    Agent A's request: model plugin runs latent steps, request finishes,
+    connector extracts per-request KV from paged buffer and saves to store.
+
+    Agent B's request: connector detects matching KV in store, tells scheduler
+    about external tokens, injects stored KV into allocated blocks before
+    forward pass.
+
+    Requires UniProcExecutor (single-process vLLM). Module-level shared
+    state (``_REQUEST_STORE_KEYS``, ``_PENDING_LOADS``, ``_PROJECTED_EMBEDDINGS``)
+    is not process-safe and will not work with MultiProcExecutor.
+
+    Configuration via kv_connector_extra_config:
+        avp_latent_steps: Number of latent thinking steps (default: 20)
+        avp_store_dir: Directory for KV-cache files (default: /tmp/avp_kv_store)
+        avp_store_ttl: TTL in seconds for store entries (default: 300)
+        avp_target_model: Target model for cross-model rosetta (optional)
+        avp_source_model: Source model HF ID, needed when the model is
+            loaded from a local path (optional, auto-detected from config)
+    """
+
+    def __init__(self, vllm_config=None, role=None, kv_cache_config=None, **kwargs):
+        self._extra_config: Dict[str, Any] = {}
+        if vllm_config is not None:
+            kv_config = getattr(vllm_config, "kv_transfer_config", None)
+            if kv_config is not None:
+                self._extra_config = getattr(kv_config, "kv_connector_extra_config", {}) or {}
+
         if HAS_VLLM and vllm_config is not None:
-            super().__init__(vllm_config=vllm_config, role=role, **kwargs)
+            init_kwargs = dict(vllm_config=vllm_config, role=role, **kwargs)
+            if kv_cache_config is not None:
+                init_kwargs["kv_cache_config"] = kv_cache_config
+            super().__init__(**init_kwargs)
+            self._role = role
         else:
-            # Stub mode (testing without vLLM runtime)
-            pass
-        self._torch = _require_torch()
+            self._role = role
 
-        import warnings
-        warnings.warn(
-            "AVPKVConnectorV1Dynamic is experimental and has not been validated "
-            "end-to-end with a real vLLM engine. Known issues: PagedAttention "
-            "format conversion, CUDA graph compatibility, concurrent request "
-            "isolation. Do not use in production.",
-            stacklevel=2,
+        # Bridge config to model plugin via env vars. vLLM creates exactly
+        # one connector per role, so the process-wide env vars are safe.
+        # Note: the model plugin's __init__ may run BEFORE the connector's
+        # __init__ (vLLM loads the model first). Callers should pre-set
+        # these env vars before creating the engine as a workaround.
+        latent_steps = self._extra_config.get("avp_latent_steps", 20)
+        os.environ["AVP_LATENT_STEPS"] = str(latent_steps)
+
+        target_model = self._extra_config.get("avp_target_model", "")
+        if target_model:
+            os.environ["AVP_TARGET_MODEL"] = target_model
+        else:
+            os.environ.pop("AVP_TARGET_MODEL", None)
+
+        # Optional: explicit source model ID for tokenizer loading.
+        # Needed when the source model is loaded from a local path
+        # that doesn't match its HuggingFace ID.
+        source_model = self._extra_config.get("avp_source_model", "")
+        if source_model:
+            os.environ["AVP_SOURCE_MODEL"] = source_model
+        else:
+            os.environ.pop("AVP_SOURCE_MODEL", None)
+
+        # Store
+        store_dir = self._extra_config.get(
+            "avp_store_dir",
+            os.environ.get("AVP_KV_STORE_DIR", "/tmp/avp_kv_store"),
         )
+        store_ttl = self._extra_config.get("avp_store_ttl", FileKVStore._DEFAULT_TTL)
+        self._store = FileKVStore(store_dir, ttl=store_ttl)
 
-        # Store configuration
-        self._store_dir = Path(
-            os.environ.get("AVP_KV_STORE_DIR", "/tmp/avp_kv_store")
-        )
-        self._store_dir.mkdir(parents=True, exist_ok=True)
+        # Block size for slot mapping computation
+        self._block_size = 16
+        if vllm_config is not None:
+            cache_config = getattr(vllm_config, "cache_config", None)
+            if cache_config is not None:
+                self._block_size = getattr(cache_config, "block_size", 16)
 
-        self._num_layers = int(os.environ.get("AVP_NUM_LAYERS", "0"))
-        self._block_size = int(os.environ.get("AVP_BLOCK_SIZE", "16"))
+        # GPU KV cache buffers (set via register_kv_caches)
+        self._kv_caches: Optional[Dict[str, Any]] = None
 
-        # Per-request layer buffers: request_id → _LayerBuffer
-        self._save_buffers: Dict[str, _LayerBuffer] = {}
+        # Pending save data (from worker save_kv_layer → wait_for_save)
+        self._pending_saves: Dict[str, Dict] = {}
+        # Pending load metadata (from scheduler → worker)
+        self._pending_loads: Dict[str, AVPReqMeta] = {}
         self._lock = threading.RLock()
+        self._save_error_count = 0
+        self._save_thread: Optional[threading.Thread] = None
 
-        # Reference to vLLM's KV cache buffers (set via register_kv_caches)
-        self._kv_caches: Optional[List[Any]] = None
-
-        # Loaded KV data awaiting scatter into paged blocks
-        self._loaded_kv: Dict[str, List[Tuple[Any, Any]]] = {}
+        # Cross-model mode: skip KV layer saves (useless to a different model).
+        # The projected embedding is saved synchronously in wait_for_save.
+        self._cross_model_only = bool(target_model)
 
         logger.info(
-            "AVPKVConnectorV1Dynamic initialized: store=%s, block_size=%d",
-            self._store_dir, self._block_size,
+            "AVPKVConnectorV1Dynamic initialized: store=%s, block_size=%d, "
+            "latent_steps=%s, cross_model=%s",
+            store_dir, self._block_size, latent_steps,
+            target_model or "(none)",
         )
 
     @property
     def role(self):
+        if self._role is not None:
+            return self._role
         return KVConnectorRole.WORKER
 
-    # ----- Producer methods -----
+    def requires_piecewise_for_cudagraph(self) -> bool:
+        return True
 
-    def save_kv_layer(
-        self,
-        layer_name: str,
-        kv_tensor: Any,
-        attn_metadata: Any,
-        **kwargs,
-    ) -> None:
-        """Buffer a single layer's KV tensor during forward pass.
+    # ----- Save side (Agent A finishes → KV extracted and saved) -----
 
-        Called by vLLM's attention backend for each layer during generation.
+    def save_kv_layer(self, layer_name: str, kv_tensor: Any,
+                      attn_metadata: Any, **kwargs) -> None:
+        """Extract per-request KV from the paged buffer during forward.
 
-        Args:
-            layer_name: Layer identifier (e.g., "model.layers.0.self_attn").
-            kv_tensor: The KV tensor for this layer.
-            attn_metadata: vLLM attention metadata (contains request info).
+        Handles multi-request batches: iterates over all prefill requests
+        (query_len > 1) and extracts each one's KV independently. Decode
+        requests (query_len == 1) are skipped. Extracted data is queued
+        in memory (_pending_saves) and flushed to disk asynchronously
+        by wait_for_save.
+
+        Skipped entirely in cross-model mode — the full KV cache from model A
+        is useless to model B. Only the projected embedding matters.
         """
-        request_id = self._get_request_id(attn_metadata)
+        if self._cross_model_only:
+            return
 
-        with self._lock:
-            if request_id not in self._save_buffers:
-                self._save_buffers[request_id] = _LayerBuffer()
-            self._save_buffers[request_id].tensors[layer_name] = kv_tensor.clone()
+        layer_idx = _parse_layer_index(layer_name)
+        if layer_idx is None:
+            return
+
+        try:
+            from vllm.forward_context import get_forward_context
+            ctx = get_forward_context()
+            fwd_meta = getattr(ctx, "attn_metadata", None)
+            if fwd_meta is None:
+                return
+
+            if isinstance(fwd_meta, dict):
+                layer_meta = fwd_meta.get(layer_name)
+                if layer_meta is None:
+                    return
+            else:
+                layer_meta = fwd_meta
+
+            # Only save during prefill batches
+            max_query_len = getattr(layer_meta, "max_query_len", 1)
+            if max_query_len <= 1:
+                return
+
+            block_table = getattr(layer_meta, "block_table", None)
+            seq_lens = getattr(layer_meta, "seq_lens", None)
+            query_start_loc = getattr(layer_meta, "query_start_loc", None)
+            if block_table is None or seq_lens is None:
+                return
+
+            num_reqs = seq_lens.shape[0]
+
+            # Iterate over all requests, extract prefill ones
+            for req_idx in range(num_reqs):
+                num_tokens = int(seq_lens[req_idx].item())
+                if num_tokens <= 0:
+                    continue
+
+                # Skip decode requests (query_len == 1) in mixed batches
+                if query_start_loc is not None and req_idx + 1 < query_start_loc.shape[0]:
+                    query_len = int(query_start_loc[req_idx + 1].item()) - int(
+                        query_start_loc[req_idx].item()
+                    )
+                    if query_len <= 1:
+                        continue
+
+                # Extract this request's KV
+                num_blocks_needed = (num_tokens + self._block_size - 1) // self._block_size
+                block_ids = block_table[req_idx, :num_blocks_needed].tolist()
+                slot_mapping = _compute_slot_mapping(block_ids, self._block_size, num_tokens)
+                # GPU→CPU copy (fast, ~1ms per layer for 7B)
+                per_request_kv = _extract_request_kv(kv_tensor, slot_mapping)
+
+                # Derive store key. For the first request, try the module-level
+                # mapping. For subsequent requests in the batch, use a block-
+                # table-derived key (unique per request).
+                if req_idx == 0:
+                    request_id = self._extract_request_id(ctx)
+                    store_key = _REQUEST_STORE_KEYS.get(request_id, request_id)
+                else:
+                    # Hash block_ids as a unique key for this request
+                    store_key = compute_request_hash(block_ids)
+
+                with self._lock:
+                    if store_key not in self._pending_saves:
+                        self._pending_saves[store_key] = {"num_tokens": num_tokens}
+                    self._pending_saves[store_key][layer_idx] = per_request_kv
+
+        except Exception as e:
+            self._save_error_count += 1
+            lvl = logging.WARNING if self._save_error_count <= 3 else logging.DEBUG
+            logger.log(lvl, "save_kv_layer error (#%d): %s", self._save_error_count, e)
 
     def wait_for_save(self) -> None:
-        """Serialize all buffered layers to AVP format and write to store.
+        """Flush all pending saves to the store in a background thread."""
+        # Join any still-running previous save thread to avoid two
+        # threads writing to the same store key concurrently.
+        prev = self._save_thread
+        if prev is not None and prev.is_alive():
+            prev.join(timeout=10.0)
 
-        Called after all layers have been saved for a request.
-        """
         with self._lock:
-            request_ids = list(self._save_buffers.keys())
+            pending = dict(self._pending_saves)
+            self._pending_saves.clear()
 
-        for request_id in request_ids:
-            self._flush_request(request_id)
+            # Also drain projected embeddings from the model plugin.
+            # Under the same lock for consistency, though in UniProcExecutor
+            # the model forward and wait_for_save are sequential.
+            projected = dict(_PROJECTED_EMBEDDINGS)
+            _PROJECTED_EMBEDDINGS.clear()
+            if projected:
+                logger.debug(
+                    "wait_for_save: draining %d projected embeddings",
+                    len(projected),
+                )
+
+        if not pending and not projected:
+            return
+
+        # Flush projected embeddings synchronously — they're tiny (~6KB,
+        # <1ms) and callers need them immediately after generate() returns.
+        for store_key, emb_tensor in projected.items():
+            try:
+                self._store.save_projected(store_key, emb_tensor)
+                logger.debug(
+                    "Saved projected embedding for %s: shape=%s",
+                    store_key, list(emb_tensor.shape),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to save projected embedding for %s: %s",
+                    store_key, e,
+                )
+
+        if not pending:
+            return
+
+        # KV layers are large (28 layers × MBs) — flush in background
+        def _flush():
+            for store_key, layers_data in pending.items():
+                num_tokens = layers_data.pop("num_tokens", 0)
+                num_layers = 0
+                try:
+                    for lid, kv_data in sorted(layers_data.items()):
+                        if not isinstance(lid, int):
+                            continue
+                        self._store.save_layer(store_key, lid, kv_data)
+                        num_layers += 1
+                    if num_layers > 0:
+                        self._store.save_meta(store_key, num_tokens, num_layers)
+                        logger.debug(
+                            "Saved KV for %s: %d layers, %d tokens",
+                            store_key, num_layers, num_tokens,
+                        )
+                except Exception as e:
+                    logger.warning("Failed to flush KV for %s: %s", store_key, e)
+
+        # Run in background thread to avoid blocking the model runner
+        t = threading.Thread(target=_flush, daemon=True)
+        t.start()
+        # Store thread reference so request_finished can wait if needed
+        self._save_thread = t
 
     def request_finished(
-        self,
-        request: Any,
-        block_ids: Optional[List[int]] = None,
-        **kwargs,
+        self, request: Any, block_ids: Optional[List[int]] = None, **kwargs,
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """Called when a request finishes. Triggers serialization if pending.
+        """Called when a request finishes. Ensures pending saves complete.
 
-        Args:
-            request: The vLLM request object.
-            block_ids: Physical block IDs used by this request.
-
-        Returns:
-            Tuple of (free_blocks, metadata). free_blocks=True allows vLLM
-            to reclaim blocks.
+        On the consumer side (Agent B), also deletes the consumed store
+        entry. KV entries from latent thinking are single-use: produced
+        by Agent A, consumed by Agent B, then discarded. The TTL reaper
+        catches any entries missed by this explicit cleanup.
         """
-        request_id = self._get_request_id_from_request(request)
-
-        with self._lock:
-            if request_id in self._save_buffers:
-                self._flush_request(request_id)
-
+        # Trigger flush if there's pending data
+        self.wait_for_save()
+        # Wait for background save thread if one is running
+        save_thread = getattr(self, "_save_thread", None)
+        if save_thread is not None and save_thread.is_alive():
+            save_thread.join(timeout=5.0)
+        # Clean up request_id → store_key mapping
+        req_id = str(getattr(request, "request_id", ""))
+        store_key = ""
+        if req_id:
+            store_key = _REQUEST_STORE_KEYS.pop(req_id, "")
+        # Delete consumed store entries (consumer side only).
+        # _consumed_keys is populated by start_load_kv when KV is injected.
+        consumed = getattr(self, "_consumed_keys", set())
+        if store_key and store_key in consumed:
+            self._store.delete(store_key)
+            consumed.discard(store_key)
+            logger.debug("Deleted consumed store entry: %s", store_key)
         return (True, None)
 
-    def _flush_request(self, request_id: str) -> None:
-        """Serialize buffered layers for a request and write to store."""
-        from ..kv_cache import serialize_kv_cache
-
-        with self._lock:
-            buf = self._save_buffers.pop(request_id, None)
-
-        if buf is None or not buf.tensors:
-            return
-
-        # Sort layers by name to ensure consistent ordering
-        sorted_names = sorted(buf.tensors.keys())
-        num_layers = len(sorted_names)
-
-        # Handle two possible tensor formats:
-        # 1. Already contiguous: [batch, 2, num_kv_heads, seq_len, head_dim]
-        # 2. Paged: [num_blocks, 2, num_kv_heads, block_size, head_dim]
-        # We store contiguous tensors directly
-        legacy_kv = []
-        for name in sorted_names:
-            t = buf.tensors[name]
-            if t.dim() == 5:
-                # [batch_or_blocks, 2, num_kv_heads, tokens, head_dim]
-                k = t[:1, 0:1].squeeze(1)  # [1, num_kv_heads, tokens, head_dim]
-                v = t[:1, 1:2].squeeze(1)
-                # If this looks like a single-sequence contiguous tensor
-                if t.shape[0] == 1:
-                    legacy_kv.append((k, v))
-                else:
-                    # Multiple blocks — need block_table context
-                    # For simplicity, concatenate and assume sequential
-                    k_cat = t[:, 0].reshape(1, t.shape[2], -1, t.shape[4])
-                    v_cat = t[:, 1].reshape(1, t.shape[2], -1, t.shape[4])
-                    legacy_kv.append((k_cat, v_cat))
-            elif t.dim() == 4:
-                # [2, num_kv_heads, seq_len, head_dim] — K and V stacked
-                legacy_kv.append((t[0:1].unsqueeze(0), t[1:2].unsqueeze(0)))
-            else:
-                logger.warning("Unexpected tensor dim %d for layer %s", t.dim(), name)
-                continue
-
-        if not legacy_kv:
-            return
-
-        # Serialize to AVP binary format
-        kv_tuple = tuple(legacy_kv)
-        data, header = serialize_kv_cache(kv_tuple)
-
-        # Write to store
-        store_path = self._store_path(request_id)
-        store_path.write_bytes(data)
-
-        logger.debug(
-            "Saved KV-cache for request %s: %d layers, %d bytes → %s",
-            request_id, num_layers, len(data), store_path,
-        )
-
-    # ----- Consumer methods -----
+    # ----- Load side (Agent B starts → KV injected from store) -----
 
     def start_load_kv(self, forward_context: Any = None, **kwargs) -> None:
-        """Check store for matching KV-cache and start loading.
+        """Inject stored KV into the paged buffer before forward pass.
 
-        Called before the forward pass to pre-load KV-cache from a producer.
-
-        Args:
-            forward_context: vLLM forward context with request information.
+        Uses pending load metadata (block_ids from scheduler) to compute
+        slot_mapping, then writes stored KV into the allocated blocks.
         """
-        if forward_context is None:
+        if forward_context is None or self._kv_caches is None:
             return
 
-        request_id = self._get_request_id_from_context(forward_context)
-        if not request_id:
+        # Read from module-level dict (set by scheduler instance)
+        pending = dict(_PENDING_LOADS)
+        if not pending:
             return
-
-        store_path = self._store_path(request_id)
-        if not store_path.exists():
-            return
-
-        from ..kv_cache import deserialize_kv_cache
-
-        data = store_path.read_bytes()
-        legacy_kv, header = deserialize_kv_cache(data)
-
-        with self._lock:
-            self._loaded_kv[request_id] = list(legacy_kv)
 
         logger.debug(
-            "Loaded KV-cache for request %s: %d layers from %s",
-            request_id, header.num_layers, store_path,
+            "start_load_kv: %d pending loads, kv_caches registered",
+            len(pending),
         )
 
-    def wait_for_layer_load(
-        self,
-        layer_name: str,
-        **kwargs,
-    ) -> Optional[Any]:
-        """Wait for and return a specific layer's KV data.
+        for req_id, meta in pending.items():
+            try:
+                if not self._store.has_key(meta.store_key):
+                    continue
 
-        Called by vLLM's attention backend to get pre-loaded KV for a layer.
+                slot_mapping = _compute_slot_mapping(
+                    meta.block_ids, self._block_size, meta.num_external_tokens,
+                )
 
-        Args:
-            layer_name: Layer identifier.
+                layers_loaded = 0
+                for layer_name, kv_cache in self._kv_caches.items():
+                    layer_idx = _parse_layer_index(layer_name)
+                    if layer_idx is None:
+                        continue
 
-        Returns:
-            KV tensor for the layer, or None if not available.
-        """
-        # Find the matching request that has loaded data
-        with self._lock:
-            for request_id, layers in self._loaded_kv.items():
-                # Extract layer index from name (e.g., "model.layers.5.self_attn" → 5)
-                layer_idx = self._parse_layer_index(layer_name)
-                if layer_idx is not None and layer_idx < len(layers):
-                    k, v = layers[layer_idx]
-                    # Stack K and V: [2, num_kv_heads, seq_len, head_dim]
-                    kv = self._torch.cat([k, v], dim=0)
-                    return kv
+                    stored_kv = self._store.load_layer(meta.store_key, layer_idx)
+                    if stored_kv is None:
+                        continue
+
+                    if layers_loaded == 0:
+                        logger.debug(
+                            "Injecting KV: store_key=%s, %d tokens into %d slots",
+                            meta.store_key, stored_kv.shape[1],
+                            slot_mapping.shape[0],
+                        )
+
+                    # Offset by num_computed_tokens: when prefix caching is
+                    # active, positions 0..K are already in the KV cache.
+                    # The scheduler allocated slots for positions K..K+matched.
+                    # We must inject stored_kv[K:K+matched], not [0:matched].
+                    offset = meta.num_computed_tokens
+                    num_slots = slot_mapping.shape[0]
+                    end = offset + num_slots
+                    if end > stored_kv.shape[1]:
+                        end = stored_kv.shape[1]
+                    stored_kv = stored_kv[:, offset:end, :]
+                    # Truncate slot_mapping if stored_kv has fewer tokens
+                    if stored_kv.shape[1] < num_slots:
+                        slot_mapping = slot_mapping[:stored_kv.shape[1]]
+
+                    _inject_request_kv(kv_cache, slot_mapping, stored_kv)
+                    layers_loaded += 1
+
+                if layers_loaded > 0:
+                    logger.debug(
+                        "Loaded KV for %s: %d layers, %d tokens",
+                        meta.store_key, layers_loaded, meta.num_external_tokens,
+                    )
+                    # Track consumed keys for cleanup in request_finished
+                    if not hasattr(self, "_consumed_keys"):
+                        self._consumed_keys: Set[str] = set()
+                    self._consumed_keys.add(meta.store_key)
+            except Exception as e:
+                logger.warning("start_load_kv failed for %s: %s", req_id, e)
+
+        # Clear processed loads from module-level dict
+        for req_id in pending:
+            _PENDING_LOADS.pop(req_id, None)
+
+    def wait_for_layer_load(self, layer_name: str, **kwargs) -> Optional[Any]:
+        """No-op — injection happens in start_load_kv."""
         return None
 
+    # ----- Scheduler methods -----
+
     def get_num_new_matched_tokens(
-        self,
-        request: Any,
-        num_computed_tokens: int,
-        **kwargs,
-    ) -> Tuple[Optional[int], bool]:
-        """Check how many tokens from the store match this request.
+        self, request: Any, num_computed_tokens: int, **kwargs,
+    ) -> Tuple[int, bool]:
+        """Tell the scheduler how many tokens we can provide from the store.
 
-        Args:
-            request: The vLLM request object.
-            num_computed_tokens: Number of tokens already computed.
-
-        Returns:
-            Tuple of (num_matched_tokens, is_async). is_async=False since
-            our file-based loading is synchronous.
+        If Agent A's KV is in the store for this prompt, return the token
+        count. The scheduler will allocate blocks and mark them as external.
         """
-        request_id = self._get_request_id_from_request(request)
-        store_path = self._store_path(request_id)
+        meta = AVPReqMeta.from_request(request)
+        seq_len = self._store.get_seq_len(meta.store_key)
 
-        if not store_path.exists():
+        if seq_len <= 0:
             return (0, False)
 
-        from ..kv_cache import KVCacheHeader, _KV_HEADER_SIZE
+        matched = max(0, seq_len - num_computed_tokens)
 
-        data = store_path.read_bytes()
-        if len(data) < _KV_HEADER_SIZE:
-            return (0, False)
+        # Cap at prompt_len - 1 to leave 1 token for the scheduler.
+        # This is the standard pattern for synchronous KV connectors:
+        # vLLM requires at least 1 new token per forward pass to produce
+        # logits for the first decode token. The ExampleConnector does the
+        # same (matches prompt_token_ids[:-1]). Even the async path applies
+        # this adjustment internally in _update_waiting_for_remote_kv.
+        prompt_len = getattr(request, "num_tokens", None)
+        if prompt_len is None:
+            prompt_ids = getattr(request, "prompt_token_ids", None)
+            prompt_len = len(prompt_ids) if prompt_ids else 0
+        if prompt_len > 0 and matched >= prompt_len - num_computed_tokens:
+            matched = max(0, prompt_len - num_computed_tokens - 1)
 
-        header = KVCacheHeader.from_bytes(data)
-        matched = max(0, header.seq_len - num_computed_tokens)
+        # Cache num_computed_tokens so update_state_after_alloc can record
+        # it in AVPReqMeta. start_load_kv needs this offset to inject
+        # stored KV at the correct positions when prefix caching is active.
+        self._last_num_computed: Dict[str, int] = getattr(self, "_last_num_computed", {})
+        self._last_num_computed[meta.request_id] = num_computed_tokens
+
         return (matched, False)
-
-    def register_kv_caches(self, kv_caches: Dict[str, Any]) -> None:
-        """Store reference to vLLM's GPU KV cache buffers.
-
-        Called once during model initialization.
-
-        Args:
-            kv_caches: Dict mapping layer names to GPU cache tensors.
-        """
-        self._kv_caches = kv_caches
-        logger.debug("Registered %d KV cache layers", len(kv_caches))
-
-    # ----- Scheduler/allocation hooks -----
-
-    def build_connector_meta(self, scheduler_output: Any) -> "KVConnectorMetadata":
-        """Build connector metadata for this scheduler step.
-
-        Returns a minimal metadata object. AVP's file-based store doesn't
-        need per-step scheduler coordination.
-        """
-        return _AVPConnectorMetadata()
 
     def update_state_after_alloc(
         self, request: Any, blocks: Any, num_external_tokens: int,
     ) -> None:
-        """Update state after block allocation. No-op for file-based store."""
-        pass
+        """Record block allocation for pending load.
 
-    # ----- Stub methods (no-op for Phase 1) -----
+        The scheduler allocated blocks for external tokens. We save the
+        block_ids so start_load_kv can inject KV into the right slots.
+        """
+        if num_external_tokens <= 0:
+            return
+
+        meta = AVPReqMeta.from_request(request)
+
+        # FRAGILE(vllm): F1 -- single cache group
+        try:
+            if hasattr(blocks, "get_block_ids"):
+                block_list = list(blocks.get_block_ids()[0])
+            elif hasattr(blocks, "__getitem__"):
+                block_list = list(blocks[0]) if len(blocks) > 0 else []
+            else:
+                block_list = list(blocks) if blocks else []
+        except (TypeError, IndexError):
+            block_list = []
+
+        meta.block_ids = block_list
+        meta.num_external_tokens = num_external_tokens
+
+        # Retrieve num_computed_tokens cached by get_num_new_matched_tokens.
+        # start_load_kv uses this to offset into the stored KV so that
+        # prefix-cached positions are not duplicated.
+        _last = getattr(self, "_last_num_computed", {})
+        meta.num_computed_tokens = _last.pop(meta.request_id, 0)
+
+        # Use module-level dict (shared between scheduler and worker instances)
+        _PENDING_LOADS[meta.request_id] = meta
+
+        logger.debug(
+            "Scheduled load for %s: %d external tokens, %d blocks",
+            meta.store_key, num_external_tokens, len(block_list),
+        )
+
+    def build_connector_meta(self, scheduler_output: Any) -> "KVConnectorMetadata":
+        """Build metadata to pass store keys from scheduler to worker.
+
+        The scheduler has access to prompt_token_ids (for hashing).
+        The worker needs the store key for save_kv_layer. This bridges them.
+        """
+        req_metas = []
+        try:
+            new_reqs = getattr(scheduler_output, "scheduled_new_reqs", None)
+            if new_reqs:
+                for req in new_reqs:
+                    meta = AVPReqMeta.from_request(req)
+                    # Register request_id → store_key mapping for worker
+                    _REQUEST_STORE_KEYS[meta.request_id] = meta.store_key
+                    # Check if we have KV for this request (load path)
+                    if self._store.has_key(meta.store_key):
+                        meta.num_external_tokens = self._store.get_seq_len(meta.store_key)
+                    req_metas.append(meta)
+        except Exception as e:
+            logger.debug("build_connector_meta: %s", e)
+
+        return AVPConnectorMetadata(requests=req_metas)
+
+    # ----- Registration and stats -----
+
+    def register_kv_caches(self, kv_caches: Dict[str, Any]) -> None:
+        """Store reference to vLLM's GPU KV cache buffers.
+
+        These are used in request_finished (extraction) and
+        start_load_kv (injection).
+        """
+        self._kv_caches = kv_caches
+        logger.debug(
+            "Registered %d KV cache layers: %s",
+            len(kv_caches),
+            list(kv_caches.keys())[:3],
+        )
 
     def handle_preemptions(self, **kwargs) -> None:
-        """Handle request preemptions (no-op)."""
         pass
 
     def get_block_ids_with_load_errors(self, **kwargs) -> Set[int]:
-        """Return block IDs that failed to load (none for Phase 1)."""
         return set()
 
-    def get_kv_connector_stats(self, **kwargs) -> Dict[str, Any]:
-        """Return connector statistics."""
-        with self._lock:
-            return {
-                "pending_saves": len(self._save_buffers),
-                "loaded_requests": len(self._loaded_kv),
-                "store_dir": str(self._store_dir),
-            }
+    def get_kv_connector_stats(self, **kwargs) -> Any:
+        return None
 
     # ----- Helpers -----
 
-    def _store_path(self, request_id: str) -> Path:
-        """Get the file path for a request's KV-cache in the store."""
-        # Sanitize request_id for filesystem
-        safe_id = request_id.replace("/", "_").replace("\\", "_")
-        return self._store_dir / f"{safe_id}.avp"
-
-    def _get_request_id(self, attn_metadata: Any) -> str:
-        """Extract a request identifier from attention metadata."""
-        if hasattr(attn_metadata, "request_id"):
-            return str(attn_metadata.request_id)
-        if hasattr(attn_metadata, "seq_group_metadata_list"):
-            # vLLM v1: first sequence group
-            groups = attn_metadata.seq_group_metadata_list
-            if groups:
-                return str(groups[0].request_id)
+    def _extract_request_id(self, obj: Any) -> str:
+        if hasattr(obj, "request_id"):
+            return str(obj.request_id)
+        if hasattr(obj, "requests") and obj.requests:
+            first = obj.requests[0]
+            if hasattr(first, "request_id"):
+                return str(first.request_id)
+        if isinstance(obj, list) and obj:
+            return self._extract_request_id(obj[0])
+        if isinstance(obj, str):
+            return obj
         return "default"
 
-    def _get_request_id_from_request(self, request: Any) -> str:
-        """Extract request ID from a vLLM request object."""
-        if hasattr(request, "request_id"):
-            return str(request.request_id)
-        if isinstance(request, str):
-            return request
-        return "default"
+    def _derive_store_key(self, obj: Any) -> str:
+        prompt_ids = getattr(obj, "prompt_token_ids", None)
+        if prompt_ids:
+            return compute_request_hash(prompt_ids)
+        if hasattr(obj, "requests") and obj.requests:
+            first = obj.requests[0]
+            prompt_ids = getattr(first, "prompt_token_ids", None)
+            if prompt_ids:
+                return compute_request_hash(prompt_ids)
+        return self._extract_request_id(obj)
 
-    def _get_request_id_from_context(self, context: Any) -> str:
-        """Extract request ID from forward context."""
-        if hasattr(context, "request_id"):
-            return str(context.request_id)
-        if hasattr(context, "requests") and context.requests:
-            return str(context.requests[0].request_id)
-        return ""
 
-    @staticmethod
-    def _parse_layer_index(layer_name: str) -> Optional[int]:
-        """Extract numeric layer index from a layer name.
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
 
-        E.g., "model.layers.5.self_attn" → 5
-        """
-        import re
-        match = re.search(r"layers\.(\d+)", layer_name)
-        if match:
-            return int(match.group(1))
-        return None
+def _parse_layer_index(layer_name: str) -> Optional[int]:
+    match = re.search(r"layers\.(\d+)", layer_name)
+    if match:
+        return int(match.group(1))
+    return None
 
-    @staticmethod
-    def compute_request_hash(token_ids: List[int]) -> str:
-        """Compute a hash of prompt token IDs for store lookup.
 
-        This allows consumers to find pre-computed KV-cache from producers
-        that processed the same prompt.
+_MAX_LATENT_STEPS = 100
 
-        Args:
-            token_ids: List of prompt token IDs.
 
-        Returns:
-            Hex-encoded SHA-256 hash string (first 16 chars).
-        """
-        data = ",".join(str(t) for t in token_ids).encode("utf-8")
-        return hashlib.sha256(data).hexdigest()[:16]
+def prepare_latent_prompt(token_ids: List[int], latent_steps: int = 20) -> List[int]:
+    """Pad prompt with N copies of the last token for extend-pattern latent thinking.
+
+    The model plugin detects the padding and runs N latent steps at
+    positions L..L+N-1, creating a causal chain of enriched KV entries.
+    The placeholder KV is overwritten before being read (safe for any token).
+
+    Args:
+        token_ids: Original prompt token IDs.
+        latent_steps: Number of latent thinking steps (default: 20, max: 100).
+
+    Returns:
+        Padded token IDs: original + N copies of the last token.
+
+    Raises:
+        ValueError: If latent_steps exceeds the maximum.
+    """
+    if latent_steps > _MAX_LATENT_STEPS:
+        raise ValueError(
+            f"latent_steps={latent_steps} exceeds maximum {_MAX_LATENT_STEPS}. "
+            "Beyond 20 steps, accuracy degrades due to noise accumulation."
+        )
+    if not token_ids or latent_steps <= 0:
+        return list(token_ids)
+    return list(token_ids) + [token_ids[-1]] * latent_steps
+
+
+def compute_request_hash(token_ids: List[int]) -> str:
+    data = ",".join(str(t) for t in token_ids).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def make_sampling_params(store_key: str, **kwargs: Any) -> Any:
+    """Create vLLM SamplingParams with an explicit AVP store key.
+
+    The store key lets Agent B retrieve Agent A's KV-cache or projected
+    embedding even when using a different prompt. Without this, the store
+    key is derived from the prompt token hash, requiring both agents to
+    use the same prompt.
+
+    Args:
+        store_key: Shared key for the store (any string).
+        **kwargs: Forwarded to ``vllm.SamplingParams`` (e.g. max_tokens,
+            temperature).
+
+    Returns:
+        ``vllm.SamplingParams`` with the store key in ``extra_args``.
+
+    Example::
+
+        # Agent A (researcher)
+        params_a = make_sampling_params("problem-42", max_tokens=1)
+        engine_a.generate([researcher_prompt], params_a)
+
+        # Agent B (solver) — different prompt, same store key
+        params_b = make_sampling_params("problem-42", max_tokens=256)
+        engine_b.generate([solver_prompt], params_b)
+    """
+    import vllm
+
+    extra_args = kwargs.pop("extra_args", None) or {}
+    extra_args["kv_transfer_params"] = {"store_key": store_key}
+    return vllm.SamplingParams(extra_args=extra_args, **kwargs)
+
+
+def load_projected_embedding(store_dir: str, store_key: str) -> Optional[Any]:
+    """Load a projected embedding from the file store.
+
+    Helper for Agent B to retrieve the rosetta-projected embedding
+    that Agent A saved after its latent thinking steps.
+
+    Args:
+        store_dir: Path to the shared AVP store directory.
+        store_key: The store key (typically from compute_request_hash).
+
+    Returns:
+        Projected embedding tensor [D_tgt], or None if not found.
+    """
+    store = FileKVStore(store_dir)
+    return store.load_projected(store_key)
+
+
+def generate_with_rosetta(
+    engine: Any,
+    prompt_token_ids: List[int],
+    store_dir: str,
+    store_key: str,
+    sampling_params: Any,
+    model_id: Optional[str] = None,
+) -> Any:
+    """Generate from a rosetta-projected embedding via vLLM.
+
+    Loads the projected embedding that Agent A saved, prepends it to
+    the prompt as a virtual context token, and generates via vLLM's
+    ``prompt_embeds`` pathway. Falls back to normal token-based
+    generation if no projected embedding is found or if the engine
+    does not support prompt embeddings.
+
+    Args:
+        engine: vLLM ``LLM`` instance for Agent B (no special config needed).
+        prompt_token_ids: Agent B's prompt token IDs.
+        store_dir: Path to the shared AVP store directory.
+        store_key: Store key from Agent A (from ``compute_request_hash``).
+        sampling_params: vLLM ``SamplingParams``.
+        model_id: Agent B's HuggingFace model ID. Auto-detected from
+            engine if not provided.
+
+    Returns:
+        vLLM ``RequestOutput`` list (same as ``engine.generate``).
+    """
+    import torch
+    import vllm
+
+    projected = load_projected_embedding(store_dir, store_key)
+
+    if projected is None:
+        # No rosetta embedding — generate normally from tokens
+        return engine.generate(
+            [vllm.TokensPrompt(prompt_token_ids=list(prompt_token_ids))],
+            sampling_params,
+        )
+
+    # Check if engine supports prompt_embeds (enabled by default in vLLM 0.17+)
+    _prompt_embeds_ok = True
+    try:
+        _prompt_embeds_ok = getattr(
+            engine.llm_engine.model_config, "enable_prompt_embeds", True,
+        )
+    except AttributeError:
+        pass
+
+    if not _prompt_embeds_ok:
+        logger.warning(
+            "Engine has enable_prompt_embeds=False — falling back to text-only "
+            "generation. Rosetta projected embedding will not be used. "
+            "Set enable_prompt_embeds=True when creating the engine to enable "
+            "cross-model latent communication.",
+        )
+        return engine.generate(
+            [vllm.TokensPrompt(prompt_token_ids=list(prompt_token_ids))],
+            sampling_params,
+        )
+
+    # Auto-detect model ID from the engine
+    if model_id is None:
+        try:
+            model_id = engine.llm_engine.model_config.model
+        except AttributeError:
+            raise ValueError(
+                "Cannot auto-detect model_id from engine. "
+                "Pass model_id explicitly."
+            )
+
+    # Load target embed weights (cached after first call)
+    from .vllm_model_plugin import _load_target_model_weights
+    embed_weight, _, _ = _load_target_model_weights(model_id)
+
+    # Convert token IDs → embeddings
+    prompt_embeds = embed_weight[prompt_token_ids]  # [seq_len, D]
+
+    # Prepend projected embedding as a virtual context token
+    proj = projected.to(torch.float32)
+    if proj.dim() == 1:
+        proj = proj.unsqueeze(0)  # [1, D]
+    combined = torch.cat([proj, prompt_embeds.to(torch.float32)], dim=0)
+
+    # Cast to engine's dtype (bfloat16 for most modern models)
+    try:
+        engine_dtype = engine.llm_engine.model_config.dtype
+    except AttributeError:
+        engine_dtype = torch.bfloat16
+    combined = combined.to(engine_dtype)
+
+    return engine.generate(
+        [{"prompt_embeds": combined}],
+        sampling_params,
+    )
