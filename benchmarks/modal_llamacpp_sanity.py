@@ -14,14 +14,21 @@ app = modal.App("avp-llamacpp-sanity")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git", "cmake", "build-essential")
+    .apt_install("git")
     .pip_install(
-        "llama-cpp-python>=0.3",
         "torch>=2.0",
         "numpy>=1.24",
         "huggingface-hub>=0.20",
         "gguf>=0.6",
     )
+    .run_commands(
+        'TORCH_LIB=$(python3 -c "import torch; print(torch.__path__[0])")/lib && '
+        'LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH" '
+        'pip install llama-cpp-python>=0.3 '
+        '--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 '
+        '--no-cache-dir',
+    )
+    .env({"LD_LIBRARY_PATH": "/usr/local/lib/python3.11/site-packages/torch/lib"})
     .pip_install(
         "git+https://github.com/VectorArc/avp-python.git@main",
         force_build=True,
@@ -29,7 +36,7 @@ image = (
 )
 
 
-@app.function(image=image, cpu=4, memory=8192, timeout=1800)
+@app.function(image=image, gpu="A100-40GB", timeout=1800)
 def run_test():
     import time
 
@@ -58,7 +65,7 @@ def run_test():
     from avp.connectors.llamacpp import LlamaCppConnector
 
     connector = LlamaCppConnector.from_pretrained(
-        model_path, n_ctx=2048, n_gpu_layers=0, verbose=False,
+        model_path, n_ctx=2048, n_gpu_layers=-1, verbose=False,
     )
 
     t0 = time.monotonic()

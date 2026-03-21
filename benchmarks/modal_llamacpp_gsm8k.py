@@ -24,15 +24,12 @@ image = (
         "datasets>=2.14",
     )
     .run_commands(
-        # Point LD_LIBRARY_PATH to torch's bundled CUDA runtime
+        # Install CUDA wheel, using torch's bundled CUDA runtime for linking
         'TORCH_LIB=$(python3 -c "import torch; print(torch.__path__[0])")/lib && '
-        'echo "Torch CUDA libs: $(ls $TORCH_LIB/libcudart* 2>/dev/null || echo NONE)" && '
         'LD_LIBRARY_PATH="$TORCH_LIB:$LD_LIBRARY_PATH" '
         'pip install llama-cpp-python>=0.3 '
         '--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124 '
-        '--no-cache-dir && '
-        # Persist the LD_LIBRARY_PATH for runtime
-        'echo "export LD_LIBRARY_PATH=$TORCH_LIB:\\$LD_LIBRARY_PATH" >> /etc/profile.d/cuda.sh',
+        '--no-cache-dir',
     )
     .env({"LD_LIBRARY_PATH": "/usr/local/lib/python3.11/site-packages/torch/lib"})
     .pip_install(
@@ -133,6 +130,11 @@ def run_benchmark(n: int = 50):
         pred = extract_answer(answer)
         if pred == gold[i]:
             latent_correct += 1
+        else:
+            # Log first 3 wrong answers for debugging
+            if latent_correct == 0 and i < 3:
+                print(f"    [debug] q{i}: gold={gold[i]}, pred={pred!r}")
+                print(f"    [debug] answer: {answer[:200]!r}")
 
         if (i + 1) % 10 == 0 or i == n - 1:
             pct = latent_correct / (i + 1) * 100
