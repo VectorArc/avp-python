@@ -16,11 +16,13 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "cmake", "build-essential")
     .pip_install(
-        "llama-cpp-python>=0.3",
         "torch>=2.0",
         "numpy>=1.24",
         "huggingface-hub>=0.20",
         "gguf>=0.6",
+    )
+    .run_commands(
+        'CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python>=0.3 --no-cache-dir',
     )
     .pip_install(
         "git+https://github.com/VectorArc/avp-python.git@main",
