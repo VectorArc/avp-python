@@ -73,6 +73,25 @@ def run_test():
     results["basic"] = {"text": text[:100], "ok": len(text) > 0}
 
     # ==============================================================
+    # Test 1b: GGUF weight extraction diagnostic
+    # ==============================================================
+    print("\n" + "=" * 60)
+    print("TEST 1b: GGUF embed weight extraction")
+    print("=" * 60)
+    try:
+        from avp.connectors._llamacpp_compat import extract_gguf_embedding_weights
+        emb_w = extract_gguf_embedding_weights(model_path)
+        print(f"  embed_tokens shape: {emb_w.shape}")
+        import numpy as np
+        print(f"  embed_tokens norm (mean): {np.linalg.norm(emb_w, axis=1).mean():.3f}")
+        results["gguf_extract"] = {"shape": list(emb_w.shape), "ok": True}
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["gguf_extract"] = {"ok": False, "error": str(e)}
+
+    # ==============================================================
     # Test 2: Think (cb_eval captures hidden state)
     # ==============================================================
     print("\n" + "=" * 60)
