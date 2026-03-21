@@ -100,8 +100,8 @@ def run_test():
 
     t0 = time.monotonic()
     context = connector.think(
-        "Analyze this math problem carefully: 24 * 17 + 3",
-        steps=1,
+        "Solve step by step: 24 * 17 + 3",
+        steps=0,
     )
     elapsed = time.monotonic() - t0
 
