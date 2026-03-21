@@ -223,7 +223,9 @@ def extract_gguf_embedding_weights(model_path: str) -> Any:
     for key_prefix in ("llama", "qwen2", "gemma", "mistral", "phi"):
         field = reader.get_field(f"{key_prefix}.embedding_length")
         if field is not None:
-            n_embd_val = int(field.parts[-1])
+            # field.parts is a list of numpy arrays; extract the scalar
+            val = field.parts[-1]
+            n_embd_val = int(val.item() if hasattr(val, "item") else val)
             break
 
     if n_embd_val is None:
