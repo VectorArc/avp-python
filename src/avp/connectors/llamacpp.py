@@ -180,7 +180,9 @@ class LlamaCppConnector(EngineConnector):
         model_ptr = self._model._model.model
         n_embd = self._n_embd
 
-        # Create a dedicated context with cb_eval at creation time
+        # Create a context with cb_eval set at creation time.
+        # This context is kept ALIVE and returned inside the AVPContext
+        # so that generate() can decode directly onto the enriched KV-cache.
         ctx_params = lc.llama_context_default_params()
         ctx_params.n_ctx = self._n_ctx
         ctx_params.n_batch = 512
@@ -192,119 +194,114 @@ class LlamaCppConnector(EngineConnector):
             logger.warning("think(): Failed to create context with cb_eval")
             return None
 
+        # Tokenize
+        tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
+        n_tokens = len(tokens)
+
+        # Step 0: Initial forward pass on prompt tokens
+        self._capture.clear()
+        batch = lc.llama_batch_init(n_tokens, 0, 1)
         try:
-            # Tokenize
-            tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
-            n_tokens = len(tokens)
+            for i, tok in enumerate(tokens):
+                batch.token[i] = tok
+                batch.pos[i] = i
+                batch.seq_id[i][0] = 0
+                batch.n_seq_id[i] = 1
+                batch.logits[i] = 1 if i == n_tokens - 1 else 0
+            batch.n_tokens = n_tokens
 
-            # Step 0: Initial forward pass on prompt tokens
-            self._capture.clear()
-            batch = lc.llama_batch_init(n_tokens, 0, 1)
-            try:
-                for i, tok in enumerate(tokens):
-                    batch.token[i] = tok
-                    batch.pos[i] = i
-                    batch.seq_id[i][0] = 0
-                    batch.n_seq_id[i] = 1
-                    batch.logits[i] = 1 if i == n_tokens - 1 else 0
-                batch.n_tokens = n_tokens
-
-                rc = lc.llama_decode(think_ctx, batch)
-                if rc != 0:
-                    logger.warning("think(): initial decode failed (rc=%d)", rc)
-                    return None
-            finally:
-                lc.llama_batch_free(batch)
-
-            if "data" not in self._capture:
-                logger.warning("think(): No hidden state captured on initial pass")
+            rc = lc.llama_decode(think_ctx, batch)
+            if rc != 0:
+                logger.warning("think(): initial decode failed (rc=%d)", rc)
+                lc.llama_free(think_ctx)
                 return None
-
-            # Extract initial hidden state (last token)
-            hidden = torch.from_numpy(self._capture["data"].copy()).float()
-            if hidden.dim() == 2:
-                hidden = hidden[-1:, :]  # [1, n_embd]
-
-            # Load embedding weights from GGUF for proper projection.
-            # Tied-weight models (most GGUF) need project_to_embedding_space
-            # (hidden → logits → softmax → soft embed), not just normalization.
-            embed_weight = None
-            try:
-                from ._llamacpp_compat import extract_gguf_embedding_weights
-                emb_np = extract_gguf_embedding_weights(self._model_path)
-                embed_weight = torch.from_numpy(emb_np).float()
-                target_norm = embed_weight.norm(dim=1).mean().detach()
-            except Exception as e:
-                logger.warning("Cannot load embed weights for projection: %s", e)
-                target_norm = hidden.norm(dim=-1).mean().detach()
-
-            n_past = n_tokens  # KV-cache position counter
-            steps_completed = 0
-
-            # Steps 1..N: latent thinking loop
-            for step in range(steps):
-                # Project hidden state back to embedding space.
-                # For tied-weight models: softmax projection through vocabulary
-                # For untied: normalize to target_norm (fallback)
-                if embed_weight is not None:
-                    projected = project_to_embedding_space(
-                        hidden, embed_weight, temperature=1.0,
-                    )
-                    projected = normalize_to_target(projected, target_norm)
-                else:
-                    projected = normalize_to_target(hidden, target_norm)
-                proj_np = projected.squeeze(0).numpy().astype(np.float32)
-
-                # Inject projected embedding via batch.embd
-                self._capture.clear()
-                emb_batch = lc.llama_batch_init(1, n_embd, 1)
-                try:
-                    ctypes.memmove(
-                        emb_batch.embd,
-                        proj_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                        ctypes.sizeof(ctypes.c_float) * n_embd,
-                    )
-                    emb_batch.n_tokens = 1
-                    emb_batch.pos[0] = n_past
-                    emb_batch.seq_id[0][0] = 0
-                    emb_batch.n_seq_id[0] = 1
-                    emb_batch.logits[0] = 0  # No logits needed for latent steps
-
-                    rc = lc.llama_decode(think_ctx, emb_batch)
-                    if rc != 0:
-                        logger.warning("think(): step %d decode failed (rc=%d)", step, rc)
-                        break
-                finally:
-                    lc.llama_batch_free(emb_batch)
-
-                n_past += 1
-                steps_completed += 1
-
-                # Capture the new hidden state from this step
-                if "data" in self._capture:
-                    hidden = torch.from_numpy(self._capture["data"].copy()).float()
-                    if hidden.dim() == 2:
-                        hidden = hidden[-1:, :]
-
         finally:
-            lc.llama_free(think_ctx)
+            lc.llama_batch_free(batch)
 
-        # Normalize final hidden state before storing
+        if "data" not in self._capture:
+            logger.warning("think(): No hidden state captured on initial pass")
+            lc.llama_free(think_ctx)
+            return None
+
+        # Extract initial hidden state (last token)
+        hidden = torch.from_numpy(self._capture["data"].copy()).float()
+        if hidden.dim() == 2:
+            hidden = hidden[-1:, :]  # [1, n_embd]
+
+        # Load embedding weights from GGUF for proper projection
+        embed_weight = None
+        try:
+            from ._llamacpp_compat import extract_gguf_embedding_weights
+            emb_np = extract_gguf_embedding_weights(self._model_path)
+            embed_weight = torch.from_numpy(emb_np).float()
+            target_norm = embed_weight.norm(dim=1).mean().detach()
+        except Exception as e:
+            logger.warning("Cannot load embed weights for projection: %s", e)
+            target_norm = hidden.norm(dim=-1).mean().detach()
+
+        n_past = n_tokens
+        steps_completed = 0
+
+        # Steps 1..N: latent thinking loop (each step enriches the KV-cache)
+        for step in range(steps):
+            if embed_weight is not None:
+                projected = project_to_embedding_space(
+                    hidden, embed_weight, temperature=1.0,
+                )
+                projected = normalize_to_target(projected, target_norm)
+            else:
+                projected = normalize_to_target(hidden, target_norm)
+            proj_np = projected.squeeze(0).numpy().astype(np.float32)
+
+            self._capture.clear()
+            emb_batch = lc.llama_batch_init(1, n_embd, 1)
+            try:
+                ctypes.memmove(
+                    emb_batch.embd,
+                    proj_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    ctypes.sizeof(ctypes.c_float) * n_embd,
+                )
+                emb_batch.n_tokens = 1
+                emb_batch.pos[0] = n_past
+                emb_batch.seq_id[0][0] = 0
+                emb_batch.n_seq_id[0] = 1
+                emb_batch.logits[0] = 0
+
+                rc = lc.llama_decode(think_ctx, emb_batch)
+                if rc != 0:
+                    logger.warning("think(): step %d decode failed (rc=%d)", step, rc)
+                    break
+            finally:
+                lc.llama_batch_free(emb_batch)
+
+            n_past += 1
+            steps_completed += 1
+
+            if "data" in self._capture:
+                hidden = torch.from_numpy(self._capture["data"].copy()).float()
+                if hidden.dim() == 2:
+                    hidden = hidden[-1:, :]
+
         hidden = normalize_to_target(hidden, target_norm)
 
+        # Return AVPContext with the LIVE think context attached.
+        # generate() will decode the solver prompt directly onto this
+        # context's enriched KV-cache, then free it when done.
         context = AVPContext(
             past_key_values=None,
             model_hash="",
             num_steps=steps_completed,
-            seq_len=n_tokens + steps_completed,
+            seq_len=n_past,
             hidden_dim=n_embd,
             num_layers=self._n_layer or 0,
             last_hidden_state=hidden,
         )
+        context._llamacpp_ctx = think_ctx
+        context._llamacpp_n_past = n_past
 
         logger.info(
-            "think(): %d/%d latent steps, final hidden norm=%.3f",
-            steps_completed, steps, hidden.float().norm().item(),
+            "think(): %d/%d latent steps, n_past=%d, hidden norm=%.3f",
+            steps_completed, steps, n_past, hidden.float().norm().item(),
         )
 
         return context
@@ -322,10 +319,13 @@ class LlamaCppConnector(EngineConnector):
     ) -> str:
         """Generate text, optionally using latent context.
 
-        When ``context`` is provided, the hidden state is injected via
-        llama.cpp's ``batch.embd`` as a prefix embedding before the
-        prompt tokens. The model attends to this virtual context token
-        during generation.
+        When ``context`` has a live llama_context (from think()), the
+        solver prompt is decoded directly onto the enriched KV-cache.
+        The model attends to all prompt tokens + all N latent step
+        positions, matching the HuggingFace connector's behavior.
+
+        For cross-model or deserialized contexts (no live context),
+        falls back to single-embedding injection via batch.embd.
 
         Args:
             prompt: The input prompt.
@@ -349,7 +349,14 @@ class LlamaCppConnector(EngineConnector):
             )
             return output["choices"][0]["text"]
 
-        # With context: inject hidden state via batch.embd
+        # Check for a live think context (same-model, from think())
+        think_ctx = getattr(context, "_llamacpp_ctx", None)
+        if think_ctx is not None and not cross_model:
+            return self._generate_on_think_ctx(
+                prompt, context, max_tokens, temperature, top_p,
+            )
+
+        # Fallback: cross-model or no live context — use embedding injection
         hidden = getattr(context, "last_hidden_state", None)
         if hidden is None:
             output = self._model(
@@ -360,13 +367,118 @@ class LlamaCppConnector(EngineConnector):
             )
             return output["choices"][0]["text"]
 
-        # Cross-model rosetta projection
         if cross_model and source is not None:
             hidden = self._project_rosetta(hidden, source)
 
         return self._generate_with_embedding(
             prompt, hidden, max_tokens, temperature, top_p,
         )
+
+    def _generate_on_think_ctx(
+        self,
+        prompt: str,
+        context: Any,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+    ) -> str:
+        """Generate on the live think context's enriched KV-cache.
+
+        Decodes the solver prompt tokens directly onto the think context
+        (which has all prompt + latent step KV entries), then runs
+        autoregressive generation. The model attends to the full
+        enriched context. Frees the think context when done.
+        """
+        from llama_cpp import llama_cpp as lc
+
+        think_ctx = context._llamacpp_ctx
+        n_past = context._llamacpp_n_past
+
+        try:
+            # Decode solver prompt tokens onto the think context
+            tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
+            n_prompt = len(tokens)
+
+            batch = lc.llama_batch_init(n_prompt, 0, 1)
+            try:
+                for i, tok in enumerate(tokens):
+                    batch.token[i] = tok
+                    batch.pos[i] = n_past + i
+                    batch.seq_id[i][0] = 0
+                    batch.n_seq_id[i] = 1
+                    batch.logits[i] = 1 if i == n_prompt - 1 else 0
+                batch.n_tokens = n_prompt
+
+                rc = lc.llama_decode(think_ctx, batch)
+                if rc != 0:
+                    logger.warning("generate(): prompt decode failed (rc=%d)", rc)
+                    return ""
+            finally:
+                lc.llama_batch_free(batch)
+
+            n_cur = n_past + n_prompt
+
+            # Autoregressive generation
+            sampler_params = lc.llama_sampler_chain_default_params()
+            sampler = lc.llama_sampler_chain_init(sampler_params)
+
+            top_k_s = lc.llama_sampler_init_top_k(40)
+            lc.llama_sampler_chain_add(sampler, top_k_s)
+
+            top_p_s = lc.llama_sampler_init_top_p(top_p, 1)
+            lc.llama_sampler_chain_add(sampler, top_p_s)
+
+            temp_s = lc.llama_sampler_init_temp(temperature)
+            lc.llama_sampler_chain_add(sampler, temp_s)
+
+            dist_s = lc.llama_sampler_init_dist(0)
+            lc.llama_sampler_chain_add(sampler, dist_s)
+
+            generated_tokens = []
+            eos_token = self._model.token_eos()
+
+            try:
+                for _ in range(max_tokens):
+                    token_id = lc.llama_sampler_sample(sampler, think_ctx, -1)
+                    lc.llama_sampler_accept(sampler, token_id)
+
+                    if token_id == eos_token:
+                        break
+
+                    generated_tokens.append(token_id)
+
+                    next_batch = lc.llama_batch_init(1, 0, 1)
+                    try:
+                        next_batch.token[0] = token_id
+                        next_batch.pos[0] = n_cur
+                        next_batch.seq_id[0][0] = 0
+                        next_batch.n_seq_id[0] = 1
+                        next_batch.logits[0] = 1
+                        next_batch.n_tokens = 1
+                        n_cur += 1
+
+                        rc = lc.llama_decode(think_ctx, next_batch)
+                        if rc != 0:
+                            break
+                    finally:
+                        lc.llama_batch_free(next_batch)
+            finally:
+                lc.llama_sampler_free(sampler)
+
+            text = self._model.detokenize(generated_tokens).decode(
+                "utf-8", errors="replace",
+            )
+
+            logger.debug(
+                "generate(): think_ctx with %d enriched positions + "
+                "%d prompt tokens, generated %d tokens",
+                n_past, n_prompt, len(generated_tokens),
+            )
+            return text
+
+        finally:
+            lc.llama_free(think_ctx)
+            context._llamacpp_ctx = None
 
     def _generate_with_embedding(
         self,
