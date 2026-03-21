@@ -226,8 +226,8 @@ def run_test():
 
     t0 = time.monotonic()
     context = connector.think(
-        "Solve step by step: 24 * 17 + 3",
-        steps=0,
+        "Analyze this math problem carefully: 24 * 17 + 3",
+        steps=10,
     )
     elapsed = time.monotonic() - t0
 
@@ -259,7 +259,7 @@ def run_test():
     if context is not None and getattr(context, "last_hidden_state", None) is not None:
         t0 = time.monotonic()
         answer = connector.generate(
-            "",  # Empty = continue from think context's KV-cache
+            "Solve step by step: 24 * 17 + 3",
             context=context,
             max_tokens=100,
             temperature=0.0,

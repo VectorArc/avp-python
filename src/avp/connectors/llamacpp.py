@@ -63,9 +63,7 @@ class LlamaCppConnector(EngineConnector):
                 "Install with: pip install avp[llamacpp]"
             )
 
-        import llama_cpp
-
-        from ._llamacpp_compat import make_eval_callback
+        import llama_cpp  # noqa: F401
 
         self._model_path = model_path
         self._verbose = verbose
@@ -73,18 +71,8 @@ class LlamaCppConnector(EngineConnector):
         self._n_gpu_layers = n_gpu_layers
         self._init_kwargs = kwargs
 
-        # Capture dict for hidden states (populated by cb_eval callback)
-        self._capture: dict = {}
-
-        # Create callback for last-layer hidden state extraction.
-        # target_layer=-1 means "capture all l_out-*, keep the last one"
-        self._callback = make_eval_callback(
-            target_layer=-1, capture_dict=self._capture,
-        )
-        # Keep a reference to prevent garbage collection
-        self._callback_ref = self._callback
-
-        # Load model — used for generate() and text-only operations
+        # Load model with embedding=True to enable hidden state extraction
+        # via llama_get_embeddings_ith (no cb_eval needed).
         self._model = llama_cpp.Llama(
             model_path=model_path,
             n_ctx=n_ctx,
@@ -154,18 +142,17 @@ class LlamaCppConnector(EngineConnector):
     ) -> Any:
         """Run N latent thinking steps and return an AVPContext.
 
-        Creates a dedicated context with ``cb_eval`` to capture hidden
-        states. Runs an initial forward pass on the prompt, then loops
-        N times: project hidden → normalize → inject via ``batch.embd``
-        → decode → capture new hidden. Matches the HuggingFace connector's
-        ``generate_latent_steps()`` pattern.
+        Creates a context with ``embeddings=True`` (no cb_eval needed).
+        Hidden states are extracted via ``llama_get_embeddings_ith(-1)``
+        after each decode. The context is kept alive so generate() can
+        decode the solver prompt directly onto the enriched KV-cache.
 
         Args:
             prompt: The input prompt.
             steps: Number of latent thinking steps (default: 10).
 
         Returns:
-            AVPContext containing the enriched hidden state.
+            AVPContext containing the enriched hidden state and live context.
         """
         import ctypes
 
@@ -176,22 +163,20 @@ class LlamaCppConnector(EngineConnector):
         from ..context import AVPContext
         from ..realign import normalize_to_target, project_to_embedding_space
 
-        # Get the raw model pointer
         model_ptr = self._model._model.model
         n_embd = self._n_embd
 
-        # Create a context with cb_eval set at creation time.
-        # This context is kept ALIVE and returned inside the AVPContext
-        # so that generate() can decode directly onto the enriched KV-cache.
+        # Create context with embeddings=True — gives us hidden states
+        # via llama_get_embeddings_ith without cb_eval (which corrupts
+        # the context and breaks generation).
         ctx_params = lc.llama_context_default_params()
         ctx_params.n_ctx = self._n_ctx
         ctx_params.n_batch = 512
-        ctx_params.cb_eval = self._callback
-        ctx_params.cb_eval_user_data = None
+        ctx_params.embeddings = True
 
         think_ctx = lc.llama_new_context_with_model(model_ptr, ctx_params)
         if not think_ctx:
-            logger.warning("think(): Failed to create context with cb_eval")
+            logger.warning("think(): Failed to create context")
             return None
 
         # Tokenize
@@ -199,7 +184,6 @@ class LlamaCppConnector(EngineConnector):
         n_tokens = len(tokens)
 
         # Step 0: Initial forward pass on prompt tokens
-        self._capture.clear()
         batch = lc.llama_batch_init(n_tokens, 0, 1)
         try:
             for i, tok in enumerate(tokens):
@@ -218,17 +202,14 @@ class LlamaCppConnector(EngineConnector):
         finally:
             lc.llama_batch_free(batch)
 
-        if "data" not in self._capture:
-            logger.warning("think(): No hidden state captured on initial pass")
+        # Extract hidden state via embeddings API (no cb_eval)
+        hidden = self._get_embeddings(lc, think_ctx, n_embd)
+        if hidden is None:
+            logger.warning("think(): llama_get_embeddings_ith returned NULL")
             lc.llama_free(think_ctx)
             return None
 
-        # Extract initial hidden state (last token)
-        hidden = torch.from_numpy(self._capture["data"].copy()).float()
-        if hidden.dim() == 2:
-            hidden = hidden[-1:, :]  # [1, n_embd]
-
-        # Load embedding weights from GGUF for proper projection
+        # Load embedding weights from GGUF for projection
         embed_weight = None
         try:
             from ._llamacpp_compat import extract_gguf_embedding_weights
@@ -242,8 +223,9 @@ class LlamaCppConnector(EngineConnector):
         n_past = n_tokens
         steps_completed = 0
 
-        # Steps 1..N: latent thinking loop (each step enriches the KV-cache)
+        # Steps 1..N: latent thinking loop
         for step in range(steps):
+            # Project hidden state back to embedding space
             if embed_weight is not None:
                 projected = project_to_embedding_space(
                     hidden, embed_weight, temperature=1.0,
@@ -253,7 +235,7 @@ class LlamaCppConnector(EngineConnector):
                 projected = normalize_to_target(hidden, target_norm)
             proj_np = projected.squeeze(0).numpy().astype(np.float32)
 
-            self._capture.clear()
+            # Inject via batch.embd
             emb_batch = lc.llama_batch_init(1, n_embd, 1)
             try:
                 ctypes.memmove(
@@ -265,8 +247,6 @@ class LlamaCppConnector(EngineConnector):
                 emb_batch.pos[0] = n_past
                 emb_batch.seq_id[0][0] = 0
                 emb_batch.n_seq_id[0] = 1
-                # Request logits on the last step so generate() can
-                # sample immediately without an extra decode call.
                 emb_batch.logits[0] = 1 if step == steps - 1 else 0
 
                 rc = lc.llama_decode(think_ctx, emb_batch)
@@ -279,16 +259,13 @@ class LlamaCppConnector(EngineConnector):
             n_past += 1
             steps_completed += 1
 
-            if "data" in self._capture:
-                hidden = torch.from_numpy(self._capture["data"].copy()).float()
-                if hidden.dim() == 2:
-                    hidden = hidden[-1:, :]
+            # Extract new hidden state
+            new_hidden = self._get_embeddings(lc, think_ctx, n_embd)
+            if new_hidden is not None:
+                hidden = new_hidden
 
         hidden = normalize_to_target(hidden, target_norm)
 
-        # Return AVPContext with the LIVE think context attached.
-        # generate() will decode the solver prompt directly onto this
-        # context's enriched KV-cache, then free it when done.
         context = AVPContext(
             past_key_values=None,
             model_hash="",
@@ -307,6 +284,23 @@ class LlamaCppConnector(EngineConnector):
         )
 
         return context
+
+    @staticmethod
+    def _get_embeddings(lc: Any, ctx: Any, n_embd: int) -> Any:
+        """Extract hidden state from context via llama_get_embeddings_ith."""
+        import ctypes
+
+        import numpy as np
+        import torch
+
+        emb_ptr = lc.llama_get_embeddings_ith(ctx, -1)
+        if not emb_ptr:
+            return None
+        arr = (ctypes.c_float * n_embd).from_address(
+            ctypes.addressof(emb_ptr.contents),
+        )
+        data = np.array(arr, dtype=np.float32, copy=True)
+        return torch.from_numpy(data).float().unsqueeze(0)  # [1, n_embd]
 
     def generate(
         self,
@@ -396,9 +390,6 @@ class LlamaCppConnector(EngineConnector):
         think_ctx = context._llamacpp_ctx
         n_past = context._llamacpp_n_past
 
-        # Disable cb_eval during generation
-        self._capture["active"] = False
-
         try:
             # If the solver prompt is different from the think prompt,
             # decode it onto the think context so the model can attend
@@ -470,7 +461,6 @@ class LlamaCppConnector(EngineConnector):
             return text
 
         finally:
-            self._capture["active"] = True
             lc.llama_free(think_ctx)
             context._llamacpp_ctx = None
 
