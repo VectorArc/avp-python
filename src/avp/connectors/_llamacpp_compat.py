@@ -213,27 +213,37 @@ def extract_gguf_embedding_weights(model_path: str) -> Any:
             f"Available tensors (first 10): {available}"
         )
 
-    # tensor.data is dequantized by the gguf package
-    data = np.array(tensor.data, dtype=np.float32)
-    shape = tuple(tensor.shape)
+    # tensor.data is dequantized by the gguf package.
+    # For quantized tensors, the data may be in block format.
+    data = np.array(tensor.data, dtype=np.float32).flatten()
 
-    if len(shape) == 2:
-        return data.reshape(shape[1], shape[0]).astype(np.float32)
+    # Infer shape from GGUF metadata (more reliable than tensor.shape
+    # which may reflect quantized block layout, not logical dimensions)
+    n_embd_val = None
+    for key_prefix in ("llama", "qwen2", "gemma", "mistral", "phi"):
+        field = reader.get_field(f"{key_prefix}.embedding_length")
+        if field is not None:
+            n_embd_val = int(field.parts[-1])
+            break
 
-    # Fallback: infer shape from GGUF metadata
-    n_embd_field = reader.get_field("llama.embedding_length")
-    if n_embd_field is None:
-        # Try qwen2 naming convention
-        n_embd_field = reader.get_field("qwen2.embedding_length")
+    if n_embd_val is None:
+        # Last resort: use tensor.shape
+        shape = tuple(tensor.shape)
+        if len(shape) == 2:
+            n_embd_val = min(shape)  # smaller dim is n_embd
+        else:
+            raise ValueError(
+                f"Cannot determine n_embd from {model_path}. "
+                f"tensor.shape={tuple(tensor.shape)}, data.size={data.size}"
+            )
 
-    if n_embd_field is not None:
-        n_embd_val = int(n_embd_field.parts[-1])
-        n_vocab_val = data.shape[0] // n_embd_val
-        return data.reshape(n_vocab_val, n_embd_val).astype(np.float32)
+    n_vocab_val = data.size // n_embd_val
+    if n_vocab_val * n_embd_val != data.size:
+        raise ValueError(
+            f"Data size {data.size} not divisible by n_embd={n_embd_val}"
+        )
 
-    raise ValueError(
-        f"Cannot determine embedding shape from {model_path}"
-    )
+    return data.reshape(n_vocab_val, n_embd_val)
 
 
 def set_batch_embeddings(batch_ptr: int, embeddings_ptr: int) -> None:
