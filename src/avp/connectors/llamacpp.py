@@ -465,14 +465,14 @@ class LlamaCppConnector(EngineConnector):
             sampler = self._make_sampler(lc, temperature, top_p)
             next_batch = lc.llama_batch_init(1, 0, 1)
             generated_tokens = []
-            eos_token = self._model.token_eos()
+            stop_tokens = self._get_stop_tokens()
 
             try:
                 for _ in range(max_tokens):
                     token_id = lc.llama_sampler_sample(sampler, think_ctx, -1)
                     lc.llama_sampler_accept(sampler, token_id)
 
-                    if token_id == eos_token:
+                    if token_id in stop_tokens:
                         break
 
                     generated_tokens.append(token_id)
@@ -598,7 +598,7 @@ class LlamaCppConnector(EngineConnector):
 
         generated_tokens = []
         n_cur = 1 + n_prompt  # current position (1 embd + L prompt)
-        eos_token = self._model.token_eos()
+        stop_tokens = self._get_stop_tokens()
 
         next_batch = llama_cpp.llama_batch_init(1, 0, 1)
         try:
@@ -606,7 +606,7 @@ class LlamaCppConnector(EngineConnector):
                 token_id = llama_cpp.llama_sampler_sample(sampler, ctx, -1)
                 llama_cpp.llama_sampler_accept(sampler, token_id)
 
-                if token_id == eos_token:
+                if token_id in stop_tokens:
                     break
 
                 generated_tokens.append(token_id)
@@ -634,6 +634,25 @@ class LlamaCppConnector(EngineConnector):
             n_prompt, len(generated_tokens),
         )
         return text
+
+    def _get_stop_tokens(self) -> set:
+        """Get the set of token IDs that should stop generation.
+
+        Includes EOS and chat template end markers (<|im_end|> for ChatML,
+        </s> for Llama). Without these, the model generates past the
+        answer into fake multi-turn conversations.
+        """
+        stops = {self._model.token_eos()}
+        # Try to find <|im_end|> token (ChatML)
+        try:
+            im_end = self._model.tokenize(
+                "<|im_end|>".encode("utf-8"), add_bos=False, special=True,
+            )
+            if im_end:
+                stops.add(im_end[0])
+        except (TypeError, AttributeError):
+            pass
+        return stops
 
     @staticmethod
     def _make_sampler(lc: Any, temperature: float, top_p: float) -> Any:
