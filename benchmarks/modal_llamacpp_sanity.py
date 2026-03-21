@@ -94,6 +94,71 @@ def run_test():
     # ==============================================================
     # Test 2: Think (cb_eval captures hidden state)
     # ==============================================================
+    # Test 1c: Low-level decode+sample WITHOUT cb_eval (diagnostic)
+    # ==============================================================
+    print("\n" + "=" * 60)
+    print("TEST 1c: Low-level decode+greedy WITHOUT cb_eval")
+    print("=" * 60)
+    try:
+        from llama_cpp import llama_cpp as lc
+        model_ptr = connector._model._model.model
+        ctx_params = lc.llama_context_default_params()
+        ctx_params.n_ctx = 2048
+        ctx_params.n_batch = 512
+        # NO cb_eval — vanilla context
+        diag_ctx = lc.llama_new_context_with_model(model_ptr, ctx_params)
+        tokens = connector._model.tokenize(
+            "Solve step by step: 24 * 17 + 3".encode("utf-8"), add_bos=True,
+        )
+        batch = lc.llama_batch_init(len(tokens), 0, 1)
+        for i, tok in enumerate(tokens):
+            batch.token[i] = tok
+            batch.pos[i] = i
+            batch.seq_id[i][0] = 0
+            batch.n_seq_id[i] = 1
+            batch.logits[i] = 1 if i == len(tokens) - 1 else 0
+        batch.n_tokens = len(tokens)
+        lc.llama_decode(diag_ctx, batch)
+        lc.llama_batch_free(batch)
+
+        # Greedy sample 50 tokens
+        sampler_params = lc.llama_sampler_chain_default_params()
+        sampler = lc.llama_sampler_chain_init(sampler_params)
+        greedy_s = lc.llama_sampler_init_greedy()
+        lc.llama_sampler_chain_add(sampler, greedy_s)
+
+        gen_tokens = []
+        eos = connector._model.token_eos()
+        n_cur = len(tokens)
+        next_batch = lc.llama_batch_init(1, 0, 1)
+        for _ in range(50):
+            tid = lc.llama_sampler_sample(sampler, diag_ctx, -1)
+            lc.llama_sampler_accept(sampler, tid)
+            if tid == eos:
+                break
+            gen_tokens.append(tid)
+            next_batch.token[0] = tid
+            next_batch.pos[0] = n_cur
+            next_batch.seq_id[0][0] = 0
+            next_batch.n_seq_id[0] = 1
+            next_batch.logits[0] = 1
+            next_batch.n_tokens = 1
+            n_cur += 1
+            lc.llama_decode(diag_ctx, next_batch)
+        lc.llama_batch_free(next_batch)
+        lc.llama_sampler_free(sampler)
+        lc.llama_free(diag_ctx)
+
+        diag_text = connector._model.detokenize(gen_tokens).decode("utf-8", errors="replace")
+        print(f"  Low-level output: {diag_text[:200]!r}")
+        results["diag_no_cb"] = {"text": diag_text[:200], "ok": len(diag_text) > 5}
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        results["diag_no_cb"] = {"ok": False, "error": str(e)}
+
+    # ==============================================================
     print("\n" + "=" * 60)
     print("TEST 2: Think (hidden state extraction via cb_eval)")
     print("=" * 60)
