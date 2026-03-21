@@ -20,6 +20,7 @@ image = (
         "torch>=2.0",
         "numpy>=1.24",
         "huggingface-hub>=0.20",
+        "gguf>=0.6",
     )
     .pip_install(
         "git+https://github.com/VectorArc/avp-python.git@main",
