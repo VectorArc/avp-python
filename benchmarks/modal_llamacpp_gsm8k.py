@@ -119,6 +119,12 @@ def run_benchmark(n: int = 50):
     for i, q in enumerate(questions):
         # Think
         solve_prompt = f"Solve step by step: {q}"
+        if i == 0:
+            # Debug: check what tokens think() actually uses
+            test_tokens = connector._apply_chat_template(solve_prompt)
+            raw = connector._model.detokenize(test_tokens).decode("utf-8", errors="replace")
+            print(f"    [template debug] first 200 chars: {raw[:200]!r}")
+            print(f"    [template debug] token count: {len(test_tokens)}")
         context = connector.think(solve_prompt, steps=0)
 
         # Generate — same prompt, continue from enriched KV
