@@ -14,16 +14,13 @@ app = modal.App("avp-llamacpp-sanity")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git")
+    .apt_install("git", "cmake", "build-essential")
     .pip_install(
+        "llama-cpp-python>=0.3",
         "torch>=2.0",
         "numpy>=1.24",
         "huggingface-hub>=0.20",
         "gguf>=0.6",
-    )
-    .pip_install(
-        "llama-cpp-python>=0.3",
-        extra_index_url="https://abetlen.github.io/llama-cpp-python/whl/cu124",
     )
     .pip_install(
         "git+https://github.com/VectorArc/avp-python.git@main",
@@ -32,7 +29,7 @@ image = (
 )
 
 
-@app.function(image=image, gpu="A100-40GB", timeout=1800)
+@app.function(image=image, cpu=4, memory=8192, timeout=1800)
 def run_test():
     import time
 
@@ -61,7 +58,7 @@ def run_test():
     from avp.connectors.llamacpp import LlamaCppConnector
 
     connector = LlamaCppConnector.from_pretrained(
-        model_path, n_ctx=2048, n_gpu_layers=-1, verbose=False,
+        model_path, n_ctx=2048, n_gpu_layers=0, verbose=False,
     )
 
     t0 = time.monotonic()
