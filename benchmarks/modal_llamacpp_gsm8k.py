@@ -119,14 +119,14 @@ def run_benchmark(n: int = 50):
     for i, q in enumerate(questions):
         # Think
         context = connector.think(
-            f"Solve step by step: {q}",
-            steps=0,  # No latent — test KV reuse only
+            f"Analyze this math problem carefully: {q}",
+            steps=10,
         )
 
         # Generate
         if context is not None:
             answer = connector.generate(
-                "",  # Empty = continue from think KV
+                f"Solve step by step: {q}",
                 context=context,
                 max_tokens=2048,
                 temperature=0.0,

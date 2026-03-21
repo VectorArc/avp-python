@@ -179,8 +179,9 @@ class LlamaCppConnector(EngineConnector):
             logger.warning("think(): Failed to create context")
             return None
 
-        # Tokenize
-        tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
+        # Apply chat template and tokenize. Without the template,
+        # instruct models don't know when to start/stop generating.
+        tokens = self._apply_chat_template(prompt)
         n_tokens = len(tokens)
 
         # Step 0: Initial forward pass on prompt tokens
@@ -284,6 +285,28 @@ class LlamaCppConnector(EngineConnector):
         )
 
         return context
+
+    def _apply_chat_template(self, prompt: str) -> list:
+        """Apply the model's chat template and tokenize.
+
+        Wraps the prompt in the instruct format (e.g.,
+        ``<|im_start|>user\\n...prompt...<|im_end|>\\n<|im_start|>assistant\\n``
+        for Qwen/ChatML models). Without this, the model doesn't know
+        when to start or stop generating.
+        """
+        try:
+            # Use llama-cpp-python's built-in chat handler to format
+            formatted = self._model.tokenize(
+                self._model._model.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                ).encode("utf-8"),
+                add_bos=False,  # Template includes BOS
+            )
+            return formatted
+        except (AttributeError, TypeError):
+            # Fallback: raw tokenization with BOS
+            return self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
 
     @staticmethod
     def _get_embeddings(lc: Any, ctx: Any, n_embd: int) -> Any:
@@ -398,7 +421,7 @@ class LlamaCppConnector(EngineConnector):
             n_cur = n_past
 
             if prompt:
-                tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=False)
+                tokens = self._apply_chat_template(prompt)
                 if tokens:
                     batch = lc.llama_batch_init(len(tokens), 0, 1)
                     try:
