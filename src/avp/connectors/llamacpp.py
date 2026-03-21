@@ -174,7 +174,7 @@ class LlamaCppConnector(EngineConnector):
         from llama_cpp import llama_cpp as lc
 
         from ..context import AVPContext
-        from ..realign import normalize_to_target
+        from ..realign import normalize_to_target, project_to_embedding_space
 
         # Get the raw model pointer
         model_ptr = self._model._model.model
@@ -225,10 +225,18 @@ class LlamaCppConnector(EngineConnector):
             if hidden.dim() == 2:
                 hidden = hidden[-1:, :]  # [1, n_embd]
 
-            # Compute target norm from the model's embedding table.
-            # For GGUF quantized models, we use the hidden state norm
-            # as an approximation (the actual embed_tokens is quantized).
-            target_norm = hidden.norm(dim=-1).mean().detach()
+            # Load embedding weights from GGUF for proper projection.
+            # Tied-weight models (most GGUF) need project_to_embedding_space
+            # (hidden → logits → softmax → soft embed), not just normalization.
+            embed_weight = None
+            try:
+                from ._llamacpp_compat import extract_gguf_embedding_weights
+                emb_np = extract_gguf_embedding_weights(self._model_path)
+                embed_weight = torch.from_numpy(emb_np).float()
+                target_norm = embed_weight.norm(dim=1).mean().detach()
+            except Exception as e:
+                logger.warning("Cannot load embed weights for projection: %s", e)
+                target_norm = hidden.norm(dim=-1).mean().detach()
 
             n_past = n_tokens  # KV-cache position counter
             steps_completed = 0
@@ -236,10 +244,15 @@ class LlamaCppConnector(EngineConnector):
             # Steps 1..N: latent thinking loop
             for step in range(steps):
                 # Project hidden state back to embedding space.
-                # For llama.cpp, we use normalize_to_target as the
-                # projection (since we don't have access to the embedding
-                # weight matrix for softmax projection).
-                projected = normalize_to_target(hidden, target_norm)
+                # For tied-weight models: softmax projection through vocabulary
+                # For untied: normalize to target_norm (fallback)
+                if embed_weight is not None:
+                    projected = project_to_embedding_space(
+                        hidden, embed_weight, temperature=1.0,
+                    )
+                    projected = normalize_to_target(projected, target_norm)
+                else:
+                    projected = normalize_to_target(hidden, target_norm)
                 proj_np = projected.squeeze(0).numpy().astype(np.float32)
 
                 # Inject projected embedding via batch.embd
