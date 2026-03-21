@@ -198,29 +198,37 @@ def extract_gguf_embedding_weights(model_path: str) -> Any:
         )
 
     reader = GGUFReader(model_path)
-    tensor = reader.get_tensor("token_embd.weight")
+
+    # Find token_embd.weight by iterating tensors (get_tensor takes int index)
+    tensor = None
+    for t in reader.tensors:
+        if t.name == "token_embd.weight":
+            tensor = t
+            break
+
     if tensor is None:
+        available = [t.name for t in reader.tensors[:10]]
         raise ValueError(
             f"token_embd.weight not found in {model_path}. "
-            "Available tensors can be listed with gguf.GGUFReader."
+            f"Available tensors (first 10): {available}"
         )
 
-    # The gguf package returns dequantized data via tensor.data
-    data = tensor.data
-    if not isinstance(data, np.ndarray):
-        data = np.array(data, dtype=np.float32)
+    # tensor.data is dequantized by the gguf package
+    data = np.array(tensor.data, dtype=np.float32)
+    shape = tuple(tensor.shape)
 
-    # Shape: tensor.shape gives [vocab_size, n_embd]
-    shape = tensor.shape
     if len(shape) == 2:
-        return data.reshape(shape).astype(np.float32)
+        return data.reshape(shape[1], shape[0]).astype(np.float32)
 
-    # Fallback: try to infer shape from metadata
-    n_embd = reader.get_field("llama.embedding_length")
-    n_vocab = reader.get_field("llama.vocab_size")
-    if n_embd is not None and n_vocab is not None:
-        n_embd_val = int(n_embd.parts[-1])
-        n_vocab_val = int(n_vocab.parts[-1])
+    # Fallback: infer shape from GGUF metadata
+    n_embd_field = reader.get_field("llama.embedding_length")
+    if n_embd_field is None:
+        # Try qwen2 naming convention
+        n_embd_field = reader.get_field("qwen2.embedding_length")
+
+    if n_embd_field is not None:
+        n_embd_val = int(n_embd_field.parts[-1])
+        n_vocab_val = data.shape[0] // n_embd_val
         return data.reshape(n_vocab_val, n_embd_val).astype(np.float32)
 
     raise ValueError(
