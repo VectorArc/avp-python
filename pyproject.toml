@@ -22,8 +22,6 @@ dependencies = [
     "numpy>=1.24",
     "protobuf>=4.21",
     "zstandard>=0.21",
-    "torch>=2.0",
-    "transformers>=4.36",
 ]
 
 [project.urls]
@@ -35,18 +33,19 @@ Changelog = "https://github.com/VectorArc/avp-python/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # User-facing extras
+hf = ["torch>=2.0", "transformers>=4.36"]
 vllm = ["vllm>=0.17.0,<0.19.0", "safetensors>=0.4", "huggingface-hub>=0.20"]
-langchain = ["langchain-core>=1.0"]
-crewai = ["crewai>=0.86"]
-autogen = ["autogen-core>=0.4"]
 llamacpp = ["llama-cpp-python>=0.3", "gguf>=0.6"]
 ollama = ["llama-cpp-python>=0.3", "gguf>=0.6"]
+langchain = ["avp[hf]", "langchain-core>=1.0"]
+crewai = ["avp[hf]", "crewai>=0.86"]
+autogen = ["avp[hf]", "autogen-core>=0.4"]
 transport = ["httpx[http2]>=0.25"]
 server = ["avp[transport]", "fastapi>=0.104", "uvicorn[standard]>=0.24"]
 # Development
-benchmark = ["datasets>=2.14"]
+benchmark = ["avp[hf]", "datasets>=2.14"]
 dev = [
-    "avp[transport,server]",
+    "avp[hf,transport,server]",
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "ruff>=0.1",

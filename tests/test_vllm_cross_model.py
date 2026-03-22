@@ -352,9 +352,14 @@ class TestStubCrossModelProjection:
         projected = stub._project_cross_model_stub(hidden)
         assert projected is not None
 
-        proj_norm = projected.float().norm(dim=-1)
-        target_norm = stub._avp_map.target_norm.float()
-        assert torch.allclose(proj_norm, target_norm, atol=0.1)
+        import numpy as np
+        if isinstance(projected, np.ndarray):
+            proj_norm = float(np.linalg.norm(projected))
+        else:
+            proj_norm = float(projected.float().norm().item())
+        tn = stub._avp_map.target_norm
+        target_norm = float(tn.item()) if hasattr(tn, "item") else float(tn)
+        assert abs(proj_norm - target_norm) < 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +500,11 @@ class TestEndToEndCrossModel:
             loaded = load_projected_embedding(store_dir, store_key)
             assert loaded is not None
             assert loaded.shape[-1] == tgt_hidden
-            assert torch.allclose(loaded, projected.squeeze(0))
+            import numpy as np
+            loaded_np = loaded.numpy() if hasattr(loaded, "numpy") else loaded
+            proj_np = projected.squeeze(0)
+            proj_np = proj_np.numpy() if hasattr(proj_np, "numpy") else proj_np
+            assert np.allclose(loaded_np, proj_np, atol=1e-5)
 
     def test_vocab_mediated_same_tokenizer_pipeline(self):
         """Same tokenizer uses vocab-mediated projection (zero calibration)."""

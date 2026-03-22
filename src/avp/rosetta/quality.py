@@ -83,16 +83,17 @@ def _compute_effective_rank_ratio(hidden_states: Any) -> float:
     near 0.0 means it's concentrated in few dimensions.
 
     Args:
-        hidden_states: Tensor of shape [seq_len, D] or [1, seq_len, D].
+        hidden_states: Array-like of shape [seq_len, D] or [1, seq_len, D].
 
     Returns:
         Ratio in [0, 1] where higher means more spread.
     """
-    import torch
+    import numpy as np
 
-    t = hidden_states
-    if not isinstance(t, torch.Tensor):
-        t = torch.tensor(t, dtype=torch.float32)
+    if hasattr(hidden_states, "detach"):
+        t = hidden_states.detach().cpu().float().numpy()
+    else:
+        t = np.asarray(hidden_states, dtype=np.float32)
 
     # Squeeze batch dim if present: [1, seq, D] → [seq, D]
     if t.ndim == 3:
@@ -102,7 +103,7 @@ def _compute_effective_rank_ratio(hidden_states: Any) -> float:
         return 0.0
 
     # SVD on [seq_len, D]
-    s = torch.linalg.svdvals(t.float())
+    s = np.linalg.svd(t, compute_uv=False)
 
     # Avoid division by zero
     s_sum = s.sum()
@@ -113,11 +114,11 @@ def _compute_effective_rank_ratio(hidden_states: Any) -> float:
     p = s / s_sum
 
     # Shannon entropy of the distribution
-    log_p = torch.log(p + 1e-12)
-    entropy = -(p * log_p).sum().item()
+    log_p = np.log(p + 1e-12)
+    entropy = float(-(p * log_p).sum())
 
     # Maximum entropy = log(min(seq_len, D))
-    max_entropy = float(torch.log(torch.tensor(min(t.shape[0], t.shape[1]), dtype=torch.float32)).item())
+    max_entropy = float(np.log(min(t.shape[0], t.shape[1])))
 
     if max_entropy == 0:
         return 0.0

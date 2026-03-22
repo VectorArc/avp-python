@@ -85,7 +85,7 @@ def _compute_vocab_overlap(
     Returns (src_indices, tgt_indices, shared_tokens) sorted by token string,
     or None if overlap count is below min_overlap.
     """
-    torch = _require_torch()
+    import numpy as np
 
     if _count_vocab_overlap(source_tokenizer, target_tokenizer, min_overlap) == 0:
         return None
@@ -98,8 +98,8 @@ def _compute_vocab_overlap(
     tgt_ids = [tgt_vocab[t] for t in shared_tokens]
 
     return (
-        torch.tensor(src_ids, dtype=torch.long),
-        torch.tensor(tgt_ids, dtype=torch.long),
+        np.array(src_ids, dtype=np.intp),
+        np.array(tgt_ids, dtype=np.intp),
         shared_tokens,
     )
 

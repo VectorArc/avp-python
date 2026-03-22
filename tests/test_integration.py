@@ -147,7 +147,10 @@ def test_full_pipeline_in_process_tied(tiny_tied_connector):
 
     target_norm = compute_target_norm(connector.model, device="cpu")
     normalized_hidden = normalize_to_target(last_hidden, target_norm)
-    inputs_embeds = normalized_hidden.unsqueeze(1)  # [B, 1, D]
+    # normalize_to_target returns numpy — convert to torch for model forward
+    inputs_embeds = torch.from_numpy(normalized_hidden).unsqueeze(1).to(
+        dtype=connector.model.dtype
+    )  # [B, 1, D]
 
     # Forward pass with inputs_embeds + restored KV-cache
     total_len = inputs_embeds.shape[1] + kv_header.seq_len
@@ -241,7 +244,9 @@ def test_full_pipeline_in_process_untied(tiny_untied_connector):
 
     # Agent B: forward pass with restored KV-cache + realigned hidden state
     dynamic_cache = legacy_to_dynamic_cache(restored_kv)
-    inputs_embeds = aligned_hidden.unsqueeze(1)  # [B, 1, D]
+    inputs_embeds = torch.from_numpy(aligned_hidden).unsqueeze(1).to(
+        dtype=connector.model.dtype
+    )  # [B, 1, D]
 
     total_len = inputs_embeds.shape[1] + kv_header.seq_len
     attention_mask = torch.ones((1, total_len), dtype=torch.long)
@@ -321,7 +326,9 @@ def test_latent_steps_pipeline(tiny_tied_connector):
     last_hidden, _, _ = connector.extract_hidden_state(input_ids)
     target_norm = compute_target_norm(connector.model, device="cpu")
     normalized = normalize_to_target(last_hidden, target_norm)
-    inputs_embeds = normalized.unsqueeze(1)  # [B, 1, D]
+    inputs_embeds = torch.from_numpy(normalized).unsqueeze(1).to(
+        dtype=connector.model.dtype
+    )  # [B, 1, D]
 
     total_len = inputs_embeds.shape[1] + kv_header.seq_len
     attention_mask = torch.ones((1, total_len), dtype=torch.long)

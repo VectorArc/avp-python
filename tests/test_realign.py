@@ -110,6 +110,7 @@ def test_compute_realignment_matrix(tiny_model):
 
 
 def test_apply_realignment(tiny_model):
+    import numpy as np
     import torch
     from avp.realign import apply_realignment, compute_realignment_matrix
 
@@ -119,13 +120,13 @@ def test_apply_realignment(tiny_model):
     hidden = torch.randn(2, 8)  # [batch, hidden_dim]
     aligned = apply_realignment(hidden, w_realign, target_norm)
 
-    assert aligned.shape == hidden.shape
-    assert aligned.dtype == hidden.dtype
+    assert isinstance(aligned, np.ndarray)
+    assert aligned.shape == (2, 8)
 
     # Aligned vectors should have norm close to target_norm
-    norms = aligned.norm(dim=-1)
+    norms = np.linalg.norm(aligned, axis=-1)
     for n in norms:
-        assert abs(n.item() - target_norm.item()) < 0.01
+        assert abs(float(n) - target_norm.item()) < 0.01
 
 
 def test_compute_target_norm(tiny_model):
@@ -142,6 +143,7 @@ def test_compute_target_norm(tiny_model):
 
 
 def test_normalize_to_target(tiny_model):
+    import numpy as np
     import torch
     from avp.realign import compute_target_norm, normalize_to_target
 
@@ -151,26 +153,27 @@ def test_normalize_to_target(tiny_model):
     hidden = torch.randn(2, 8) * 50.0  # norms ~50+
     normalized = normalize_to_target(hidden, target_norm)
 
-    assert normalized.shape == hidden.shape
-    assert normalized.dtype == hidden.dtype
+    assert isinstance(normalized, np.ndarray)
+    assert normalized.shape == (2, 8)
 
     # Normalized vectors should have norm close to target_norm
-    norms = normalized.norm(dim=-1)
+    norms = np.linalg.norm(normalized, axis=-1)
     for n in norms:
-        assert abs(n.item() - target_norm.item()) < 0.01
+        assert abs(float(n) - target_norm.item()) < 0.01
 
 
 def test_normalize_preserves_direction():
-    import torch
+    import numpy as np
     from avp.realign import normalize_to_target
 
-    hidden = torch.tensor([[3.0, 4.0]])  # norm = 5
-    target_norm = torch.tensor(1.0)
+    hidden = np.array([[3.0, 4.0]], dtype=np.float32)  # norm = 5
+    target_norm = 1.0
     normalized = normalize_to_target(hidden, target_norm)
 
-    # Direction should be preserved
-    cos_sim = torch.nn.functional.cosine_similarity(hidden, normalized)
-    assert cos_sim.item() > 0.999
+    # Direction should be preserved (cosine similarity ≈ 1.0)
+    dot = (hidden * normalized).sum()
+    cos_sim = dot / (np.linalg.norm(hidden) * np.linalg.norm(normalized))
+    assert float(cos_sim) > 0.999
 
 
 def test_save_load_realignment_matrix(tiny_model):

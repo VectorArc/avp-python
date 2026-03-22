@@ -20,7 +20,7 @@ def _require_torch():
         return torch
     except ImportError:
         raise ImportError(
-            "torch is required for KV-cache operations. pip install avp should include this dependency"
+            "torch is required for KV-cache operations. Install with: pip install avp[hf]"
         )
 
 
@@ -248,7 +248,7 @@ def legacy_to_dynamic_cache(
     except ImportError:
         raise ImportError(
             "transformers >= 4.36 required for DynamicCache. "
-            "pip install avp should include this dependency"
+            "Install with: pip install avp[hf]"
         )
 
     # transformers 4.x: from_legacy_cache class method

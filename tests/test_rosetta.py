@@ -128,6 +128,7 @@ class TestProjection:
 
     def test_projection_norm(self):
         """Output vectors have correct target norm."""
+        import numpy as np
         from avp.rosetta.project import apply_cross_model_projection
 
         hidden = torch.randn(4, 64)
@@ -135,12 +136,14 @@ class TestProjection:
         target_norm = torch.tensor(7.5)
 
         result = apply_cross_model_projection(hidden, w_map, target_norm)
-        norms = result.norm(dim=-1)
+        assert isinstance(result, np.ndarray)
+        norms = np.linalg.norm(result, axis=-1)
         for n in norms:
-            assert abs(n.item() - 7.5) < 0.01
+            assert abs(float(n) - 7.5) < 0.01
 
     def test_projection_with_bias(self):
         """Bias is correctly applied."""
+        import numpy as np
         from avp.rosetta.project import apply_cross_model_projection
 
         hidden = torch.randn(2, 64)
@@ -152,10 +155,11 @@ class TestProjection:
         assert result.shape == (2, 128)
         # Result should differ from no-bias version
         result_no_bias = apply_cross_model_projection(hidden, w_map, target_norm)
-        assert not torch.allclose(result, result_no_bias)
+        assert not np.allclose(result, result_no_bias)
 
     def test_projection_preserves_dtype(self):
-        """Output dtype matches input dtype."""
+        """Output is always float32 numpy (projection normalizes to float32)."""
+        import numpy as np
         from avp.rosetta.project import apply_cross_model_projection
 
         hidden = torch.randn(2, 64, dtype=torch.float16)
@@ -163,7 +167,8 @@ class TestProjection:
         target_norm = torch.tensor(5.0)
 
         result = apply_cross_model_projection(hidden, w_map, target_norm)
-        assert result.dtype == torch.float16
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == np.float32
 
     def test_projection_square_matrix(self):
         """Works with square (same-dim) projection matrix."""
@@ -440,6 +445,7 @@ class TestVocabMediatedProjection:
 
     def test_vocab_mediated_cosine_sim(self):
         """Output has high cosine similarity to nearest target embedding (>0.9)."""
+        import numpy as np
         from avp.rosetta.project import vocabulary_mediated_projection
 
         vocab_size = 256
@@ -451,15 +457,16 @@ class TestVocabMediatedProjection:
         hidden = source_lm_head[42].unsqueeze(0)  # [1, D_src] — looks like token 42
         result = vocabulary_mediated_projection(hidden, source_lm_head, target_embed)
 
-        # Result should be close to target_embed[42] since softmax
-        # should peak at token 42
-        result_norm = result / result.norm(dim=-1, keepdim=True)
-        tgt_norm = target_embed[42:43] / target_embed[42:43].norm(dim=-1, keepdim=True)
-        cos_sim = (result_norm * tgt_norm).sum().item()
+        # Result should be close to target_embed[42] since softmax should peak at token 42
+        tgt_np = target_embed[42:43].numpy()
+        r_norm = result / np.maximum(np.linalg.norm(result, axis=-1, keepdims=True), 1e-6)
+        t_norm = tgt_np / np.maximum(np.linalg.norm(tgt_np, axis=-1, keepdims=True), 1e-6)
+        cos_sim = float((r_norm * t_norm).sum())
         assert cos_sim > 0.9, f"Cosine similarity {cos_sim:.3f} should be > 0.9"
 
     def test_vocab_mediated_matches_same_model(self):
         """When source==target weights, matches project_to_embedding_space()."""
+        import numpy as np
         from avp.realign import project_to_embedding_space
         from avp.rosetta.project import vocabulary_mediated_projection
 
@@ -476,10 +483,12 @@ class TestVocabMediatedProjection:
             hidden, embed_weight, temperature=1.0
         )
 
-        assert torch.allclose(result_vocab, result_same, atol=1e-5)
+        # Both return numpy now
+        assert np.allclose(result_vocab, result_same, atol=1e-5)
 
     def test_vocab_mediated_preserves_dtype(self):
-        """Output dtype matches input dtype."""
+        """Output is always float32 numpy."""
+        import numpy as np
         from avp.rosetta.project import vocabulary_mediated_projection
 
         hidden = torch.randn(2, 64, dtype=torch.float16)
@@ -487,7 +496,8 @@ class TestVocabMediatedProjection:
         target_embed = torch.randn(256, 128)
 
         result = vocabulary_mediated_projection(hidden, source_lm_head, target_embed)
-        assert result.dtype == torch.float16
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == np.float32
 
     def test_vocab_mediated_return_metrics(self):
         """return_metrics=True returns (projected, metrics_dict) with entropy and max_prob."""
@@ -509,7 +519,8 @@ class TestVocabMediatedProjection:
         assert (metrics["max_prob"] >= 0).all() and (metrics["max_prob"] <= 1).all()
 
     def test_vocab_mediated_return_metrics_false_unchanged(self):
-        """Default return_metrics=False returns just the tensor."""
+        """Default return_metrics=False returns just a numpy array."""
+        import numpy as np
         from avp.rosetta.project import vocabulary_mediated_projection
 
         hidden = torch.randn(2, 64)
@@ -517,7 +528,7 @@ class TestVocabMediatedProjection:
         target_embed = torch.randn(256, 128)
 
         result = vocabulary_mediated_projection(hidden, source_lm_head, target_embed)
-        assert isinstance(result, torch.Tensor)
+        assert isinstance(result, np.ndarray)
         assert result.shape == (2, 128)
 
     def test_entropy_peaked_vs_flat(self):
@@ -1130,7 +1141,8 @@ class TestVocabOverlap:
         assert src_indices.shape == (128,)
         assert tgt_indices.shape == (128,)
         # Both tokenizers assign the same IDs to shared tokens
-        assert torch.equal(src_indices, tgt_indices)
+        import numpy as np
+        assert np.array_equal(src_indices, tgt_indices)
 
     def test_compute_vocab_overlap_below_threshold(self):
         """Returns None when overlap < min_overlap."""
@@ -1161,7 +1173,8 @@ class TestVocabOverlap:
         assert result.shape == (2, D_tgt)
 
     def test_vocab_overlap_projection_preserves_dtype(self):
-        """float16 in → float16 out."""
+        """Output is always float32 numpy."""
+        import numpy as np
         from avp.rosetta.project import vocab_overlap_projection
 
         D_src, D_tgt, N_shared, V_src = 64, 128, 100, 256
@@ -1171,7 +1184,8 @@ class TestVocabOverlap:
         src_indices = torch.randperm(V_src)[:N_shared]
 
         result = vocab_overlap_projection(hidden, w_src, w_tgt, src_indices)
-        assert result.dtype == torch.float16
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == np.float32
 
     def test_vocab_overlap_full_overlap_equals_vocab_mediated(self):
         """When overlap is 100%, result must match vocabulary_mediated_projection."""
@@ -1188,7 +1202,8 @@ class TestVocabOverlap:
         result_overlap = vocab_overlap_projection(hidden, w_src, w_tgt, src_indices)
         result_mediated = vocabulary_mediated_projection(hidden, w_src, w_tgt)
 
-        assert torch.allclose(result_overlap, result_mediated, atol=1e-5)
+        import numpy as np
+        assert np.allclose(result_overlap, result_mediated, atol=1e-5)
 
     def test_vocab_overlap_return_metrics(self):
         """return_metrics=True returns (projected, metrics_dict) with entropy and max_prob."""
@@ -1274,8 +1289,9 @@ class TestVocabOverlap:
         assert loaded.method == ProjectionMethod.VOCAB_OVERLAP
         assert loaded.overlap_count == avp_map.overlap_count
         assert loaded.overlap_ratio == pytest.approx(avp_map.overlap_ratio)
-        assert torch.equal(loaded.src_indices, avp_map.src_indices)
-        assert torch.equal(loaded.tgt_indices, avp_map.tgt_indices)
+        import numpy as np
+        assert np.array_equal(loaded.src_indices, avp_map.src_indices)
+        assert np.array_equal(loaded.tgt_indices, avp_map.tgt_indices)
         assert loaded.w_map.shape == avp_map.w_map.shape
 
     def test_registry_load_backward_compat(self, tmp_path):
@@ -1480,3 +1496,223 @@ class TestTransferQuality:
         assert result.recommend_latent is False
         assert result.effective_rank_ratio is not None
         assert result.effective_rank_ratio > 0.5
+
+
+# ---------------------------------------------------------------------------
+# Tests: numpy-only projection (no torch required)
+# ---------------------------------------------------------------------------
+
+
+class TestNumpyOnlyProjection:
+    """Verify projection functions work with pure numpy inputs (no torch)."""
+
+    def test_vocabulary_mediated_numpy_inputs(self):
+        """vocabulary_mediated_projection works with numpy arrays only."""
+        import numpy as np
+        from avp.rosetta.project import vocabulary_mediated_projection
+
+        rng = np.random.RandomState(42)
+        hidden = rng.randn(2, 64).astype(np.float32)
+        w_src = rng.randn(256, 64).astype(np.float32)
+        w_tgt = rng.randn(256, 128).astype(np.float32)
+
+        result = vocabulary_mediated_projection(hidden, w_src, w_tgt, target_norm=5.0)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (2, 128)
+        assert result.dtype == np.float32
+        norms = np.linalg.norm(result, axis=-1)
+        for n in norms:
+            assert abs(float(n) - 5.0) < 0.01
+
+    def test_vocab_overlap_numpy_inputs(self):
+        """vocab_overlap_projection works with numpy arrays only."""
+        import numpy as np
+        from avp.rosetta.project import vocab_overlap_projection
+
+        rng = np.random.RandomState(42)
+        hidden = rng.randn(2, 64).astype(np.float32)
+        w_src = rng.randn(256, 64).astype(np.float32)
+        w_tgt = rng.randn(100, 128).astype(np.float32)
+        idx = np.arange(100, dtype=np.intp)
+
+        result = vocab_overlap_projection(hidden, w_src, w_tgt, idx, target_norm=5.0)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (2, 128)
+
+    def test_apply_cross_model_projection_numpy_inputs(self):
+        """apply_cross_model_projection works with numpy arrays only."""
+        import numpy as np
+        from avp.rosetta.project import apply_cross_model_projection
+
+        rng = np.random.RandomState(42)
+        hidden = rng.randn(4, 64).astype(np.float32)
+        w_map = rng.randn(64, 128).astype(np.float32)
+
+        result = apply_cross_model_projection(hidden, w_map, target_norm=7.5)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (4, 128)
+        norms = np.linalg.norm(result, axis=-1)
+        for n in norms:
+            assert abs(float(n) - 7.5) < 0.01
+
+    def test_normalize_to_target_numpy_inputs(self):
+        """normalize_to_target works with numpy arrays only."""
+        import numpy as np
+        from avp.realign import normalize_to_target
+
+        hidden = np.array([[3.0, 4.0], [6.0, 8.0]], dtype=np.float32)
+        result = normalize_to_target(hidden, target_norm=1.0)
+        assert isinstance(result, np.ndarray)
+        norms = np.linalg.norm(result, axis=-1)
+        for n in norms:
+            assert abs(float(n) - 1.0) < 0.01
+
+    def test_project_to_embedding_space_numpy_inputs(self):
+        """project_to_embedding_space works with numpy arrays only."""
+        import numpy as np
+        from avp.realign import project_to_embedding_space
+
+        rng = np.random.RandomState(42)
+        hidden = rng.randn(2, 64).astype(np.float32)
+        embed = rng.randn(256, 64).astype(np.float32)
+
+        result = project_to_embedding_space(hidden, embed, temperature=1.0)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (2, 64)
+
+    def test_apply_realignment_numpy_inputs(self):
+        """apply_realignment works with numpy arrays only."""
+        import numpy as np
+        from avp.realign import apply_realignment
+
+        rng = np.random.RandomState(42)
+        hidden = rng.randn(2, 64).astype(np.float32)
+        w_realign = rng.randn(64, 64).astype(np.float32)
+
+        result = apply_realignment(hidden, w_realign, target_norm=5.0)
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (2, 64)
+        norms = np.linalg.norm(result, axis=-1)
+        for n in norms:
+            assert abs(float(n) - 5.0) < 0.01
+
+    def test_return_metrics_are_numpy(self):
+        """Metrics returned by projection functions are numpy arrays."""
+        import numpy as np
+        from avp.rosetta.project import vocabulary_mediated_projection
+
+        rng = np.random.RandomState(42)
+        hidden = rng.randn(2, 64).astype(np.float32)
+        w_src = rng.randn(256, 64).astype(np.float32)
+        w_tgt = rng.randn(256, 128).astype(np.float32)
+
+        projected, metrics = vocabulary_mediated_projection(
+            hidden, w_src, w_tgt, return_metrics=True,
+        )
+        assert isinstance(projected, np.ndarray)
+        assert isinstance(metrics["entropy"], np.ndarray)
+        assert isinstance(metrics["max_prob"], np.ndarray)
+        assert isinstance(metrics["nearest_cos_sim"], np.ndarray)
+
+    def test_softmax_numerical_stability(self):
+        """Softmax handles large logit values without overflow."""
+        import numpy as np
+        from avp.rosetta.project import _softmax
+
+        # Large positive values — should not overflow
+        x = np.array([[1000.0, 1001.0, 999.0]], dtype=np.float32)
+        result = _softmax(x)
+        assert np.isfinite(result).all()
+        assert abs(float(result.sum()) - 1.0) < 1e-6
+
+        # Large negative values — should not underflow to NaN
+        x = np.array([[-1000.0, -1001.0, -999.0]], dtype=np.float32)
+        result = _softmax(x)
+        assert np.isfinite(result).all()
+        assert abs(float(result.sum()) - 1.0) < 1e-6
+
+    def test_contiguous_output(self):
+        """Projection outputs are C-contiguous (safe for torch.from_numpy)."""
+        import numpy as np
+        from avp.rosetta.project import vocabulary_mediated_projection
+
+        rng = np.random.RandomState(42)
+        hidden = rng.randn(2, 64).astype(np.float32)
+        w_src = rng.randn(256, 64).astype(np.float32)
+        w_tgt = rng.randn(256, 128).astype(np.float32)
+
+        result = vocabulary_mediated_projection(hidden, w_src, w_tgt)
+        assert result.flags["C_CONTIGUOUS"]
+
+
+@requires_torch
+class TestNumpyTorchBoundary:
+    """Verify torch→numpy→torch round-trip at connector boundaries."""
+
+    def test_to_numpy_from_cuda_float16(self):
+        """_to_numpy handles float16 tensors correctly."""
+        from avp.rosetta.project import _to_numpy
+        import numpy as np
+
+        t = torch.randn(2, 64, dtype=torch.float16)
+        result = _to_numpy(t)
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == np.float32
+        assert result.shape == (2, 64)
+
+    def test_to_numpy_from_bfloat16(self):
+        """_to_numpy handles bfloat16 tensors correctly."""
+        from avp.rosetta.project import _to_numpy
+        import numpy as np
+
+        t = torch.randn(2, 64, dtype=torch.bfloat16)
+        result = _to_numpy(t)
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == np.float32
+
+    def test_to_numpy_from_requires_grad(self):
+        """_to_numpy handles tensors with requires_grad=True."""
+        from avp.rosetta.project import _to_numpy
+        import numpy as np
+
+        t = torch.randn(2, 64, requires_grad=True)
+        result = _to_numpy(t)
+        assert isinstance(result, np.ndarray)
+
+    def test_to_numpy_passthrough_numpy(self):
+        """_to_numpy is a no-copy passthrough for numpy arrays."""
+        from avp.rosetta.project import _to_numpy
+        import numpy as np
+
+        arr = np.ones((2, 64), dtype=np.float32)
+        result = _to_numpy(arr)
+        assert result is arr or np.shares_memory(result, arr)
+
+    def test_projection_torch_in_numpy_out(self):
+        """Projection accepts torch tensors and returns numpy."""
+        import numpy as np
+        from avp.rosetta.project import vocabulary_mediated_projection
+
+        hidden = torch.randn(2, 64)
+        w_src = torch.randn(256, 64)
+        w_tgt = torch.randn(256, 128)
+
+        result = vocabulary_mediated_projection(hidden, w_src, w_tgt)
+        assert isinstance(result, np.ndarray)
+        assert result.dtype == np.float32
+
+    def test_torch_numpy_torch_roundtrip_preserves_values(self):
+        """torch→numpy projection→torch roundtrip is numerically faithful."""
+        import numpy as np
+        from avp.rosetta.project import vocabulary_mediated_projection
+
+        hidden = torch.randn(1, 64)
+        w_src = torch.randn(256, 64)
+        w_tgt = torch.randn(256, 128)
+
+        result_np = vocabulary_mediated_projection(hidden, w_src, w_tgt)
+        result_torch = torch.from_numpy(np.ascontiguousarray(result_np))
+
+        assert result_torch.shape == (1, 128)
+        assert result_torch.dtype == torch.float32
+        assert torch.isfinite(result_torch).all()

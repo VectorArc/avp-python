@@ -130,6 +130,7 @@ class TestShouldThink:
 
 class TestProjectHidden:
     def test_tied_model_uses_softmax_projection(self):
+        import numpy as np
         plugin = _make_plugin(tie_word_embeddings=True, hidden_size=64)
         plugin._setup_projection()
 
@@ -138,7 +139,9 @@ class TestProjectHidden:
 
         assert projected.shape == (1, 64)
         # Should be a weighted average of embeddings, not just normalized hidden
-        assert not torch.allclose(projected, hidden, atol=0.1)
+        hidden_np = hidden.detach().float().numpy()
+        proj_np = projected if isinstance(projected, np.ndarray) else projected.detach().float().numpy()
+        assert not np.allclose(proj_np, hidden_np, atol=0.1)
 
     def test_untied_model_uses_realignment(self):
         plugin = _make_plugin(tie_word_embeddings=False, hidden_size=64)

@@ -10,8 +10,31 @@ import os
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
+import numpy as np
+
 from .errors import RealignmentError
 from ._torch_compat import require_torch as _require_torch
+
+
+def _to_numpy(x: Any) -> np.ndarray:
+    """Convert torch.Tensor or numpy array to numpy float32."""
+    if hasattr(x, "detach"):
+        return x.detach().cpu().float().numpy()
+    return np.asarray(x, dtype=np.float32)
+
+
+def _to_scalar(x: Any) -> float:
+    """Extract float from torch scalar tensor or pass through."""
+    if hasattr(x, "item"):
+        return float(x.item())
+    return float(x)
+
+
+def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """Numerically stable softmax."""
+    x_max = np.max(x, axis=axis, keepdims=True)
+    exp_x = np.exp(x - x_max)
+    return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
 
 # Cache directory for realignment matrices
 _CACHE_DIR = Path(os.environ.get("AVP_CACHE_DIR", str(Path.home() / ".avp"))) / "realign"
@@ -150,7 +173,7 @@ def compute_realignment_matrix(
     return realign_matrix, target_norm
 
 
-def normalize_to_target(hidden_state: Any, target_norm: Any) -> Any:
+def normalize_to_target(hidden_state: Any, target_norm: Any) -> np.ndarray:
     """Normalize hidden states to target norm.
 
     This is needed for ALL models (tied and untied). Hidden states from the
@@ -158,28 +181,24 @@ def normalize_to_target(hidden_state: Any, target_norm: Any) -> Any:
     Following LatentMAS, we always normalize before injecting via inputs_embeds.
 
     Args:
-        hidden_state: Tensor of shape [..., hidden_dim].
+        hidden_state: Array-like of shape [..., hidden_dim].
         target_norm: Target norm scalar.
 
     Returns:
-        Normalized tensor of same shape and dtype as input.
+        Normalized numpy array of same shape.
     """
-    torch = _require_torch()
+    h = _to_numpy(hidden_state)
+    tn = _to_scalar(target_norm)
 
-    original_dtype = hidden_state.dtype
-    hidden_fp32 = hidden_state.to(torch.float32)
-
-    current_norm = hidden_fp32.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-    normalized = hidden_fp32 * (target_norm / current_norm)
-
-    return normalized.to(original_dtype)
+    current_norm = np.maximum(np.linalg.norm(h, axis=-1, keepdims=True), 1e-6)
+    return h * (tn / current_norm)
 
 
 def project_to_embedding_space(
     hidden_state: Any,
     embed_weight: Any,
     temperature: float = 1.0,
-) -> Any:
+) -> np.ndarray:
     """Project hidden states to embedding space via softmax soft embedding.
 
     For tied-weight models, simple normalization doesn't work because hidden
@@ -193,61 +212,47 @@ def project_to_embedding_space(
     embedding) that the model can understand when injected via inputs_embeds.
 
     Args:
-        hidden_state: Tensor of shape [..., hidden_dim].
+        hidden_state: Array-like of shape [..., hidden_dim].
         embed_weight: Embedding weight matrix [vocab_size, hidden_dim].
         temperature: Softmax temperature. Lower = sharper (closer to argmax).
 
     Returns:
-        Soft embedding tensor of same shape and dtype as hidden_state.
+        Soft embedding numpy array of same shape as hidden_state.
     """
-    torch = _require_torch()
+    h = _to_numpy(hidden_state)
+    w = _to_numpy(embed_weight)
 
-    original_dtype = hidden_state.dtype
-    h_fp32 = hidden_state.to(torch.float32)
-    w_fp32 = embed_weight.detach().to(torch.float32)
-
-    # hidden @ W^T → logits [..., vocab_size]
-    logits = torch.matmul(h_fp32, w_fp32.T)
-
-    # softmax → probability distribution
-    probs = torch.softmax(logits / temperature, dim=-1)
-
-    # probs @ W → soft embedding [..., hidden_dim]
-    soft_embed = torch.matmul(probs, w_fp32)
-
-    return soft_embed.to(original_dtype)
+    logits = h @ w.T
+    probs = _softmax(logits / temperature)
+    return probs @ w
 
 
 def apply_realignment(
     hidden_state: Any,
     w_realign: Any,
     target_norm: Any,
-) -> Any:
+) -> np.ndarray:
     """Apply realignment to hidden states.
 
     Projects hidden states from output space to input embedding space,
     then normalizes to match input embedding norm.
 
     Args:
-        hidden_state: Tensor of shape [..., hidden_dim].
+        hidden_state: Array-like of shape [..., hidden_dim].
         w_realign: Realignment matrix of shape [hidden_dim, hidden_dim].
         target_norm: Target norm scalar.
 
     Returns:
-        Realigned tensor of same shape as input.
+        Realigned numpy array of same shape.
     """
-    torch = _require_torch()
+    h = _to_numpy(hidden_state)
+    w = _to_numpy(w_realign)
+    tn = _to_scalar(target_norm)
 
-    original_dtype = hidden_state.dtype
-    hidden_fp32 = hidden_state.to(torch.float32)
+    aligned = h @ w
 
-    aligned = torch.matmul(hidden_fp32, w_realign)
-
-    # Normalize to target norm
-    aligned_norm = aligned.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-    aligned = aligned * (target_norm / aligned_norm)
-
-    return aligned.to(original_dtype)
+    aligned_norm = np.maximum(np.linalg.norm(aligned, axis=-1, keepdims=True), 1e-6)
+    return aligned * (tn / aligned_norm)
 
 
 def save_realignment_matrix(

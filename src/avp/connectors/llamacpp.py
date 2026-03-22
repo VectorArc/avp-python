@@ -153,7 +153,6 @@ class LlamaCppConnector(EngineConnector):
         import ctypes
 
         import numpy as np
-        import torch
         from llama_cpp import llama_cpp as lc
 
         from ..context import AVPContext
@@ -206,10 +205,10 @@ class LlamaCppConnector(EngineConnector):
             lc.llama_free(think_ctx)
             return None
 
-        # Load embedding weights from GGUF for projection (cached)
-        embed_weight, target_norm = self._get_embed_weight(torch)
+        # Load embedding weights from GGUF for projection (cached, numpy)
+        embed_weight, target_norm = self._get_embed_weight()
         if target_norm is None:
-            target_norm = hidden.norm(dim=-1).mean().detach()
+            target_norm = float(np.linalg.norm(hidden, axis=-1).mean())
 
         n_past = n_tokens
         steps_completed = 0
@@ -224,7 +223,9 @@ class LlamaCppConnector(EngineConnector):
                 projected = normalize_to_target(projected, target_norm)
             else:
                 projected = normalize_to_target(hidden, target_norm)
-            proj_np = projected.squeeze(0).numpy().astype(np.float32)
+            proj_np = np.ascontiguousarray(
+                projected.squeeze(axis=0), dtype=np.float32,
+            )
 
             # Inject via batch.embd
             emb_batch = lc.llama_batch_init(1, n_embd, 1)
@@ -255,7 +256,9 @@ class LlamaCppConnector(EngineConnector):
             if new_hidden is not None:
                 hidden = new_hidden
 
-        hidden = normalize_to_target(hidden, target_norm)
+        hidden = np.ascontiguousarray(
+            normalize_to_target(hidden, target_norm), dtype=np.float32,
+        )
 
         context = AVPContext(
             past_key_values=None,
@@ -278,7 +281,7 @@ class LlamaCppConnector(EngineConnector):
 
         logger.info(
             "think(): %d/%d latent steps, n_past=%d, hidden norm=%.3f",
-            steps_completed, steps, n_past, hidden.float().norm().item(),
+            steps_completed, steps, n_past, float(np.linalg.norm(hidden)),
         )
 
         return context
@@ -397,11 +400,13 @@ class LlamaCppConnector(EngineConnector):
 
     @staticmethod
     def _get_embeddings(lc: Any, ctx: Any, n_embd: int) -> Any:
-        """Extract hidden state from context via llama_get_embeddings_ith."""
+        """Extract hidden state from context via llama_get_embeddings_ith.
+
+        Returns numpy array of shape [1, n_embd] (float32).
+        """
         import ctypes
 
         import numpy as np
-        import torch
 
         emb_ptr = lc.llama_get_embeddings_ith(ctx, -1)
         if not emb_ptr:
@@ -410,7 +415,7 @@ class LlamaCppConnector(EngineConnector):
             ctypes.addressof(emb_ptr.contents),
         )
         data = np.array(arr, dtype=np.float32, copy=True)
-        return torch.from_numpy(data).float().unsqueeze(0)  # [1, n_embd]
+        return data.reshape(1, n_embd)  # [1, n_embd]
 
     def generate(
         self,
@@ -977,24 +982,24 @@ class LlamaCppConnector(EngineConnector):
         except Exception:
             return []
 
-    def _get_embed_weight(self, torch: Any) -> tuple:
-        """Get cached embedding weight matrix and target norm.
+    def _get_embed_weight(self) -> tuple:
+        """Get cached embedding weight matrix and target norm as numpy arrays.
 
         Extracts and dequantizes token_embd.weight from the GGUF file
         on first call, then returns the cached version.
 
         Returns:
-            (embed_weight, target_norm) or (None, None) on failure.
+            (embed_weight_np, target_norm_float) or (None, None) on failure.
         """
         if hasattr(self, "_embed_weight_cache"):
             return self._embed_weight_cache
 
         try:
+            import numpy as np
             from ._llamacpp_compat import extract_gguf_embedding_weights
             emb_np = extract_gguf_embedding_weights(self._model_path)
-            embed_weight = torch.from_numpy(emb_np).float()
-            target_norm = embed_weight.norm(dim=1).mean().detach()
-            self._embed_weight_cache = (embed_weight, target_norm)
+            target_norm = float(np.linalg.norm(emb_np, axis=1).mean())
+            self._embed_weight_cache = (emb_np, target_norm)
             return self._embed_weight_cache
         except Exception as e:
             logger.warning("Cannot load embed weights for projection: %s", e)
@@ -1063,13 +1068,15 @@ class LlamaCppConnector(EngineConnector):
         Extracts embedding weights from both GGUF files and uses
         vocabulary-mediated projection (same algorithm as HuggingFace
         connector). Requires the ``gguf`` package for dequantization.
+
+        Returns a numpy array.
         """
-        import torch
+        import numpy as np
         from ..rosetta.project import vocabulary_mediated_projection
 
-        # Use cached embed weights from both connectors
-        tgt_weight, target_norm = self._get_embed_weight(torch)
-        src_weight, _ = source._get_embed_weight(torch)
+        # Use cached embed weights (numpy arrays) from both connectors
+        tgt_weight, target_norm = self._get_embed_weight()
+        src_weight, _ = source._get_embed_weight()
 
         if tgt_weight is None:
             logger.warning("Cannot load target embed weights for rosetta")
@@ -1079,7 +1086,7 @@ class LlamaCppConnector(EngineConnector):
             return hidden
 
         projected = vocabulary_mediated_projection(
-            hidden.float(),
+            hidden,
             src_weight,
             tgt_weight,
             temperature=1.0,
@@ -1089,7 +1096,7 @@ class LlamaCppConnector(EngineConnector):
         logger.info(
             "Rosetta projection: [%d] -> [%d], norm=%.3f",
             hidden.shape[-1], projected.shape[-1],
-            projected.float().norm().item(),
+            float(np.linalg.norm(projected)),
         )
         return projected
 

@@ -38,6 +38,18 @@ def save_map(avp_map: AVPMap, map_dir: Optional[Path] = None) -> Path:
     filename = _map_filename(avp_map.source_hash, avp_map.target_hash)
     path = save_dir / filename
 
+    def _to_torch(x):
+        """Convert to CPU torch tensor for torch.save compatibility."""
+        if x is None:
+            return None
+        if hasattr(x, "cpu"):
+            return x.cpu()
+        # numpy array → torch tensor (torch.load rejects raw numpy)
+        import numpy as np
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+        return x
+
     data = {
         "source_model_id": avp_map.source_model_id,
         "source_hash": avp_map.source_hash,
@@ -45,14 +57,14 @@ def save_map(avp_map: AVPMap, map_dir: Optional[Path] = None) -> Path:
         "target_model_id": avp_map.target_model_id,
         "target_hash": avp_map.target_hash,
         "target_dim": avp_map.target_dim,
-        "w_map": avp_map.w_map.cpu(),
-        "bias": avp_map.bias.cpu() if avp_map.bias is not None else None,
-        "target_norm": avp_map.target_norm.cpu(),
+        "w_map": _to_torch(avp_map.w_map),
+        "bias": _to_torch(avp_map.bias),
+        "target_norm": _to_torch(avp_map.target_norm),
         "method": avp_map.method.value,  # serialize enum as string
         "anchor_count": avp_map.anchor_count,
         "validation_score": avp_map.validation_score,
-        "src_indices": avp_map.src_indices.cpu() if avp_map.src_indices is not None else None,
-        "tgt_indices": avp_map.tgt_indices.cpu() if avp_map.tgt_indices is not None else None,
+        "src_indices": _to_torch(avp_map.src_indices),
+        "tgt_indices": _to_torch(avp_map.tgt_indices),
         "overlap_count": avp_map.overlap_count,
         "overlap_ratio": avp_map.overlap_ratio,
     }

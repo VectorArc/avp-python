@@ -31,13 +31,13 @@ def _require_deps():
         import torch
     except ImportError:
         raise EngineNotAvailableError(
-            "huggingface (requires torch). pip install avp should include this dependency"
+            "huggingface (requires torch). Install with: pip install avp[hf]"
         )
     try:
         import transformers
     except ImportError:
         raise EngineNotAvailableError(
-            "huggingface (requires transformers). pip install avp should include this dependency"
+            "huggingface (requires transformers). Install with: pip install avp[hf]"
         )
     return torch, transformers
 
@@ -390,15 +390,21 @@ class HuggingFaceConnector(EngineConnector):
             embed_weight = self.model.get_input_embeddings().weight
 
         # Latent loop
+        import numpy as np
+
         for step in range(latent_steps):
             if do_realign:
-                latent_vec = apply_realignment(last_hidden, w_realign, target_norm)
+                latent_np = apply_realignment(last_hidden, w_realign, target_norm)
             else:
                 # Tied models: project through vocabulary to get valid embedding
-                latent_vec = project_to_embedding_space(
+                latent_np = project_to_embedding_space(
                     last_hidden, embed_weight, temperature=1.0
                 )
 
+            # Convert numpy projection result back to torch for model forward
+            latent_vec = torch.from_numpy(
+                np.ascontiguousarray(latent_np)
+            ).to(device=self.device, dtype=self.model.dtype)
             latent_embed = latent_vec.unsqueeze(1)  # [B, 1, D]
 
             # Build attention mask for this step
@@ -796,12 +802,11 @@ class HuggingFaceConnector(EngineConnector):
     ) -> Any:
         """Project source hidden state to target embedding space via Rosetta Stone.
 
-        Supports three method families:
+        Supports two method families:
         - vocab_mediated: Uses shared vocabulary as bridge (zero learned params).
           source lm_head -> softmax -> target input embeddings.
         - vocab_overlap: Cross-family variant — projects through overlapping
           tokens between different tokenizers.
-        - ridge/procrustes: Uses learned linear map (W_map).
 
         Args:
             hidden_state: Tensor of shape [..., D_src] from this (source) model.
@@ -817,6 +822,16 @@ class HuggingFaceConnector(EngineConnector):
             Projected tensor of shape [..., D_tgt] suitable for injection
             into the target model via inputs_embeds.
         """
+        import torch as _torch
+
+        def _np_to_torch(arr):
+            """Convert numpy projection result back to torch tensor."""
+            if isinstance(arr, _torch.Tensor):
+                return arr
+            return _torch.from_numpy(arr).to(
+                device=hidden_state.device, dtype=hidden_state.dtype,
+            )
+
         from ..types import ProjectionMethod
         if avp_map.method == ProjectionMethod.VOCAB_MEDIATED:
             from ..rosetta.project import vocabulary_mediated_projection
@@ -828,14 +843,17 @@ class HuggingFaceConnector(EngineConnector):
                     "Cannot get source output embeddings (lm_head) for "
                     "vocabulary-mediated projection."
                 )
-            return vocabulary_mediated_projection(
+            result = vocabulary_mediated_projection(
                 hidden_state,
                 source_lm_head_weight=source_lm_head.weight,
-                target_embed_weight=avp_map.w_map,  # target input embeddings
+                target_embed_weight=avp_map.w_map,
                 temperature=temperature,
                 target_norm=avp_map.target_norm,
                 return_metrics=return_metrics,
             )
+            if return_metrics:
+                return _np_to_torch(result[0]), result[1]
+            return _np_to_torch(result)
         elif avp_map.method == ProjectionMethod.VOCAB_OVERLAP:
             from ..rosetta.project import vocab_overlap_projection
             source_lm_head = self.model.get_output_embeddings()
@@ -846,7 +864,7 @@ class HuggingFaceConnector(EngineConnector):
                     "Cannot get source output embeddings (lm_head) for "
                     "vocab-overlap projection."
                 )
-            return vocab_overlap_projection(
+            result = vocab_overlap_projection(
                 hidden_state,
                 source_lm_head_weight=source_lm_head.weight,
                 shared_target_embed_weight=avp_map.w_map,
@@ -855,11 +873,14 @@ class HuggingFaceConnector(EngineConnector):
                 target_norm=avp_map.target_norm,
                 return_metrics=return_metrics,
             )
+            if return_metrics:
+                return _np_to_torch(result[0]), result[1]
+            return _np_to_torch(result)
         else:
             from ..rosetta.project import apply_cross_model_projection
             projected = apply_cross_model_projection(
                 hidden_state, avp_map.w_map, avp_map.target_norm, avp_map.bias
             )
             if return_metrics:
-                return projected, {}
-            return projected
+                return _np_to_torch(projected), {}
+            return _np_to_torch(projected)

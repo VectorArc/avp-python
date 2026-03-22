@@ -22,5 +22,5 @@ def require_torch():
     except ImportError:
         raise RealignmentError(
             "torch is required for this operation. "
-            "pip install avp should include this dependency"
+            "Install with: pip install avp[hf]"
         )

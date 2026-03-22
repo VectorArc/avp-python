@@ -204,13 +204,17 @@ def _apply_projection(
 
     Uses the same code path as runtime: vocabulary_mediated_projection for
     vocab-mediated maps, apply_cross_model_projection for learned maps.
+
+    Returns a torch tensor (converts numpy result from projection functions).
     """
+    torch = _require_torch()
+
     if avp_map.method == ProjectionMethod.VOCAB_MEDIATED:
         from .project import vocabulary_mediated_projection
         source_lm_head = source_model.get_output_embeddings()
         if source_lm_head is None:
             source_lm_head = getattr(source_model, "lm_head", None)
-        return vocabulary_mediated_projection(
+        result = vocabulary_mediated_projection(
             hidden_states,
             source_lm_head_weight=source_lm_head.weight,
             target_embed_weight=avp_map.w_map,
@@ -221,7 +225,7 @@ def _apply_projection(
         source_lm_head = source_model.get_output_embeddings()
         if source_lm_head is None:
             source_lm_head = getattr(source_model, "lm_head", None)
-        return vocab_overlap_projection(
+        result = vocab_overlap_projection(
             hidden_states,
             source_lm_head_weight=source_lm_head.weight,
             shared_target_embed_weight=avp_map.w_map,
@@ -230,9 +234,15 @@ def _apply_projection(
         )
     else:
         from .project import apply_cross_model_projection
-        return apply_cross_model_projection(
+        result = apply_cross_model_projection(
             hidden_states, avp_map.w_map, avp_map.target_norm, avp_map.bias
         )
+
+    # Projection functions return numpy — convert to torch for validation
+    if not isinstance(result, torch.Tensor):
+        device = str(next(source_model.parameters()).device)
+        result = torch.from_numpy(result).to(device=device, dtype=torch.float32)
+    return result
 
 
 def validate_projection(

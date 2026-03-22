@@ -184,7 +184,12 @@ class FileKVStore:
         key_dir.mkdir(parents=True, exist_ok=True)
         target = key_dir / "projected.pt"
         tmp = target.with_suffix(".pt.tmp")
-        torch.save(tensor.cpu(), tmp)
+        # Handle numpy arrays from projection functions
+        if hasattr(tensor, "cpu"):
+            t = tensor.cpu()
+        else:
+            t = torch.from_numpy(tensor) if not isinstance(tensor, torch.Tensor) else tensor
+        torch.save(t, tmp)
         os.rename(str(tmp), str(target))
 
     def load_projected(self, key: str) -> Optional[Any]:

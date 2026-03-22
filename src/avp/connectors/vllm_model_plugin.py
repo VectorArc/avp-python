@@ -145,18 +145,18 @@ def _load_target_model_weights(model_id: str) -> Tuple[Any, Any, Any]:
 def _setup_projection_from_weights(embed_weight, lm_head_weight, is_tied):
     """Compute projection state from model weights.
 
-    Returns (is_tied, embed_weight, w_realign, target_norm) or raises.
+    Returns (is_tied, embed_weight_np, w_realign_np, target_norm_float).
+    Weights are returned as numpy float32 arrays (cached on CPU) so the
+    latent loop doesn't copy from GPU every iteration.
     """
+    import numpy as np
     import torch
 
     if is_tied:
-        target_norm = (
-            embed_weight.detach().to(device="cpu", dtype=torch.float32)
-            .norm(dim=1).mean().to(device=str(embed_weight.device))
-        )
-        return True, embed_weight.detach(), None, target_norm
+        embed_np = embed_weight.detach().cpu().float().numpy()
+        target_norm = float(np.linalg.norm(embed_np, axis=1).mean())
+        return True, np.ascontiguousarray(embed_np), None, target_norm
     else:
-        gpu_device = str(embed_weight.device)
         in_w = embed_weight.detach().to(device="cpu", dtype=torch.float32)
         out_w = lm_head_weight.detach().to(device="cpu", dtype=torch.float32)
 
@@ -170,16 +170,24 @@ def _setup_projection_from_weights(embed_weight, lm_head_weight, is_tied):
         rhs = torch.matmul(out_w.T, in_w)
         w_realign = torch.linalg.solve(gram, rhs)
 
+        target_norm = float(in_w.norm(dim=1).mean().item())
         return (
             False,
             None,
-            w_realign.to(device=gpu_device),
-            in_w.norm(dim=1).mean().detach().to(device=gpu_device),
+            np.ascontiguousarray(w_realign.numpy()),
+            target_norm,
         )
 
 
 def _project_hidden_state(hidden_state, is_tied, embed_weight, w_realign, target_norm):
-    """Project hidden state back to embedding space."""
+    """Project hidden state back to embedding space.
+
+    Realign functions return numpy arrays — convert back to torch for vLLM
+    model forward passes.
+    """
+    import numpy as np
+    import torch
+
     from ..realign import apply_realignment, normalize_to_target, project_to_embedding_space
 
     if is_tied:
@@ -188,6 +196,12 @@ def _project_hidden_state(hidden_state, is_tied, embed_weight, w_realign, target
             projected = normalize_to_target(projected, target_norm)
     else:
         projected = apply_realignment(hidden_state, w_realign, target_norm)
+
+    # Convert numpy back to torch for vLLM model forward
+    if isinstance(projected, np.ndarray):
+        device = hidden_state.device if hasattr(hidden_state, "device") else "cpu"
+        dtype = hidden_state.dtype if hasattr(hidden_state, "dtype") and isinstance(hidden_state.dtype, torch.dtype) else torch.float32
+        projected = torch.from_numpy(projected).to(device=device, dtype=dtype)
 
     return projected
 
