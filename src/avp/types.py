@@ -56,8 +56,6 @@ class CommunicationMode(enum.IntEnum):
 class ProjectionMethod(enum.Enum):
     """Rosetta Stone cross-model projection methods."""
 
-    RIDGE = "ridge"
-    PROCRUSTES = "procrustes"
     VOCAB_MEDIATED = "vocab_mediated"
     VOCAB_OVERLAP = "vocab_overlap"
 

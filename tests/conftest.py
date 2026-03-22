@@ -42,6 +42,9 @@ class MockTokenizer:
         chars = [chr(int(i) % 128) for i in ids if int(i) >= 2 or not skip_special_tokens]
         return "".join(chars).strip()
 
+    def get_vocab(self):
+        return {f"token_{i}": i for i in range(self.vocab_size)}
+
     def __len__(self):
         return self.vocab_size
 

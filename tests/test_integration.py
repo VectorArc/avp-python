@@ -368,21 +368,22 @@ def test_handshake_same_model_resolves_latent(tiny_tied_connector):
 # ---------------------------------------------------------------------------
 
 
-def test_handshake_different_models_resolves_json(
+def test_handshake_different_models_shared_tokenizer_resolves_latent(
     tiny_tied_connector, tiny_untied_connector
 ):
-    """Tied (GPT2) vs untied (Llama) → handshake → JSON."""
+    """Tied (GPT2) vs untied (Llama) with shared tokenizer → handshake → LATENT."""
     from avp.handshake import CompatibilityResolver
     from avp.types import CommunicationMode
 
     id_a = tiny_tied_connector.get_model_identity()
     id_b = tiny_untied_connector.get_model_identity()
 
-    # Different model families should resolve to JSON
+    # Different model families but same tokenizer → LATENT via shared tokenizer
     assert id_a.model_family != id_b.model_family
 
     session_info = CompatibilityResolver.resolve(id_a, id_b)
-    assert session_info.mode == CommunicationMode.JSON
+    assert session_info.mode == CommunicationMode.LATENT
+    assert session_info.resolution_path == "shared_tokenizer"
 
 
 # ---------------------------------------------------------------------------

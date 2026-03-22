@@ -252,7 +252,7 @@ def validate_projection(
     Args:
         source_model: Source HuggingFace model.
         target_model: Target HuggingFace model.
-        avp_map: AVPMap (vocab_mediated, ridge, or procrustes).
+        avp_map: AVPMap (vocab_mediated or vocab_overlap).
         source_tokenizer: Source model's tokenizer.
         target_tokenizer: Target model's tokenizer.
         config: Validation thresholds. Defaults to ValidationConfig().

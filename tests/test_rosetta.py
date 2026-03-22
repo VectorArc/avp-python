@@ -19,7 +19,8 @@ class VocabMockTokenizer(MockTokenizer):
         self._vocab_offset = vocab_offset
 
     def get_vocab(self):
-        return {f"token_{i}": i for i in range(self.vocab_size)}
+        off = self._vocab_offset
+        return {f"token_{off + i}": i for i in range(self.vocab_size)}
 
 
 class CrossFamilyMockTokenizer(MockTokenizer):
@@ -196,110 +197,17 @@ class TestCalibrate:
         "Calculate the sum of one plus two.",
     ]
 
-    def test_calibrate_ridge(self, tiny_gpt2_64, tiny_gpt2_128):
-        """Ridge regression when dims differ."""
+    def test_calibrate_incompatible_models_raises(self, tiny_gpt2_64, tiny_gpt2_128):
+        """calibrate() raises ValueError when models have no projection path."""
         from avp.rosetta.calibrate import calibrate
 
         src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_128
+        tgt_model, _ = tiny_gpt2_128
+        # Use disjoint vocabularies — zero overlap, no shared tokenizer
+        tgt_tok = VocabMockTokenizer(vocab_size=256, vocab_offset=1000)
 
-        avp_map = calibrate(
-            src_model, tgt_model, src_tok, tgt_tok,
-            anchor_texts=self.ANCHOR_TEXTS, device="cpu",
-        )
-
-        assert avp_map.method == ProjectionMethod.RIDGE
-        assert avp_map.w_map.shape == (64, 128)
-        assert avp_map.source_dim == 64
-        assert avp_map.target_dim == 128
-        assert avp_map.bias is None
-        assert avp_map.anchor_count == 8  # 10 - 20% validation
-        assert isinstance(avp_map.validation_score, float)
-
-    def test_calibrate_procrustes(self, tiny_gpt2_64, tiny_gpt2_64_v2):
-        """Procrustes when dims match."""
-        from avp.rosetta.calibrate import calibrate
-
-        src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_64_v2
-
-        avp_map = calibrate(
-            src_model, tgt_model, src_tok, tgt_tok,
-            anchor_texts=self.ANCHOR_TEXTS, device="cpu",
-        )
-
-        assert avp_map.method == ProjectionMethod.PROCRUSTES
-        assert avp_map.w_map.shape == (64, 64)
-
-        # Procrustes matrix should be approximately orthogonal: W^T @ W ≈ I
-        product = avp_map.w_map.T @ avp_map.w_map
-        identity = torch.eye(64)
-        assert torch.allclose(product, identity, atol=1e-5)
-
-    def test_calibrate_auto_selects_ridge(self, tiny_gpt2_64, tiny_gpt2_128):
-        """Auto method selects ridge when dims differ."""
-        from avp.rosetta.calibrate import calibrate
-
-        src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_128
-
-        avp_map = calibrate(
-            src_model, tgt_model, src_tok, tgt_tok,
-            anchor_texts=self.ANCHOR_TEXTS, method="auto", device="cpu",
-        )
-        assert avp_map.method == ProjectionMethod.RIDGE
-
-    def test_calibrate_auto_selects_procrustes(self, tiny_gpt2_64, tiny_gpt2_64_v2):
-        """Auto method selects procrustes when dims match."""
-        from avp.rosetta.calibrate import calibrate
-
-        src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_64_v2
-
-        avp_map = calibrate(
-            src_model, tgt_model, src_tok, tgt_tok,
-            anchor_texts=self.ANCHOR_TEXTS, method="auto", device="cpu",
-        )
-        assert avp_map.method == ProjectionMethod.PROCRUSTES
-
-    def test_calibrate_procrustes_fails_different_dims(self, tiny_gpt2_64, tiny_gpt2_128):
-        """Procrustes raises ValueError when dims differ."""
-        from avp.rosetta.calibrate import calibrate
-
-        src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_128
-
-        with pytest.raises(ValueError, match="Procrustes requires same dimensions"):
-            calibrate(
-                src_model, tgt_model, src_tok, tgt_tok,
-                anchor_texts=self.ANCHOR_TEXTS, method="procrustes", device="cpu",
-            )
-
-    def test_calibrate_too_few_anchors(self, tiny_gpt2_64, tiny_gpt2_128):
-        """Calibration fails with too few anchor texts."""
-        from avp.rosetta.calibrate import calibrate
-
-        src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_128
-
-        with pytest.raises(ValueError, match="at least 5"):
-            calibrate(
-                src_model, tgt_model, src_tok, tgt_tok,
-                anchor_texts=["a", "b", "c"], device="cpu",
-            )
-
-    def test_calibrate_target_norm(self, tiny_gpt2_64, tiny_gpt2_128):
-        """Calibration computes a valid target norm."""
-        from avp.rosetta.calibrate import calibrate
-
-        src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_128
-
-        avp_map = calibrate(
-            src_model, tgt_model, src_tok, tgt_tok,
-            anchor_texts=self.ANCHOR_TEXTS, device="cpu",
-        )
-        assert avp_map.target_norm.item() > 0
+        with pytest.raises(ValueError, match="No projection path found"):
+            calibrate(src_model, tgt_model, src_tok, tgt_tok, device="cpu")
 
 
 # ---------------------------------------------------------------------------
@@ -311,20 +219,18 @@ class TestCalibrate:
 class TestRegistry:
     def test_save_load_roundtrip(self, tmp_path, tiny_gpt2_64, tiny_gpt2_128):
         """Save and load produces identical AVPMap."""
-        from avp.rosetta.calibrate import calibrate
+        from avp.rosetta.calibrate import AVPMap
         from avp.rosetta.registry import load_map, save_map
 
-        src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_128
-
-        anchor_texts = [
-            "Test sentence one.", "Test sentence two.",
-            "Test sentence three.", "Test sentence four.",
-            "Test sentence five.", "Test sentence six.",
-        ]
-        avp_map = calibrate(
-            src_model, tgt_model, src_tok, tgt_tok,
-            anchor_texts=anchor_texts, device="cpu",
+        avp_map = AVPMap(
+            source_model_id="src", source_hash="a" * 64, source_dim=64,
+            target_model_id="tgt", target_hash="b" * 64, target_dim=128,
+            w_map=torch.randn(256, 128),
+            bias=None,
+            target_norm=torch.tensor(5.0),
+            method="vocab_mediated",
+            anchor_count=0,
+            validation_score=1.0,
         )
 
         path = save_map(avp_map, map_dir=tmp_path)
@@ -467,7 +373,7 @@ class TestConnectorIntegration:
             w_map=torch.randn(64, 128),
             bias=None,
             target_norm=torch.tensor(5.0),
-            method="ridge",
+            method="vocab_mediated",
             anchor_count=10,
             validation_score=0.8,
         )
@@ -671,7 +577,11 @@ class TestTokenizerHash:
         """Tokenizer without get_vocab() returns empty string."""
         from avp.handshake import compute_tokenizer_hash
 
-        tok = MockTokenizer(vocab_size=256)  # no get_vocab()
+        class BareTokenizer:
+            """Tokenizer with no get_vocab() method."""
+            pass
+
+        tok = BareTokenizer()
         h = compute_tokenizer_hash(tok)
         assert h == ""
 
@@ -795,26 +705,21 @@ class TestCalibrateVocabMediated:
         # w_map should be target's input embedding weights [vocab_size, D_tgt]
         assert avp_map.w_map.shape == (256, 128)
 
-    def test_calibrate_falls_back_to_ridge(self, tiny_gpt2_64, tiny_gpt2_128):
-        """calibrate() falls back to ridge when vocab differs."""
+    def test_calibrate_incompatible_raises_no_overlap(self, tiny_gpt2_64, tiny_gpt2_128):
+        """calibrate() raises ValueError when vocab has zero overlap."""
         from avp.rosetta.calibrate import calibrate
 
-        src_model, src_tok = tiny_gpt2_64
-        tgt_model, tgt_tok = tiny_gpt2_128
-        # MockTokenizer has no get_vocab() → not shared → ridge fallback
+        src_model, _ = tiny_gpt2_64
+        tgt_model, _ = tiny_gpt2_128
+        # Use disjoint vocabularies — zero overlap
+        src_tok = VocabMockTokenizer(vocab_size=256)
+        tgt_tok = VocabMockTokenizer(vocab_size=256, vocab_offset=1000)
 
-        anchor_texts = [
-            "Test one.", "Test two.", "Test three.",
-            "Test four.", "Test five.", "Test six.",
-        ]
-        avp_map = calibrate(
-            src_model, tgt_model, src_tok, tgt_tok,
-            anchor_texts=anchor_texts, device="cpu",
-        )
-        assert avp_map.method == ProjectionMethod.RIDGE
+        with pytest.raises(ValueError, match="No projection path found"):
+            calibrate(src_model, tgt_model, src_tok, tgt_tok, device="cpu")
 
-    def test_calibrate_vocab_mediated_explicit(self, tiny_gpt2_64, tiny_gpt2_128):
-        """calibrate() with method='vocab_mediated' works explicitly."""
+    def test_calibrate_vocab_mediated_auto_detected(self, tiny_gpt2_64, tiny_gpt2_128):
+        """calibrate() auto-detects shared vocab and uses vocab_mediated."""
         from avp.rosetta.calibrate import calibrate
 
         src_model, _ = tiny_gpt2_64
@@ -824,23 +729,24 @@ class TestCalibrateVocabMediated:
 
         avp_map = calibrate(
             src_model, tgt_model, src_tok, tgt_tok,
-            method="vocab_mediated", device="cpu",
+            device="cpu",
         )
         assert avp_map.method == ProjectionMethod.VOCAB_MEDIATED
 
-    def test_calibrate_vocab_mediated_fails_different_vocab(self, tiny_gpt2_64, tiny_gpt2_128):
-        """calibrate() with method='vocab_mediated' fails when vocab differs."""
+    def test_calibrate_different_vocab_no_overlap_raises(self, tiny_gpt2_64, tiny_gpt2_128):
+        """calibrate() raises ValueError when vocab has zero overlap."""
         from avp.rosetta.calibrate import calibrate
 
         src_model, _ = tiny_gpt2_64
         tgt_model, _ = tiny_gpt2_128
+        # Use disjoint vocabularies (no shared tokens)
         src_tok = VocabMockTokenizer(vocab_size=256)
-        tgt_tok = VocabMockTokenizer(vocab_size=128)
+        tgt_tok = VocabMockTokenizer(vocab_size=256, vocab_offset=1000)
 
-        with pytest.raises(ValueError, match="same vocabulary"):
+        with pytest.raises(ValueError, match="No projection path found"):
             calibrate(
                 src_model, tgt_model, src_tok, tgt_tok,
-                method="vocab_mediated", device="cpu",
+                device="cpu",
             )
 
 
@@ -898,7 +804,7 @@ class TestValidation:
             w_map=torch.randn(64, 128) * 0.001,  # tiny random weights
             bias=None,
             target_norm=torch.tensor(1.0),
-            method="ridge",
+            method="vocab_mediated",
             anchor_count=10,
             validation_score=0.0,
         )
@@ -928,7 +834,7 @@ class TestValidation:
             w_map=torch.randn(64, 128) * 0.001,
             bias=None,
             target_norm=torch.tensor(1.0),
-            method="ridge",
+            method="vocab_mediated",
             anchor_count=10,
             validation_score=0.0,
         )
@@ -1409,7 +1315,7 @@ class TestVocabOverlap:
             w_map=torch.randn(64, 128),
             bias=None,
             target_norm=torch.tensor(5.0),
-            method="ridge",
+            method="vocab_mediated",
             anchor_count=50,
             validation_score=0.85,
         )
