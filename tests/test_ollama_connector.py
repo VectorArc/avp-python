@@ -2,7 +2,6 @@
 
 import json
 import os
-from pathlib import Path
 from unittest import mock
 from urllib.error import URLError
 
@@ -176,7 +175,6 @@ class TestResolveOllamaModel:
     def test_custom_models_dir(self, tmp_path):
         from avp.connectors.ollama import resolve_ollama_model
 
-        custom_dir = tmp_path / "custom"
         models_dir, expected_path = _create_fake_ollama_store(
             tmp_path, "custom_model", "v1", "custom789",
         )

@@ -102,7 +102,7 @@ def resolve_ollama_model(model_name: str) -> str:
         raise ValueError(
             f"No model layer (mediaType={_MODEL_MEDIA_TYPE}) found in "
             f"manifest for '{model_name}'. Available layers: "
-            f"{[l.get('mediaType') for l in manifest.get('layers', [])]}"
+            f"{[layer.get('mediaType') for layer in manifest.get('layers', [])]}"
         )
 
     # Convert digest sha256:abc... → blob path sha256-abc...
