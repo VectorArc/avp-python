@@ -253,12 +253,15 @@ def run_test():
     if context is not None:
         hidden = getattr(context, "last_hidden_state", None)
         if hidden is not None:
-            print(f"  Hidden state shape: {list(hidden.shape)}")
-            print(f"  Hidden state norm: {hidden.float().norm():.3f}")
+            import numpy as _np
+            h_np = hidden if isinstance(hidden, _np.ndarray) else hidden.detach().cpu().float().numpy()
+            h_norm = float(_np.linalg.norm(h_np))
+            print(f"  Hidden state shape: {list(h_np.shape)}")
+            print(f"  Hidden state norm: {h_norm:.3f}")
             print(f"  Time: {elapsed:.2f}s")
             results["think"] = {
-                "shape": list(hidden.shape),
-                "norm": hidden.float().norm().item(),
+                "shape": list(h_np.shape),
+                "norm": h_norm,
                 "ok": True,
             }
         else:
