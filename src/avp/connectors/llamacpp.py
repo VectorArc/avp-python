@@ -1,9 +1,10 @@
 """AVP connector for llama.cpp via llama-cpp-python.
 
 Enables latent thinking and cross-model rosetta on GGUF models running
-on CPU or consumer GPUs. Uses llama.cpp's public C API (cb_eval callback
-for hidden state extraction, batch.embd for embedding injection) via
-ctypes — no forks or custom builds required.
+on CPU or consumer GPUs. Uses llama.cpp's public C API
+(``llama_get_embeddings_ith`` for hidden state extraction,
+``batch.embd`` for embedding injection) via ctypes — no forks or
+custom builds required.
 
 Usage::
 
@@ -27,6 +28,7 @@ Requires: ``pip install avp[llamacpp]`` (installs llama-cpp-python)
 """
 
 import logging
+import weakref
 from typing import Any, Optional
 
 from .base import EngineConnector
@@ -42,9 +44,9 @@ except ImportError:
 class LlamaCppConnector(EngineConnector):
     """AVP connector for llama.cpp GGUF models.
 
-    Supports same-model latent thinking (via cb_eval hidden state
-    extraction) and cross-model rosetta projection. Models run on
-    CPU or GPU via llama-cpp-python.
+    Supports same-model latent thinking (via ``embeddings=True`` +
+    ``llama_get_embeddings_ith``) and cross-model rosetta projection.
+    Models run on CPU or GPU via llama-cpp-python.
     """
 
     can_think = True
@@ -85,21 +87,15 @@ class LlamaCppConnector(EngineConnector):
         # Extract model identity
         self._n_embd = self._model.n_embd()
         self._n_vocab = self._model.n_vocab()
-        self._n_layer = getattr(
-            self._model.metadata or {},
-            "llama.block_count",
-            None,
-        )
-        if self._n_layer is None:
-            # Try to detect from metadata
-            meta = self._model.metadata or {}
-            for key, val in meta.items():
-                if "block_count" in key:
-                    try:
-                        self._n_layer = int(val)
-                    except (ValueError, TypeError):
-                        pass
-                    break
+        self._n_layer = None
+        meta = self._model.metadata or {}
+        for key, val in meta.items():
+            if "block_count" in key:
+                try:
+                    self._n_layer = int(val)
+                except (ValueError, TypeError):
+                    pass
+                break
 
         logger.info(
             "LlamaCppConnector loaded: %s (n_embd=%d, n_vocab=%d, n_layer=%s)",
@@ -171,7 +167,7 @@ class LlamaCppConnector(EngineConnector):
         # the context and breaks generation).
         ctx_params = lc.llama_context_default_params()
         ctx_params.n_ctx = self._n_ctx
-        ctx_params.n_batch = 512
+        ctx_params.n_batch = self._n_ctx  # Must fit full prompt in one decode
         ctx_params.embeddings = True
 
         think_ctx = lc.llama_new_context_with_model(model_ptr, ctx_params)
@@ -210,15 +206,9 @@ class LlamaCppConnector(EngineConnector):
             lc.llama_free(think_ctx)
             return None
 
-        # Load embedding weights from GGUF for projection
-        embed_weight = None
-        try:
-            from ._llamacpp_compat import extract_gguf_embedding_weights
-            emb_np = extract_gguf_embedding_weights(self._model_path)
-            embed_weight = torch.from_numpy(emb_np).float()
-            target_norm = embed_weight.norm(dim=1).mean().detach()
-        except Exception as e:
-            logger.warning("Cannot load embed weights for projection: %s", e)
+        # Load embedding weights from GGUF for projection (cached)
+        embed_weight, target_norm = self._get_embed_weight(torch)
+        if target_norm is None:
             target_norm = hidden.norm(dim=-1).mean().detach()
 
         n_past = n_tokens
@@ -279,6 +269,13 @@ class LlamaCppConnector(EngineConnector):
         context._llamacpp_ctx = think_ctx
         context._llamacpp_n_past = n_past
 
+        # Register destructor so the C context is freed even if
+        # generate() is never called. Detached in generate() paths
+        # that free the context themselves to avoid double-free.
+        context._llamacpp_finalizer = weakref.finalize(
+            context, LlamaCppConnector._free_ctx, think_ctx,
+        )
+
         logger.info(
             "think(): %d/%d latent steps, n_past=%d, hidden norm=%.3f",
             steps_completed, steps, n_past, hidden.float().norm().item(),
@@ -287,46 +284,116 @@ class LlamaCppConnector(EngineConnector):
         return context
 
     def _apply_chat_template(self, prompt: str) -> list:
-        """Apply chat template and tokenize.
+        """Apply the model's own chat template and tokenize.
 
-        Uses llama-cpp-python's ``create_chat_completion`` chat format
-        detection, falling back to ChatML (Qwen/many instruct models).
-        Without the template markers, instruct models ramble indefinitely.
+        Reads the Jinja2 chat template from GGUF metadata and renders
+        it with the prompt. This is model-agnostic — any model with a
+        ``tokenizer.chat_template`` in its GGUF file works automatically
+        (ChatML, Llama 3, Mistral, Gemma, Phi, etc.).
+
+        Falls back to ChatML only if no template is found or rendering
+        fails.
         """
-        # Try the model's built-in chat format via metadata
-        try:
-            meta = self._model.metadata or {}
-            chat_template = None
-            for key, val in meta.items():
-                if "chat_template" in key:
-                    chat_template = val
-                    break
+        template_str = self._get_chat_template()
 
-            if chat_template and "im_start" in chat_template:
-                # ChatML format (Qwen, many others)
-                formatted = (
-                    f"<|im_start|>user\n{prompt}<|im_end|>\n"
-                    f"<|im_start|>assistant\n"
+        if template_str:
+            try:
+                # Empty system message suppresses model-specific defaults
+                # (e.g., "You are Qwen...") that add noise to the KV-cache
+                # and hurt latent thinking quality.
+                messages = [
+                    {"role": "system", "content": ""},
+                    {"role": "user", "content": prompt},
+                ]
+                formatted = self._render_chat_template(
+                    template_str, messages,
                 )
-                return self._model.tokenize(
-                    formatted.encode("utf-8"), add_bos=True,
-                )
+                if formatted:
+                    return self._tokenize_with_special(formatted)
+            except Exception as e:
+                logger.debug("Chat template rendering failed: %s", e)
 
-            if chat_template and "[INST]" in chat_template:
-                # Llama/Mistral instruct format
-                formatted = f"[INST] {prompt} [/INST]"
-                return self._model.tokenize(
-                    formatted.encode("utf-8"), add_bos=True,
-                )
-        except Exception:
-            pass
-
-        # Default fallback: ChatML (works for most instruct models)
+        # Last resort fallback: ChatML (most common instruct format)
         formatted = (
             f"<|im_start|>user\n{prompt}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
-        return self._model.tokenize(formatted.encode("utf-8"), add_bos=True)
+        return self._tokenize_with_special(formatted)
+
+    def _get_chat_template(self) -> Optional[str]:
+        """Read the Jinja2 chat template from GGUF metadata.
+
+        Returns None if no template is found.
+        """
+        if hasattr(self, "_cached_chat_template"):
+            return self._cached_chat_template
+
+        meta = self._model.metadata or {}
+        template = None
+        for key, val in meta.items():
+            if "chat_template" in key:
+                template = val
+                break
+
+        self._cached_chat_template = template
+        return template
+
+    @staticmethod
+    def _render_chat_template(
+        template_str: str,
+        messages: list,
+        add_generation_prompt: bool = True,
+    ) -> Optional[str]:
+        """Render a Jinja2 chat template with messages.
+
+        Uses the same rendering approach as HuggingFace tokenizers and
+        llama-cpp-python. Jinja2 is a transitive dependency of both
+        torch and transformers, so it's always available.
+
+        Args:
+            template_str: Jinja2 template from GGUF metadata.
+            messages: List of ``{"role": ..., "content": ...}`` dicts.
+            add_generation_prompt: Append assistant turn start marker.
+
+        Returns:
+            Rendered prompt string, or None on failure.
+        """
+        try:
+            from jinja2 import BaseLoader, Environment
+
+            env = Environment(
+                loader=BaseLoader(),
+                keep_trailing_newline=True,
+            )
+            # Some templates call raise_exception for validation
+            env.globals["raise_exception"] = lambda msg: (_ for _ in ()).throw(
+                ValueError(msg),
+            )
+            tmpl = env.from_string(template_str)
+            return tmpl.render(
+                messages=messages,
+                add_generation_prompt=add_generation_prompt,
+                bos_token="",  # BOS handled by tokenize(add_bos=True)
+                eos_token="",
+            )
+        except ImportError:
+            logger.debug("jinja2 not available for template rendering")
+            return None
+
+    def _tokenize_with_special(self, text: str) -> list:
+        """Tokenize text, recognizing special tokens like <|im_start|>.
+
+        Tries ``special=True`` first (newer llama-cpp-python), falling
+        back to without it for older versions.
+        """
+        try:
+            return self._model.tokenize(
+                text.encode("utf-8"), add_bos=True, special=True,
+            )
+        except TypeError:
+            return self._model.tokenize(
+                text.encode("utf-8"), add_bos=True,
+            )
 
     @staticmethod
     def _get_embeddings(lc: Any, ctx: Any, n_embd: int) -> Any:
@@ -352,6 +419,7 @@ class LlamaCppConnector(EngineConnector):
         source: Optional["LlamaCppConnector"] = None,
         cross_model: bool = False,
         max_tokens: int = 512,
+        max_new_tokens: Optional[int] = None,
         temperature: float = 0.7,
         top_p: float = 0.95,
         **kwargs: Any,
@@ -372,12 +440,17 @@ class LlamaCppConnector(EngineConnector):
             source: Source connector for cross-model rosetta.
             cross_model: Enable cross-model projection.
             max_tokens: Maximum tokens to generate.
+            max_new_tokens: Alias for max_tokens (ABC compatibility).
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
 
         Returns:
             Generated text string.
         """
+        # ABC compatibility: max_new_tokens takes precedence
+        if max_new_tokens is not None:
+            max_tokens = max_new_tokens
+
         # If no context, just generate normally
         if context is None:
             output = self._model(
@@ -395,7 +468,10 @@ class LlamaCppConnector(EngineConnector):
                 prompt, context, max_tokens, temperature, top_p,
             )
 
-        # Fallback: cross-model or no live context — use embedding injection
+        # Fallback: cross-model or no live context — use embedding injection.
+        # Free the C context if present (not used by this path).
+        self._release_ctx(context)
+
         hidden = getattr(context, "last_hidden_state", None)
         if hidden is None:
             output = self._model(
@@ -461,11 +537,17 @@ class LlamaCppConnector(EngineConnector):
                         lc.llama_batch_free(batch)
                     n_cur = n_past + len(tokens)
 
-            # Autoregressive generation
+            # Autoregressive generation with both token ID and text-based
+            # stop detection. Token ID catches EOS/<|im_end|> when the model
+            # emits them as special tokens. Text-based catches the common
+            # case where quantized/small models hallucinate multi-turn
+            # continuations (e.g., bare "Human:" without ChatML markers).
             sampler = self._make_sampler(lc, temperature, top_p)
             next_batch = lc.llama_batch_init(1, 0, 1)
-            generated_tokens = []
             stop_tokens = self._get_stop_tokens()
+            stop_strings = self._get_stop_strings()
+            generated_text = ""
+            stopped = False
 
             try:
                 for _ in range(max_tokens):
@@ -473,9 +555,33 @@ class LlamaCppConnector(EngineConnector):
                     lc.llama_sampler_accept(sampler, token_id)
 
                     if token_id in stop_tokens:
+                        stopped = True
                         break
 
-                    generated_tokens.append(token_id)
+                    # Detokenize incrementally for text-based stop check
+                    try:
+                        piece = self._model.detokenize(
+                            [token_id], special=True,
+                        ).decode("utf-8", errors="replace")
+                    except TypeError:
+                        piece = self._model.detokenize(
+                            [token_id],
+                        ).decode("utf-8", errors="replace")
+                    generated_text += piece
+
+                    # Check stop strings in recent text
+                    if stop_strings:
+                        tail = generated_text[-64:]
+                        for ss in stop_strings:
+                            if ss in tail:
+                                # Truncate at the stop string
+                                idx = generated_text.rfind(ss)
+                                if idx >= 0:
+                                    generated_text = generated_text[:idx]
+                                stopped = True
+                                break
+                    if stopped:
+                        break
 
                     next_batch.token[0] = token_id
                     next_batch.pos[0] = n_cur
@@ -492,18 +598,18 @@ class LlamaCppConnector(EngineConnector):
                 lc.llama_sampler_free(sampler)
                 lc.llama_batch_free(next_batch)
 
-            text = self._model.detokenize(generated_tokens).decode(
-                "utf-8", errors="replace",
-            )
-
             logger.debug(
                 "generate(): think_ctx with %d enriched positions + "
-                "%d prompt tokens, generated %d tokens",
-                n_past, n_cur - n_past, len(generated_tokens),
+                "%d prompt tokens, generated %d chars, stopped=%s",
+                n_past, n_cur - n_past, len(generated_text), stopped,
             )
-            return text
+            return generated_text
 
         finally:
+            # Detach the destructor before manual free to avoid double-free
+            finalizer = getattr(context, "_llamacpp_finalizer", None)
+            if finalizer:
+                finalizer.detach()
             lc.llama_free(think_ctx)
             context._llamacpp_ctx = None
 
@@ -517,6 +623,9 @@ class LlamaCppConnector(EngineConnector):
     ) -> str:
         """Generate text with a prepended embedding via batch.embd.
 
+        Creates a dedicated context (not shared with the model's
+        internal context) so concurrent calls don't corrupt state.
+
         Pipeline:
         1. Inject embedding as position 0 via batch.embd
         2. Decode prompt tokens at positions 1..L
@@ -526,7 +635,7 @@ class LlamaCppConnector(EngineConnector):
         import numpy as np
         from llama_cpp import llama_cpp
 
-        ctx = self._model._ctx.ctx
+        model_ptr = self._model._model.model
         n_embd = self._n_embd
 
         # Ensure embedding is float32 numpy [n_embd]
@@ -545,114 +654,378 @@ class LlamaCppConnector(EngineConnector):
             )
             return output["choices"][0]["text"]
 
-        # Clear KV cache for a fresh context
-        llama_cpp.llama_kv_self_clear(ctx)
-
-        # Step 1: Inject embedding at position 0 via batch.embd
-        emb_batch = llama_cpp.llama_batch_init(1, n_embd, 1)
-        try:
-            ctypes.memmove(
-                emb_batch.embd,
-                emb_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                ctypes.sizeof(ctypes.c_float) * n_embd,
+        # Create a dedicated context to avoid corrupting the model's
+        # internal context. Freed in the finally block below.
+        ctx_params = llama_cpp.llama_context_default_params()
+        ctx_params.n_ctx = self._n_ctx
+        ctx_params.n_batch = self._n_ctx
+        ctx = llama_cpp.llama_new_context_with_model(model_ptr, ctx_params)
+        if not ctx:
+            logger.warning("_generate_with_embedding: failed to create context")
+            output = self._model(
+                prompt, max_tokens=max_tokens, temperature=temperature,
             )
-            emb_batch.n_tokens = 1
-            emb_batch.pos[0] = 0
-            emb_batch.seq_id[0][0] = 0
-            emb_batch.n_seq_id[0] = 1
-            emb_batch.logits[0] = 0  # No logits needed for prefix
+            return output["choices"][0]["text"]
 
-            rc = llama_cpp.llama_decode(ctx, emb_batch)
-            if rc != 0:
-                logger.warning("Embedding decode failed (rc=%d), falling back to text", rc)
-                output = self._model(
-                    prompt, max_tokens=max_tokens, temperature=temperature,
+        try:
+            # Step 1: Inject embedding at position 0 via batch.embd
+            emb_batch = llama_cpp.llama_batch_init(1, n_embd, 1)
+            try:
+                ctypes.memmove(
+                    emb_batch.embd,
+                    emb_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    ctypes.sizeof(ctypes.c_float) * n_embd,
                 )
-                return output["choices"][0]["text"]
-        finally:
-            llama_cpp.llama_batch_free(emb_batch)
+                emb_batch.n_tokens = 1
+                emb_batch.pos[0] = 0
+                emb_batch.seq_id[0][0] = 0
+                emb_batch.n_seq_id[0] = 1
+                emb_batch.logits[0] = 0  # No logits needed for prefix
 
-        # Step 2: Decode prompt tokens at positions 1..L
-        tokens = self._model.tokenize(prompt.encode("utf-8"), add_bos=True)
-        n_prompt = len(tokens)
-
-        tok_batch = llama_cpp.llama_batch_init(n_prompt, 0, 1)
-        try:
-            for i, tok in enumerate(tokens):
-                tok_batch.token[i] = tok
-                tok_batch.pos[i] = i + 1  # offset by 1 for the embedding prefix
-                tok_batch.seq_id[i][0] = 0
-                tok_batch.n_seq_id[i] = 1
-                tok_batch.logits[i] = 1 if i == n_prompt - 1 else 0
-            tok_batch.n_tokens = n_prompt
-
-            rc = llama_cpp.llama_decode(ctx, tok_batch)
-            if rc != 0:
-                logger.warning("Prompt decode failed (rc=%d)", rc)
-                return ""
-        finally:
-            llama_cpp.llama_batch_free(tok_batch)
-
-        # Step 3: Autoregressive generation
-        sampler = self._make_sampler(llama_cpp, temperature, top_p)
-
-        generated_tokens = []
-        n_cur = 1 + n_prompt  # current position (1 embd + L prompt)
-        stop_tokens = self._get_stop_tokens()
-
-        next_batch = llama_cpp.llama_batch_init(1, 0, 1)
-        try:
-            for _ in range(max_tokens):
-                token_id = llama_cpp.llama_sampler_sample(sampler, ctx, -1)
-                llama_cpp.llama_sampler_accept(sampler, token_id)
-
-                if token_id in stop_tokens:
-                    break
-
-                generated_tokens.append(token_id)
-
-                next_batch.token[0] = token_id
-                next_batch.pos[0] = n_cur
-                next_batch.seq_id[0][0] = 0
-                next_batch.n_seq_id[0] = 1
-                next_batch.logits[0] = 1
-                next_batch.n_tokens = 1
-                n_cur += 1
-
-                rc = llama_cpp.llama_decode(ctx, next_batch)
+                rc = llama_cpp.llama_decode(ctx, emb_batch)
                 if rc != 0:
-                    break
+                    logger.warning(
+                        "Embedding decode failed (rc=%d), falling back to text", rc,
+                    )
+                    output = self._model(
+                        prompt, max_tokens=max_tokens, temperature=temperature,
+                    )
+                    return output["choices"][0]["text"]
+            finally:
+                llama_cpp.llama_batch_free(emb_batch)
+
+            # Step 2: Decode prompt tokens at positions 1..L
+            tokens = self._apply_chat_template(prompt)
+            n_prompt = len(tokens)
+
+            tok_batch = llama_cpp.llama_batch_init(n_prompt, 0, 1)
+            try:
+                for i, tok in enumerate(tokens):
+                    tok_batch.token[i] = tok
+                    tok_batch.pos[i] = i + 1  # offset by 1 for embedding prefix
+                    tok_batch.seq_id[i][0] = 0
+                    tok_batch.n_seq_id[i] = 1
+                    tok_batch.logits[i] = 1 if i == n_prompt - 1 else 0
+                tok_batch.n_tokens = n_prompt
+
+                rc = llama_cpp.llama_decode(ctx, tok_batch)
+                if rc != 0:
+                    logger.warning("Prompt decode failed (rc=%d)", rc)
+                    return ""
+            finally:
+                llama_cpp.llama_batch_free(tok_batch)
+
+            # Step 3: Autoregressive generation with text-based stop detection
+            sampler = self._make_sampler(llama_cpp, temperature, top_p)
+            n_cur = 1 + n_prompt  # current position (1 embd + L prompt)
+            stop_tokens = self._get_stop_tokens()
+            stop_strings = self._get_stop_strings()
+            generated_text = ""
+            stopped = False
+
+            next_batch = llama_cpp.llama_batch_init(1, 0, 1)
+            try:
+                for _ in range(max_tokens):
+                    token_id = llama_cpp.llama_sampler_sample(sampler, ctx, -1)
+                    llama_cpp.llama_sampler_accept(sampler, token_id)
+
+                    if token_id in stop_tokens:
+                        stopped = True
+                        break
+
+                    try:
+                        piece = self._model.detokenize(
+                            [token_id], special=True,
+                        ).decode("utf-8", errors="replace")
+                    except TypeError:
+                        piece = self._model.detokenize(
+                            [token_id],
+                        ).decode("utf-8", errors="replace")
+                    generated_text += piece
+
+                    if stop_strings:
+                        tail = generated_text[-64:]
+                        for ss in stop_strings:
+                            if ss in tail:
+                                idx = generated_text.rfind(ss)
+                                if idx >= 0:
+                                    generated_text = generated_text[:idx]
+                                stopped = True
+                                break
+                    if stopped:
+                        break
+
+                    next_batch.token[0] = token_id
+                    next_batch.pos[0] = n_cur
+                    next_batch.seq_id[0][0] = 0
+                    next_batch.n_seq_id[0] = 1
+                    next_batch.logits[0] = 1
+                    next_batch.n_tokens = 1
+                    n_cur += 1
+
+                    rc = llama_cpp.llama_decode(ctx, next_batch)
+                    if rc != 0:
+                        break
+            finally:
+                llama_cpp.llama_sampler_free(sampler)
+                llama_cpp.llama_batch_free(next_batch)
+
+            logger.debug(
+                "generate(): injected embedding + %d prompt tokens, "
+                "generated %d chars, stopped=%s",
+                n_prompt, len(generated_text), stopped,
+            )
+            return generated_text
+
         finally:
-            llama_cpp.llama_sampler_free(sampler)
-            llama_cpp.llama_batch_free(next_batch)
-
-        # Detokenize
-        text = self._model.detokenize(generated_tokens).decode("utf-8", errors="replace")
-
-        logger.debug(
-            "generate(): injected embedding + %d prompt tokens, generated %d tokens",
-            n_prompt, len(generated_tokens),
-        )
-        return text
+            llama_cpp.llama_free(ctx)
 
     def _get_stop_tokens(self) -> set:
         """Get the set of token IDs that should stop generation.
 
         Includes EOS and chat template end markers (<|im_end|> for ChatML,
-        </s> for Llama). Without these, the model generates past the
-        answer into fake multi-turn conversations.
+        </s> for Llama, <|eot_id|> for Llama 3). Without these, the model
+        generates past the answer into fake multi-turn conversations.
+
+        Uses safe Python-level APIs only (no direct ctypes C calls) to
+        avoid segfaults across llama-cpp-python versions:
+        1. GGUF metadata lookup for eot_token_id
+        2. tokenize(..., special=True) on newer llama-cpp-python
+        3. detokenize scan over tail of vocabulary
+
+        Results are cached after first call.
         """
-        stops = {self._model.token_eos()}
-        # Try to find <|im_end|> token (ChatML)
-        try:
-            im_end = self._model.tokenize(
-                "<|im_end|>".encode("utf-8"), add_bos=False, special=True,
-            )
-            if im_end:
-                stops.add(im_end[0])
-        except (TypeError, AttributeError):
-            pass
+        if hasattr(self, "_cached_stop_tokens"):
+            return self._cached_stop_tokens
+
+        stops = set()
+
+        # Always include EOS
+        eos = self._model.token_eos()
+        if eos >= 0:
+            stops.add(eos)
+
+        # Strategy 1: read eot_token_id from GGUF metadata (safest)
+        meta = self._model.metadata or {}
+        for key, val in meta.items():
+            if "eot_token_id" in key:
+                try:
+                    eot = int(val)
+                    if 0 <= eot < self._n_vocab:
+                        stops.add(eot)
+                        logger.debug("Found EOT from metadata %s: %d", key, eot)
+                except (ValueError, TypeError):
+                    pass
+
+        # Strategy 2: derive stop markers from chat template, then tokenize
+        # This is model-agnostic — works for any model with a template.
+        stop_markers = self._get_stop_strings()  # template-derived
+        for marker in stop_markers:
+            # Only try to tokenize special-token-shaped markers
+            if not (marker.startswith("<|") or marker.startswith("[/")):
+                continue
+            try:
+                ids = self._model.tokenize(
+                    marker.encode("utf-8"), add_bos=False, special=True,
+                )
+                if ids and len(ids) == 1:
+                    stops.add(ids[0])
+                    logger.debug(
+                        "Found stop token via tokenize: %s = %d", marker, ids[0],
+                    )
+            except (TypeError, AttributeError):
+                pass
+
+        # Strategy 3: detokenize scan over tail of vocabulary
+        # Only if strategies 1-2 found nothing beyond EOS.
+        # Uses template-derived markers as the search target.
+        if len(stops) <= 1:
+            search_strings = {
+                m for m in stop_markers
+                if m.startswith("<|") or m.startswith("[/") or m == "</s>"
+            }
+            if search_strings:
+                start = max(0, self._n_vocab - 1000)
+                for token_id in range(start, self._n_vocab):
+                    try:
+                        piece = self._model.detokenize(
+                            [token_id], special=True,
+                        )
+                    except TypeError:
+                        piece = self._model.detokenize([token_id])
+                    try:
+                        text = piece.decode("utf-8", errors="replace")
+                        if text in search_strings:
+                            stops.add(token_id)
+                            logger.debug(
+                                "Found stop token via detokenize: %s = %d",
+                                text, token_id,
+                            )
+                            if len(stops) > 3:
+                                break
+                    except Exception:
+                        continue
+
+        logger.info("Stop tokens: %s", stops)
+        self._cached_stop_tokens = stops
         return stops
+
+    def _get_stop_strings(self) -> list:
+        """Get text-based stop strings for generation.
+
+        Derives stop strings from the model's chat template by rendering
+        a sample conversation and extracting the markers that appear
+        between/after turns. Falls back to generic patterns if no
+        template is available.
+
+        This is model-agnostic — new model families with custom
+        templates work automatically.
+        """
+        if hasattr(self, "_cached_stop_strings"):
+            return self._cached_stop_strings
+
+        stops = []
+        template_str = self._get_chat_template()
+
+        if template_str:
+            stops = self._extract_stop_strings_from_template(template_str)
+
+        if not stops:
+            # Generic fallback when no template or extraction fails
+            stops = ["<|im_end|>", "</s>"]
+
+        # Universal stop strings: common model behaviors that can't be
+        # derived from chat templates. <|endoftext|> is emitted by many
+        # models (Qwen, GPT-family) as the actual stop signal even when
+        # the chat template uses different markers.
+        for universal in ["<|endoftext|>"]:
+            if universal not in stops:
+                stops.append(universal)
+
+        # Always add multi-turn hallucination guards
+        stops.extend(["\nHuman:", "\nUser:"])
+
+        logger.info("Stop strings: %s", stops)
+        self._cached_stop_strings = stops
+        return stops
+
+    @staticmethod
+    def _extract_stop_strings_from_template(template_str: str) -> list:
+        """Extract end-of-turn markers from a chat template.
+
+        Renders a sample two-turn conversation with sentinel content,
+        then extracts the text between the assistant's response and the
+        next user turn. These markers are what the model should emit
+        to signal end-of-generation.
+
+        Returns a list of stop strings, or empty list on failure.
+        """
+        try:
+            sentinel = "SENTINEL_RESPONSE_TEXT"
+            # Render: user → assistant(sentinel) → user
+            # The text between sentinel and the second user message
+            # contains the end-of-turn markers.
+            messages = [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": sentinel},
+                {"role": "user", "content": "World"},
+            ]
+            full = LlamaCppConnector._render_chat_template(
+                template_str, messages, add_generation_prompt=False,
+            )
+            if not full or sentinel not in full:
+                return []
+
+            # Also render just user + generation prompt to find the
+            # start-of-assistant marker (for detecting new turns)
+            gen_prompt = LlamaCppConnector._render_chat_template(
+                template_str,
+                [{"role": "user", "content": "Hello"}],
+                add_generation_prompt=True,
+            )
+
+            # Extract: everything after sentinel up to "World"
+            after_sentinel = full.split(sentinel, 1)[1]
+            before_next_user = after_sentinel.split("World", 1)[0]
+            # This contains end-of-turn markers + next-turn prefix
+
+            stops = []
+            # Extract individual special token patterns (<|...|>, [/INST], etc.)
+            import re
+            special_tokens = re.findall(
+                r"<\|[^|]+\|>|\[/?[A-Z]+\]|</s>", before_next_user,
+            )
+            for tok in special_tokens:
+                if tok not in stops:
+                    stops.append(tok)
+
+            # Also add the start-of-next-turn marker if we can find it
+            if gen_prompt:
+                after_hello = gen_prompt.split("Hello", 1)
+                if len(after_hello) > 1:
+                    turn_markers = re.findall(
+                        r"<\|[^|]+\|>|\[/?[A-Z]+\]|</s>",
+                        after_hello[1],
+                    )
+                    # The last special token before generation is the
+                    # start-of-assistant marker — stop if we see it mid-gen
+                    for tok in turn_markers:
+                        if tok not in stops:
+                            stops.append(tok)
+
+            return stops
+        except Exception:
+            return []
+
+    def _get_embed_weight(self, torch: Any) -> tuple:
+        """Get cached embedding weight matrix and target norm.
+
+        Extracts and dequantizes token_embd.weight from the GGUF file
+        on first call, then returns the cached version.
+
+        Returns:
+            (embed_weight, target_norm) or (None, None) on failure.
+        """
+        if hasattr(self, "_embed_weight_cache"):
+            return self._embed_weight_cache
+
+        try:
+            from ._llamacpp_compat import extract_gguf_embedding_weights
+            emb_np = extract_gguf_embedding_weights(self._model_path)
+            embed_weight = torch.from_numpy(emb_np).float()
+            target_norm = embed_weight.norm(dim=1).mean().detach()
+            self._embed_weight_cache = (embed_weight, target_norm)
+            return self._embed_weight_cache
+        except Exception as e:
+            logger.warning("Cannot load embed weights for projection: %s", e)
+            self._embed_weight_cache = (None, None)
+            return (None, None)
+
+    @staticmethod
+    def _free_ctx(ctx: Any) -> None:
+        """Release a llama_context. Used as weakref.finalize callback."""
+        if ctx is not None:
+            try:
+                from llama_cpp import llama_cpp as lc
+                lc.llama_free(ctx)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _release_ctx(context: Any) -> None:
+        """Detach finalizer and free C context from an AVPContext."""
+        think_ctx = getattr(context, "_llamacpp_ctx", None)
+        if think_ctx is None:
+            return
+        finalizer = getattr(context, "_llamacpp_finalizer", None)
+        if finalizer:
+            finalizer.detach()
+        try:
+            from llama_cpp import llama_cpp as lc
+            lc.llama_free(think_ctx)
+        except Exception:
+            pass
+        context._llamacpp_ctx = None
 
     @staticmethod
     def _make_sampler(lc: Any, temperature: float, top_p: float) -> Any:
@@ -693,33 +1066,22 @@ class LlamaCppConnector(EngineConnector):
         """
         import torch
         from ..rosetta.project import vocabulary_mediated_projection
-        from ._llamacpp_compat import extract_gguf_embedding_weights
 
-        # Cache extracted weights
-        if not hasattr(self, "_tgt_embed_weight"):
-            try:
-                tgt_np = extract_gguf_embedding_weights(self._model_path)
-                self._tgt_embed_weight = torch.from_numpy(tgt_np).float()
-            except Exception as e:
-                logger.warning("Cannot load target embed weights: %s", e)
-                return hidden
+        # Use cached embed weights from both connectors
+        tgt_weight, target_norm = self._get_embed_weight(torch)
+        src_weight, _ = source._get_embed_weight(torch)
 
-        if not hasattr(source, "_src_embed_weight"):
-            try:
-                src_np = extract_gguf_embedding_weights(source._model_path)
-                source._src_embed_weight = torch.from_numpy(src_np).float()
-            except Exception as e:
-                logger.warning("Cannot load source embed weights: %s", e)
-                return hidden
-
-        # Use source embed weight as lm_head (GGUF models typically have
-        # tied weights, so embed_tokens == lm_head)
-        target_norm = self._tgt_embed_weight.norm(dim=1).mean().detach()
+        if tgt_weight is None:
+            logger.warning("Cannot load target embed weights for rosetta")
+            return hidden
+        if src_weight is None:
+            logger.warning("Cannot load source embed weights for rosetta")
+            return hidden
 
         projected = vocabulary_mediated_projection(
             hidden.float(),
-            source._src_embed_weight,
-            self._tgt_embed_weight,
+            src_weight,
+            tgt_weight,
             temperature=1.0,
             target_norm=target_norm,
         )
@@ -743,7 +1105,6 @@ class LlamaCppConnector(EngineConnector):
         )
 
     def extract_hidden_state(self, input_ids, attention_mask=None, past_key_values=None):
-        # Hidden state extraction is done via cb_eval in think()
         raise NotImplementedError(
             "Use think() for hidden state extraction on llama.cpp"
         )
@@ -751,9 +1112,8 @@ class LlamaCppConnector(EngineConnector):
     def inject_and_generate(self, inputs_embeds, attention_mask=None,
                             past_key_values=None, max_new_tokens=256,
                             temperature=0.7, top_p=0.95):
-        # Embedding injection via batch.embd planned for next iteration
         raise NotImplementedError(
-            "Embedding injection via batch.embd is planned for a future release"
+            "Use generate(prompt, context=) for embedding injection on llama.cpp"
         )
 
     def get_embedding_weights(self):

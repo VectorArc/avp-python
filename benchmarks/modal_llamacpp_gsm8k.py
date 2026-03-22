@@ -32,10 +32,10 @@ image = (
         '--no-cache-dir',
     )
     .env({"LD_LIBRARY_PATH": "/usr/local/lib/python3.11/site-packages/torch/lib"})
-    .pip_install(
-        "git+https://github.com/VectorArc/avp-python.git@main",
-        force_build=True,
-    )
+    .add_local_dir("src", remote_path="/tmp/avp-local/src", copy=True)
+    .add_local_file("pyproject.toml", remote_path="/tmp/avp-local/pyproject.toml", copy=True)
+    .add_local_file("README.md", remote_path="/tmp/avp-local/README.md", copy=True)
+    .run_commands("pip install /tmp/avp-local")
 )
 
 
@@ -119,7 +119,7 @@ def run_benchmark(n: int = 50):
     for i, q in enumerate(questions):
         # Think
         solve_prompt = f"Solve step by step: {q}"
-        context = connector.think(solve_prompt, steps=0)
+        context = connector.think(solve_prompt, steps=20)
 
         # Generate — same prompt, continue from enriched KV
         if context is not None:

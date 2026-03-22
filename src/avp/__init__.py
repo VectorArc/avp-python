@@ -118,6 +118,12 @@ def __getattr__(name: str):
     if name == "VLLMConnector":
         from .connectors.vllm import VLLMConnector
         return VLLMConnector
+    if name == "LlamaCppConnector":
+        from .connectors.llamacpp import LlamaCppConnector
+        return LlamaCppConnector
+    if name == "OllamaConnector":
+        from .connectors.ollama import OllamaConnector
+        return OllamaConnector
     if name in _EASY_NAMES:
         from . import easy as _easy
         return getattr(_easy, name)
@@ -144,9 +150,11 @@ __all__ = [
     "HandshakeMetrics",
     "TransferDiagnostics",
     "DebugConfig",
-    # Connectors (lazy — requires torch/transformers/vllm)
+    # Connectors (lazy — requires torch/transformers/vllm/llama-cpp-python)
     "HuggingFaceConnector",
     "VLLMConnector",
+    "LlamaCppConnector",
+    "OllamaConnector",
     "AVPContext",
     # Protocol
     "encode",

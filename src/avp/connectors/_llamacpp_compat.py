@@ -224,15 +224,17 @@ def extract_gguf_embedding_weights(model_path: str) -> Any:
     data = gguf_dequantize(tensor.data, tensor.tensor_type).astype(np.float32).flatten()
 
     # Infer shape from GGUF metadata (more reliable than tensor.shape
-    # which may reflect quantized block layout, not logical dimensions)
+    # which may reflect quantized block layout, not logical dimensions).
+    # Search all fields for embedding_length — model-agnostic, works
+    # for any architecture (llama, qwen2, gemma, mistral, phi, etc.)
     n_embd_val = None
-    for key_prefix in ("llama", "qwen2", "gemma", "mistral", "phi"):
-        field = reader.get_field(f"{key_prefix}.embedding_length")
-        if field is not None:
-            # field.parts is a list of numpy arrays; extract the scalar
-            val = field.parts[-1]
-            n_embd_val = int(val.item() if hasattr(val, "item") else val)
-            break
+    for field_key in reader.fields:
+        if field_key.endswith(".embedding_length"):
+            field = reader.get_field(field_key)
+            if field is not None:
+                val = field.parts[-1]
+                n_embd_val = int(val.item() if hasattr(val, "item") else val)
+                break
 
     if n_embd_val is None:
         # Last resort: use tensor.shape

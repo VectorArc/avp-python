@@ -17,6 +17,7 @@ env/
 .env
 *.so
 .pytest_cache/
+pytest-of-*/
 .ruff_cache/
 .mypy_cache/
 benchmarks/results/*.json
