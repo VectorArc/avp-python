@@ -12,8 +12,6 @@ Wire format:
 
 import struct
 
-import numpy as np
-
 from . import avp_pb2
 from .compression import compress, decompress
 from .errors import DecodeError, InvalidMagicError, UnsupportedVersionError
@@ -32,7 +30,6 @@ from .types import (
     DataType,
     PayloadType,
 )
-from .utils import embedding_to_bytes
 
 # struct format: 2s magic, B version, B flags, I payload_len, I metadata_len
 _HEADER_FMT = "<2sBBII"
@@ -185,18 +182,6 @@ def decode(data: bytes) -> AVPMessage:
 
 
 # --- Convenience encoders ---
-
-
-def encode_hidden_state(
-    hidden_state: np.ndarray,
-    metadata: AVPMetadata,
-    compression: CompressionLevel = CompressionLevel.NONE,
-) -> bytes:
-    """Encode a hidden state tensor into an AVP message."""
-    metadata.payload_type = PayloadType.HIDDEN_STATE
-    metadata.tensor_shape = hidden_state.shape
-    payload = embedding_to_bytes(hidden_state)
-    return encode(payload, metadata, compression)
 
 
 def encode_kv_cache(

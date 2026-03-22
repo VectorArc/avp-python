@@ -928,31 +928,6 @@ class TestValidation:
         assert result.perplexity > 0
         assert result.detail  # non-empty
 
-    def test_connector_validate_cross_model(self, tiny_gpt2_64, tiny_gpt2_128):
-        """HuggingFaceConnector.validate_cross_model() convenience method works."""
-        from avp.connectors.huggingface import HuggingFaceConnector
-        from avp.rosetta.calibrate import calibrate
-        from avp.rosetta.validate import ValidationResult
-
-        src_model, _ = tiny_gpt2_64
-        tgt_model, _ = tiny_gpt2_128
-        src_tok = VocabMockTokenizer(vocab_size=256)
-        tgt_tok = VocabMockTokenizer(vocab_size=256)
-
-        src_connector = HuggingFaceConnector(
-            model=src_model, tokenizer=src_tok, device="cpu",
-        )
-        tgt_connector = HuggingFaceConnector(
-            model=tgt_model, tokenizer=tgt_tok, device="cpu",
-        )
-
-        avp_map = calibrate(
-            src_model, tgt_model, src_tok, tgt_tok, device="cpu",
-        )
-
-        result = src_connector.validate_cross_model(tgt_connector, avp_map)
-
-        assert isinstance(result, ValidationResult)
         assert isinstance(result.cosine_similarity, float)
         assert result.detail
 

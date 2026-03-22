@@ -162,66 +162,6 @@ class AVPClient:
         self.close()
 
 
-class AVPAsyncClient:
-    """Async HTTP/2 client for sending AVP binary and JSON messages."""
-
-    def __init__(
-        self,
-        base_url: str,
-        agent_id: str = "default",
-        model_identity: Optional[ModelIdentity] = None,
-        token: Optional[str] = None,
-        timeout: float = 30.0,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.agent_id = agent_id
-        self.model_identity = model_identity
-        self.token = token
-        self._client = httpx.AsyncClient(
-            http2=True,
-            timeout=timeout,
-            base_url=self.base_url,
-        )
-
-    def _headers(self) -> Dict[str, str]:
-        headers = {
-            "Content-Type": CONTENT_TYPE,
-            "AVP-Version": AVP_VERSION_HEADER,
-            "AVP-Agent-ID": self.agent_id,
-        }
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        return headers
-
-    async def transmit(
-        self,
-        payload: bytes,
-        metadata: AVPMetadata,
-        compression: CompressionLevel = CompressionLevel.NONE,
-    ) -> httpx.Response:
-        data = encode(payload, metadata, compression)
-
-        resp = await self._client.post(
-            "/avp/v2/transmit", content=data, headers=self._headers()
-        )
-
-        if resp.status_code >= 400:
-            raise TransportError(
-                f"Transmit failed: {resp.status_code} {resp.text}",
-                status_code=resp.status_code,
-            )
-        return resp
-
-    async def close(self) -> None:
-        await self._client.aclose()
-
-    async def __aenter__(self) -> "AVPAsyncClient":
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        await self.close()
-
-
 # --- FastAPI server factory ---
 
 AVPHandler = Callable[[AVPMessage], Awaitable[dict]]

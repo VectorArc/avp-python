@@ -206,19 +206,3 @@ class GenerateMetrics:
     """Debug diagnostics (populated when debug=True)."""
 
 
-@dataclass
-class HandshakeMetrics:
-    """Metrics from a handshake resolve() call."""
-
-    resolution_path: str = ""
-    """Which rule matched: 'hash_match', 'structural_match',
-    'shared_tokenizer', 'avp_map_file', or 'json_fallback'."""
-
-    mode: str = ""
-    """Resolved communication mode ('LATENT' or 'JSON')."""
-
-    avp_map_id: str = ""
-    """The avp_map_id assigned, if any."""
-
-    duration_s: float = 0.0
-    """Wall-clock time for resolve() in seconds."""

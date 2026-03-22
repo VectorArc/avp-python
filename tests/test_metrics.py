@@ -4,7 +4,7 @@ import json
 import warnings
 
 import avp
-from avp.metrics import GenerateMetrics, HandshakeMetrics, ThinkMetrics
+from avp.metrics import GenerateMetrics, ThinkMetrics
 
 
 # --- Dataclass defaults ---
@@ -30,14 +30,6 @@ def test_generate_metrics_defaults():
     assert m.generate_duration_s == 0.0
 
 
-def test_handshake_metrics_defaults():
-    m = HandshakeMetrics()
-    assert m.resolution_path == ""
-    assert m.mode == ""
-    assert m.avp_map_id == ""
-    assert m.duration_s == 0.0
-
-
 def test_think_metrics_field_assignment():
     m = ThinkMetrics(model="test", steps=20, duration_s=1.5)
     assert m.model == "test"
@@ -58,7 +50,6 @@ def test_pack_metrics_is_think_metrics():
 
 def test_think_metrics_importable_from_avp():
     assert avp.ThinkMetrics is ThinkMetrics
-    assert avp.HandshakeMetrics is HandshakeMetrics
 
 
 # --- Deprecated pack/unpack with collect_metrics ---

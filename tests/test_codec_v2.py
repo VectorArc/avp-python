@@ -168,17 +168,6 @@ def test_flag_bits_combined():
 # --- Convenience encoders ---
 
 
-def test_encode_hidden_state():
-    hidden = np.random.randn(512).astype(np.float32)
-    metadata = AVPMetadata(model_id="test", hidden_dim=512)
-    data = avp.encode_hidden_state(hidden, metadata)
-    msg = avp.decode(data)
-
-    assert msg.metadata.payload_type == PayloadType.HIDDEN_STATE
-    assert msg.metadata.tensor_shape == (512,)
-    np.testing.assert_array_equal(hidden, msg.embedding)
-
-
 def test_encode_kv_cache():
     kv_data = b"\xaa\xbb\xcc" * 100
     metadata = AVPMetadata(model_id="test")

@@ -22,7 +22,7 @@ from .context_store import ContextStore
 
 # --- Protocol layer ---
 from .codec import decode, encode
-from .codec import encode_hidden_state, encode_kv_cache  # noqa: F401
+from .codec import encode_kv_cache  # noqa: F401
 from .compression import compress, decompress  # noqa: F401
 from .handshake import CompatibilityResolver, extract_model_identity
 from .handshake import HelloMessage, compute_model_hash, compute_tokenizer_hash  # noqa: F401
@@ -90,7 +90,7 @@ _ROSETTA_NAMES = {
 # Transport classes are lazy-loaded because httpx is an optional dependency.
 # Access avp.AVPClient / avp.AVPAsyncClient / avp.create_app and they'll be
 # imported on first use; raises ImportError with install hint if httpx is missing.
-_TRANSPORT_NAMES = {"AVPClient", "AVPAsyncClient", "create_app"}
+_TRANSPORT_NAMES = {"AVPClient", "create_app"}
 
 # Easy API helpers that need lazy loading
 _EASY_NAMES = {"clear_cache", "inspect"}
@@ -98,7 +98,7 @@ _EASY_NAMES = {"clear_cache", "inspect"}
 # Metrics classes — lazy-loaded to avoid unconditional import
 _METRICS_NAMES = {
     "ThinkMetrics", "PackMetrics", "UnpackMetrics",
-    "GenerateMetrics", "HandshakeMetrics", "TransferDiagnostics", "DebugConfig",
+    "GenerateMetrics", "TransferDiagnostics", "DebugConfig",
 }
 
 
@@ -147,7 +147,6 @@ __all__ = [
     # Observability (lazy — stdlib only)
     "ThinkMetrics",
     "GenerateMetrics",
-    "HandshakeMetrics",
     "TransferDiagnostics",
     "DebugConfig",
     # Connectors (lazy — requires torch/transformers/vllm/llama-cpp-python)
