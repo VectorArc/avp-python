@@ -1,6 +1,6 @@
 # AVP Benchmarks
 
-> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** – 6 benchmarks, 5 models, 2 families. Cross-model rosetta across 4 model pairs.
+> **+14.1pp on code generation vs text (p=0.004) · 14-78% fewer tokens · 1.2-4x faster** – 7 benchmarks, 5 models, 2 families. Cross-model rosetta across 4 model pairs.
 
 ---
 
@@ -128,7 +128,7 @@ All three modes are statistically identical (p=1.0 latent vs text). Earlier runs
 ## Reproduce
 
 ```bash
-pip install "avp" datasets
+pip install "avp[hf]" datasets
 
 python -m benchmarks.humaneval.run_humaneval \
     --model_name Qwen/Qwen2.5-7B-Instruct \

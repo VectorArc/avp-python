@@ -8,7 +8,7 @@ Both plugins are auto-discovered via the `vllm.general_plugins` entry point when
 
 - `pip install avp[vllm]` (vLLM >= 0.17.0)
 - CUDA GPU
-- Currently supports **Qwen2** model family (Llama, Mistral planned)
+- Supports **Qwen2, Llama, Mistral, and Gemma** model families
 
 ## Quick Start
 
@@ -119,13 +119,13 @@ KV Connector                           Model Plugin
 
 ## Limitations
 
-- **Qwen2 only**: Other model families not yet registered. The factory pattern supports adding them.
+- **4 architectures**: Qwen2, Llama, Mistral, Gemma. Other model families require adding a wrapper class in `vllm_model_plugin.py`.
 - **No tensor parallelism**: Latent steps disabled when TP > 1 (embedding table is sharded).
 - **No pipeline parallelism**: Latent steps disabled when PP > 1.
 - **`enforce_eager=True` recommended**: CUDA graph support not validated.
 - **Prompt padding required**: The extend pattern requires N placeholder tokens appended to the prompt via `prepare_latent_prompt()`. The model plugin overwrites these positions during the latent loop.
 - **File-based store**: KV transfer uses local filesystem. Not suitable for multi-node.
-- **Validated on vLLM 0.17.x only**: Internal API dependencies may break on other versions.
+- **Validated on vLLM 0.17–0.18**: Internal API dependencies may break on other versions.
 
 ## Verifying the Plugin
 
