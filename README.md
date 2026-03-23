@@ -83,7 +83,7 @@ Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 7 benchmarks, 5 models, 2
 
 ## How It Works
 
-<img src="assets/how_it_works_diagram.svg" alt="How AVP works" width="50%">
+![How AVP works](assets/how_it_works_diagram.svg)
 
 AVP auto-negotiates the transfer mode via a handshake at connection time. You write the same `think()` / `generate()` code regardless of which mode is selected:
 
