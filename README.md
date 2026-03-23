@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/avp.svg)](https://pypi.org/project/avp/)
 [![CI](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml/badge.svg)](https://github.com/VectorArc/avp-python/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![Spec](https://img.shields.io/badge/spec-v0.3-blue.svg)](https://github.com/VectorArc/avp-spec)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/VectorArc/avp-python/blob/main/notebooks/avp_quick_start.ipynb)
 

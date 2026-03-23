@@ -22,7 +22,7 @@ try:
     HAS_VLLM = True
 
     # Runtime version check — the model plugin uses FlashAttentionMetadata
-    # and set_forward_context APIs validated on vLLM 0.17.x only.
+    # and set_forward_context APIs validated on vLLM 0.17-0.18.
     try:
         import vllm as _vllm_mod
         _vllm_ver = getattr(_vllm_mod, "__version__", "0.0.0")
@@ -31,6 +31,12 @@ try:
             logger.warning(
                 "vLLM %s detected; AVP model plugin requires >= 0.17.0. "
                 "FlashAttentionMetadata API may be incompatible.",
+                _vllm_ver,
+            )
+        elif _major_minor >= (0, 19):
+            logger.warning(
+                "vLLM %s detected; AVP model plugin is validated on 0.17-0.18 only. "
+                "Newer versions may have breaking API changes.",
                 _vllm_ver,
             )
     except Exception:

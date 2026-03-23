@@ -15,9 +15,9 @@ app = modal.App("avp-vllm-cudagraph-check")
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
-    .pip_install("vllm>=0.17.0", "torch>=2.0", "transformers>=4.36")
+    .pip_install("vllm>=0.17.0,<0.19.0", "torch>=2.0", "transformers>=5.0")
     .pip_install(
-        "git+https://github.com/VectorArc/avp-python.git@engine_integration",
+        "git+https://github.com/VectorArc/avp-python.git@main",
         force_build=True,
     )
 )

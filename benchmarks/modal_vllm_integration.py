@@ -15,9 +15,9 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git")
     .pip_install(
-        "vllm>=0.17.0",
+        "vllm>=0.17.0,<0.19.0",
         "torch>=2.0",
-        "transformers>=4.36",
+        "transformers>=5.0",
     )
     # Install avp from the engine_integration branch
     # Cache bust: bump this comment to force re-install: v5

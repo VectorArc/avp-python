@@ -19,7 +19,7 @@ Registered via the ``vllm.general_plugins`` entry point so it is auto-discovered
 by all vLLM processes (including workers spawned via multiprocessing).
 
 FRAGILE(vllm): F8 -- Qwen2ForCausalLM import path, F9 -- ModelRegistry API.
-Validated on vLLM 0.17.1 only.
+Validated on vLLM 0.17-0.18.
 """
 
 import logging
