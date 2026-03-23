@@ -5,10 +5,10 @@
 ```bash
 git clone https://github.com/VectorArc/avp-python.git
 cd avp-python
-pip install -e ".[all]"
+pip install -e ".[dev]"
 ```
 
-This installs all dependencies including torch, transformers, vLLM, dev tools, and benchmarks.
+This installs torch, transformers, transport, server, and dev tools (pytest, ruff).
 
 ## Running Tests
 
@@ -34,7 +34,7 @@ ruff check src/ tests/
 ruff format src/ tests/
 ```
 
-Configuration is in `pyproject.toml`: line length 99, target Python 3.9.
+Configuration is in `pyproject.toml`: line length 99, target Python 3.10+.
 
 ## Bug Reports
 
