@@ -83,21 +83,7 @@ Full results: **[Benchmarks](docs/BENCHMARKS.md)** – 7 benchmarks, 5 models, 2
 
 ## How It Works
 
-```mermaid
-graph LR
-    subgraph text["Text Handoff"]
-        direction LR
-        A1["Agent A generates text"] -->|"serialize, re-tokenize"| B1["Agent B re-processes from scratch"]
-    end
-
-    subgraph avp["AVP Transfer"]
-        direction LR
-        A2["Agent A builds KV-cache"] -->|"binary transfer"| B2["Agent B continues from cached state"]
-    end
-
-    style text fill:#fff3f3,stroke:#d44,stroke-width:2px
-    style avp fill:#f3fff3,stroke:#4a4,stroke-width:2px
-```
+<img src="assets/how_it_works_diagram.svg" alt="How AVP works" width="50%">
 
 AVP auto-negotiates the transfer mode via a handshake at connection time. You write the same `think()` / `generate()` code regardless of which mode is selected:
 
