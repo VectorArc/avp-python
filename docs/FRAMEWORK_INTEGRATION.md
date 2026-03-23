@@ -80,25 +80,33 @@ No torch required. Projection math uses numpy only.
 
 ### vLLM – `pip install avp[vllm]`
 
-vLLM integration uses two engine plugins: a KV connector for cache transfer and a model plugin for latent thinking steps during prefill. Supports Qwen2, Llama, Mistral, and Gemma architectures. See [vLLM Integration](VLLM_INTEGRATION.md) for full details.
+vLLM integration uses two engine plugins: a KV connector for multi-agent cache transfer and a model plugin for latent thinking steps during prefill. Supports Qwen2, Llama, Mistral, and Gemma architectures.
 
 ```python
 from vllm import LLM, SamplingParams
+from vllm.config import KVTransferConfig
+
+ktc = KVTransferConfig(
+    kv_connector="AVPKVConnectorV1Dynamic",
+    kv_connector_module_path="avp.connectors.vllm_kv_connector",
+    kv_role="kv_both",
+    kv_connector_extra_config={
+        "avp_latent_steps": 20,
+        "avp_store_dir": "/tmp/avp_kv_store",
+    },
+)
 
 engine = LLM(
     model="Qwen/Qwen2.5-7B-Instruct",
+    kv_transfer_config=ktc,
     hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
-    kv_connector="avp.connectors.vllm_kv_connector.AVPKVConnectorV1Dynamic",
-    kv_role="kv_both",
-    enable_prompt_embeds=True,
 )
 
-# Agent A: think (latent steps build KV-cache, saved to file store)
-engine.generate("Analyze this problem: 24 * 17 + 3", SamplingParams(max_tokens=1))
-
-# Agent B: generate from Agent A's cached computation
-output = engine.generate("Solve step by step: 24 * 17 + 3", SamplingParams(max_tokens=256))
+params = SamplingParams(max_tokens=256, temperature=0.7)
+outputs = engine.generate(["Solve step by step: 24 * 17 + 3"], params)
 ```
+
+The KV connector auto-discovers cached state by prompt hash. Agent A's KV-cache is saved to the file store after generation; Agent B loads it automatically when it sees the same prompt prefix. For full configuration, cross-model rosetta, CLI usage, and architecture details, see **[vLLM Integration Guide](VLLM_INTEGRATION.md)**.
 
 ---
 
@@ -259,7 +267,7 @@ ctx = store.get("agent-a")  # None after TTL expires
 
 # Housekeeping
 store.active_count    # number of live entries
-store.cleanup()       # remove expired entries (also happens automatically)
+store.cleanup_expired()  # remove expired entries (also happens automatically)
 ```
 
 When used with `avp.generate(store=, store_key=, prior_key=)`, storing and retrieving happens automatically.

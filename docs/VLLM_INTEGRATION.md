@@ -105,8 +105,8 @@ Orchestration                          Orchestration
     |                                      |
     v                                      v
 Model Plugin                           KV Connector
-  latent steps (overwrite)               loads Agent A's KV from store
-  enriches KV at last position           injects into allocated blocks
+  latent steps (extend pattern)          loads Agent A's KV from store
+  grows KV-cache by N entries            injects into allocated blocks
     |                                      |
     v                                      v
 KV Connector                           Model Plugin
