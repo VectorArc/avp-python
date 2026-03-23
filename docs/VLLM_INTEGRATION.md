@@ -28,7 +28,6 @@ ktc = KVTransferConfig(
 
 engine = LLM(
     model="Qwen/Qwen2.5-7B-Instruct",
-    enforce_eager=True,
     kv_transfer_config=ktc,
     hf_overrides={"architectures": ["AVPLatentQwen2ForCausalLM"]},
 )
@@ -42,7 +41,6 @@ Or via CLI:
 
 ```bash
 vllm serve Qwen/Qwen2.5-7B-Instruct \
-  --enforce-eager \
   --kv-connector AVPKVConnectorV1Dynamic \
   --kv-connector-module-path avp.connectors.vllm_kv_connector \
   --kv-connector-extra-config '{"avp_latent_steps": 20}' \
@@ -53,7 +51,6 @@ Alternatively, set `AVP_OVERRIDE_QWEN2=1` to override all Qwen2 model loads glob
 
 ```bash
 AVP_OVERRIDE_QWEN2=1 vllm serve Qwen/Qwen2.5-7B-Instruct \
-  --enforce-eager \
   --kv-connector AVPKVConnectorV1Dynamic \
   --kv-connector-module-path avp.connectors.vllm_kv_connector \
   --kv-connector-extra-config '{"avp_latent_steps": 20}'
@@ -122,7 +119,7 @@ KV Connector                           Model Plugin
 - **4 architectures**: Qwen2, Llama, Mistral, Gemma. Other model families require adding a wrapper class in `vllm_model_plugin.py`.
 - **No tensor parallelism**: Latent steps disabled when TP > 1 (embedding table is sharded).
 - **No pipeline parallelism**: Latent steps disabled when PP > 1.
-- **`enforce_eager=True` recommended**: CUDA graph support not validated.
+- **CUDA graphs supported**: Validated with piecewise CUDA graph capture. The latent loop passes dummy `input_ids` during latent steps for graph compatibility.
 - **Prompt padding required**: The extend pattern requires N placeholder tokens appended to the prompt via `prepare_latent_prompt()`. The model plugin overwrites these positions during the latent loop.
 - **File-based store**: KV transfer uses local filesystem. Not suitable for multi-node.
 - **Validated on vLLM 0.17–0.18**: Internal API dependencies may break on other versions.
