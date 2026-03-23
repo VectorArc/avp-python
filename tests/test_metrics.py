@@ -1,8 +1,5 @@
 """Tests for AVP observability metrics."""
 
-import json
-import warnings
-
 import avp
 from avp.metrics import GenerateMetrics, ThinkMetrics
 
@@ -37,64 +34,11 @@ def test_think_metrics_field_assignment():
     assert m.duration_s == 1.5
 
 
-# --- PackMetrics is alias for ThinkMetrics ---
-
-
-def test_pack_metrics_is_think_metrics():
-    from avp.metrics import PackMetrics
-    assert PackMetrics is ThinkMetrics
-
-
 # --- ThinkMetrics importable from avp ---
 
 
 def test_think_metrics_importable_from_avp():
     assert avp.ThinkMetrics is ThinkMetrics
-
-
-# --- Deprecated pack/unpack with collect_metrics ---
-
-
-def test_pack_with_metrics_returns_tuple():
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        result = avp.pack("hello", collect_metrics=True)
-    assert isinstance(result, tuple)
-    msg, metrics = result
-    assert isinstance(metrics, ThinkMetrics)
-
-
-def test_pack_with_metrics_fields():
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        msg, metrics = avp.pack("hello", collect_metrics=True)
-    assert metrics.model is None
-    assert metrics.steps == 0
-    assert metrics.has_prior_context is False
-    assert metrics.duration_s > 0
-    assert msg.content == "hello"
-
-
-def test_unpack_text_with_metrics():
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        from avp.metrics import UnpackMetrics
-        result = avp.unpack("plain text", collect_metrics=True)
-    assert isinstance(result, tuple)
-    text, metrics = result
-    assert text == "plain text"
-    assert isinstance(metrics, UnpackMetrics)
-    assert metrics.input_format == "text"
-    assert metrics.generated is False
-
-
-def test_unpack_json_format():
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        data = json.dumps({"avp": "0.2", "content": "hello"})
-        text, metrics = avp.unpack(data, collect_metrics=True)
-    assert text == "hello"
-    assert metrics.input_format == "json"
 
 
 # --- TransferDiagnostics on metrics ---

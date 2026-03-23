@@ -17,7 +17,6 @@ For direct connector access:
 
 # --- Easy API (start here) ---
 from .easy import generate, think
-from .easy import PackedMessage, pack, unpack  # deprecated, kept for compat
 from .context_store import ContextStore
 
 # --- Protocol layer ---
@@ -97,7 +96,7 @@ _EASY_NAMES = {"clear_cache", "inspect"}
 
 # Metrics classes — lazy-loaded to avoid unconditional import
 _METRICS_NAMES = {
-    "ThinkMetrics", "PackMetrics", "UnpackMetrics",
+    "ThinkMetrics",
     "GenerateMetrics", "TransferDiagnostics", "DebugConfig",
 }
 
@@ -140,10 +139,6 @@ __all__ = [
     "inspect",
     "clear_cache",
     "ContextStore",
-    # Deprecated (remove in 0.4)
-    "pack",
-    "unpack",
-    "PackedMessage",
     # Observability (lazy — stdlib only)
     "ThinkMetrics",
     "GenerateMetrics",

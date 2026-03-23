@@ -146,37 +146,6 @@ class ThinkMetrics:
     """Debug diagnostics (populated when debug=True)."""
 
 
-# Keep PackMetrics importable as an alias
-PackMetrics = ThinkMetrics
-
-
-@dataclass
-class UnpackMetrics:
-    """Metrics collected during an unpack() call.
-
-    .. deprecated:: 0.3.0
-        Use avp.generate() with collect_metrics=True instead.
-    """
-
-    input_format: str = "unknown"
-    """Detected input format: 'text', 'json', 'binary', or 'packed_message'."""
-
-    has_context: bool = False
-    """Whether latent context was available for generation."""
-
-    generated: bool = False
-    """Whether model generation was performed (model= was provided)."""
-
-    duration_s: float = 0.0
-    """Total wall-clock time for unpack() in seconds."""
-
-    decode_duration_s: float = 0.0
-    """Time spent decoding the input."""
-
-    generate_duration_s: float = 0.0
-    """Time spent in connector.generate() (if model= provided)."""
-
-
 @dataclass
 class GenerateMetrics:
     """Metrics collected during a generate() call."""
