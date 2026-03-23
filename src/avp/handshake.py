@@ -23,7 +23,7 @@ class HelloMessage:
     """Message exchanged during AVP handshake."""
 
     agent_id: str = ""
-    avp_version: str = "0.3.0"
+    avp_version: str = "0.4.0"
     identity: Optional[ModelIdentity] = None
     capabilities: Dict[str, Any] = field(default_factory=dict)
 
@@ -44,7 +44,7 @@ class HelloMessage:
             identity = ModelIdentity.from_dict(d["identity"])
         return cls(
             agent_id=d.get("agent_id", ""),
-            avp_version=d.get("avp_version", "0.3.0"),
+            avp_version=d.get("avp_version", "0.4.0"),
             identity=identity,
             capabilities=d.get("capabilities", {}),
         )

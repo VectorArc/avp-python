@@ -14,8 +14,8 @@ PROTOCOL_VERSION = 0x01
 HEADER_SIZE = 12  # 2 magic + 1 version + 1 flags + 4 payload_len + 4 metadata_len
 
 CONTENT_TYPE = "application/avp+binary"
-AVP_VERSION_HEADER = "0.3"
-AVP_VERSION_STRING = "0.3.0"
+AVP_VERSION_HEADER = "0.4"
+AVP_VERSION_STRING = "0.4.0"
 
 # Flag bit constants
 FLAG_COMPRESSED = 0x01

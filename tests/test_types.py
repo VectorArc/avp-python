@@ -29,7 +29,7 @@ def test_protocol_version():
 
 
 def test_avp_version_string():
-    assert AVP_VERSION_STRING == "0.3.0"
+    assert AVP_VERSION_STRING == "0.4.0"
 
 
 # --- Enums ---
