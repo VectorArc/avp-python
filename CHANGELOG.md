@@ -4,6 +4,48 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-03-23
+
+### Added
+
+- **llama.cpp connector** – `LlamaCppConnector`: full think/generate latent pipeline on GGUF models via llama.cpp's embeddings API. Stop token fix, Jinja2 chat templates, memory leak fix (weakref.finalize), GGUF weight caching. GPU validated on A100. `pip install avp[llamacpp]`.
+- **Ollama connector** – `OllamaConnector.from_ollama("qwen2.5:7b")`: resolves Ollama model names to GGUF blobs on disk, auto-unloads from Ollama server to free VRAM. Inherits full latent pipeline from LlamaCppConnector. `pip install avp[ollama]`.
+- **vLLM latent communication** – Full integration: same-model KV transfer, cross-model rosetta, 4 model architectures (Qwen2, Llama, Mistral, Gemma), CUDA graph support, prefix caching, explicit store key API. GPU validated on A100. `pip install avp[vllm]`.
+- **Framework integrations** – LangChain (`ChatAVP` BaseChatModel), CrewAI (`AVPLLM` BaseLLM), AutoGen (`AVPChatCompletionClient`). All support same-model latent + cross-model rosetta.
+- **`[huggingface]` extra** – Discoverable alias for `[hf]`.
+- **`[all]` extra** – Convenience bundle: hf + llamacpp + frameworks + transport (excludes vLLM).
+
+### Changed
+
+- **torch is now optional** – Projection math (rosetta/project.py, realign.py) rewritten in numpy. `pip install avp[ollama]` drops from ~3 GB to ~85 MB. torch only required for HuggingFace connector (`[hf]`) and vLLM plugin.
+- **Base install is lightweight** – `pip install avp` installs only numpy, protobuf, zstandard (~25 MB). Engine-specific deps via extras.
+- **Protocol version** bumped to 0.4.0.
+- **Python requirement** raised from >=3.9 to >=3.10 (3.9 EOL October 2025).
+- **transformers requirement** raised from >=4.36 to >=5.0 (4.x line is dead).
+- **huggingface-hub requirement** raised from >=0.20 to >=1.0.
+- **README rewritten** – 361 to 139 lines. Single install command, no redundant sections, SVG diagram, handshake negotiation prominent.
+- **Framework Integration Guide rewritten** – Per-engine code examples for all 4 engines + 4 frameworks.
+- **`calibrate()` simplified** – Signature reduced to `(source_model, target_model, source_tokenizer, target_tokenizer, device, auto_save)`. Raises `ValueError` for incompatible models instead of falling through to broken ridge regression.
+
+### Removed
+
+- **`pack()` / `unpack()` / `PackedMessage`** – Deprecated in v0.3.0, now removed. Use `think()` / `generate()`.
+- **`PackMetrics` / `UnpackMetrics`** – Deprecated aliases, now removed. Use `ThinkMetrics` / `GenerateMetrics`.
+- **`HandshakeMetrics`** – Exported but never instantiated. Removed.
+- **`AVPAsyncClient`** – Exported but never used. Removed.
+- **`encode_hidden_state()`** – Unused convenience wrapper. Removed.
+- **Ridge regression / Procrustes projection** – `_ridge_regression()`, `_orthogonal_procrustes()`, `_extract_hidden_states()`, `DEFAULT_ANCHORS`. Failed at 0.004 cosine similarity, never benchmarked on real tasks. `RIDGE` and `PROCRUSTES` removed from `ProjectionMethod` enum.
+- **`page_convert.py`** – PagedAttention conversion module, never imported.
+- **`make_eval_callback()`** and ctypes tensor helpers in `_llamacpp_compat.py` – Old cb_eval approach replaced by embeddings API.
+
+### Fixed
+
+- **llama.cpp stop token** – Model emits `<|endoftext|>` (token 151643) not `<|im_end|>` on embeddings context. Fix: token-level + text-based stop detection. GSM8K: 0% to 68%.
+- **vLLM CUDA graph compatibility** – Pass dummy `input_ids` during latent steps for graph capture.
+- **vLLM projection performance** – Cache numpy weights in setup instead of copying 600 MB+ GPU to CPU per latent iteration.
+- **Error messages** – All "pip install avp should include this dependency" updated to "pip install avp[hf]".
+- **Version consistency** – All Modal benchmarks updated from `@engine_integration` to `@main`, transformers >=5.0, vLLM upper bound added.
+
 ## [0.3.2] - 2026-03-12
 
 ### Added
