@@ -62,6 +62,9 @@ AVP_OVERRIDE_QWEN2=1 vllm serve Qwen/Qwen2.5-7B-Instruct \
 |-----|---------|-------------|
 | `avp_latent_steps` | `20` | Number of latent thinking steps during prefill. Set to `0` to disable. |
 | `avp_store_dir` | `/tmp/avp_kv_store` | Directory for file-based KV store. Also configurable via `AVP_KV_STORE_DIR` env var. |
+| `avp_store_ttl` | `300` | TTL in seconds for KV store entries. |
+| `avp_target_model` | *(none)* | Target model HF ID for cross-model rosetta projection. |
+| `avp_source_model` | *(none)* | Source model HF ID. Needed when the model is loaded from a local path (auto-detected from config otherwise). |
 
 ## How It Works
 

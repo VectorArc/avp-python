@@ -128,7 +128,7 @@ All three modes are statistically identical (p=1.0 latent vs text). Earlier runs
 ## Reproduce
 
 ```bash
-pip install "avp[hf]" datasets
+pip install avp[hf] datasets
 
 python -m benchmarks.humaneval.run_humaneval \
     --model_name Qwen/Qwen2.5-7B-Instruct \
