@@ -6,7 +6,7 @@ and returns an AVPMap for zero-shot cross-model projection.
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 from ..errors import RealignmentError
 from ..types import ProjectionMethod

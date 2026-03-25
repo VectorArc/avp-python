@@ -28,7 +28,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 if TYPE_CHECKING:
     from .context import AVPContext
     from .context_store import ContextStore
-    from .metrics import DebugConfig, GenerateMetrics, ThinkMetrics
+    from .metrics import DebugConfig
+    from .results import InspectResult
 
 from .results import GenerateResult, ThinkResult
 

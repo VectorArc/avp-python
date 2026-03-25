@@ -1102,7 +1102,7 @@ class LlamaCppConnector(EngineConnector):
 
     # --- EngineConnector ABC implementation ---
 
-    def get_model_identity(self) -> "ModelIdentity":
+    def get_model_identity(self):
         from ..types import ModelIdentity
         return ModelIdentity(
             model_id=self._model_path,
