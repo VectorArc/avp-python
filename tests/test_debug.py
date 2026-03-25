@@ -188,32 +188,33 @@ class TestInspect:
         payload = np.zeros((1, hidden_dim), dtype=np.float32).tobytes()
         return avp.encode(payload, metadata)
 
-    def test_inspect_returns_dict(self):
+    def test_inspect_returns_inspect_result(self):
+        from avp.results import InspectResult
         data = self._make_avp_binary()
         result = avp.inspect(data)
-        assert isinstance(result, dict)
+        assert isinstance(result, InspectResult)
 
     def test_inspect_fields(self):
         data = self._make_avp_binary(model_id="Qwen/test", hidden_dim=3584, num_layers=28)
         result = avp.inspect(data)
-        assert result["version"] == 1
-        assert result["model_id"] == "Qwen/test"
-        assert result["hidden_dim"] == 3584
-        assert result["num_layers"] == 28
-        assert result["payload_type"] == "HIDDEN_STATE"
-        assert result["mode"] == "LATENT"
-        assert result["dtype"] == "FLOAT32"
-        assert isinstance(result["raw_size"], int)
-        assert result["raw_size"] > 0
+        assert result.version == 1
+        assert result.model_id == "Qwen/test"
+        assert result.hidden_dim == 3584
+        assert result.num_layers == 28
+        assert result.payload_type == "HIDDEN_STATE"
+        assert result.mode == "LATENT"
+        assert result.dtype == "FLOAT32"
+        assert isinstance(result.raw_size, int)
+        assert result.raw_size > 0
 
     def test_inspect_flags(self):
         data = self._make_avp_binary()
         result = avp.inspect(data)
-        assert "compressed" in result
-        assert "has_map" in result
-        assert "kv_cache" in result
-        assert result["compressed"] is False
-        assert result["kv_cache"] is False
+        assert hasattr(result, "compressed")
+        assert hasattr(result, "has_map")
+        assert hasattr(result, "kv_cache")
+        assert result.compressed is False
+        assert result.kv_cache is False
 
     def test_inspect_invalid_magic(self):
         data = b"\x00\x00" + b"\x00" * 20

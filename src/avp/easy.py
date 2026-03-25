@@ -15,6 +15,9 @@ For direct connector access (advanced):
     connector = avp.HuggingFaceConnector.from_pretrained("Qwen/...")
     context = connector.think("...", steps=20)
     answer = connector.generate("...", context=context)
+
+Async variants (``avp.athink()`` / ``avp.agenerate()``) are planned
+for a future release.
 """
 
 import logging
@@ -510,7 +513,7 @@ def _compute_word_overlap(a: str, b: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def inspect(data: bytes) -> Dict[str, Any]:
+def inspect(data: bytes) -> "InspectResult":
     """Inspect an AVP binary payload without loading models.
 
     Decodes the header and metadata from raw AVP wire bytes. Useful for
@@ -520,59 +523,37 @@ def inspect(data: bytes) -> Dict[str, Any]:
         data: Raw AVP binary bytes (from ``AVPContext.to_bytes()`` or wire).
 
     Returns:
-        Dict with decoded header/metadata fields::
-
-            {
-                "version": 1,
-                "flags": 3,
-                "compressed": True,
-                "has_map": False,
-                "kv_cache": False,
-                "payload_length": 12345,
-                "metadata_length": 78,
-                "model_id": "Qwen/Qwen2.5-7B-Instruct",
-                "hidden_dim": 3584,
-                "num_layers": 28,
-                "payload_type": "KV_CACHE",
-                "dtype": "FLOAT32",
-                "tensor_shape": [28, 2, 1, 128, 128],
-                "mode": "LATENT",
-                "session_id": "",
-                "source_agent_id": "",
-                "target_agent_id": "",
-                "avp_map_id": "",
-                "extra": {"model_hash": "abc123", ...},
-                "raw_size": 12435,
-            }
+        InspectResult with decoded header/metadata fields.
 
     Raises:
         DecodeError: If data is not valid AVP binary.
     """
     from .codec import decode as avp_decode
+    from .results import InspectResult
 
     msg = avp_decode(data)
     h = msg.header
     m = msg.metadata
 
-    return {
-        "version": h.version,
-        "flags": h.flags,
-        "compressed": bool(h.flags & 0x01),
-        "has_map": bool(h.flags & 0x02),
-        "kv_cache": bool(h.flags & 0x04),
-        "payload_length": h.payload_length,
-        "metadata_length": h.metadata_length,
-        "model_id": m.model_id,
-        "hidden_dim": m.hidden_dim,
-        "num_layers": m.num_layers,
-        "payload_type": m.payload_type.name if hasattr(m.payload_type, "name") else str(m.payload_type),
-        "dtype": m.dtype.name if hasattr(m.dtype, "name") else str(m.dtype),
-        "tensor_shape": list(m.tensor_shape) if m.tensor_shape else [],
-        "mode": m.mode.name if hasattr(m.mode, "name") else str(m.mode),
-        "session_id": m.session_id,
-        "source_agent_id": m.source_agent_id,
-        "target_agent_id": m.target_agent_id,
-        "avp_map_id": m.avp_map_id,
-        "extra": dict(m.extra) if m.extra else {},
-        "raw_size": msg.raw_size,
-    }
+    return InspectResult(
+        version=h.version,
+        flags=h.flags,
+        compressed=bool(h.flags & 0x01),
+        has_map=bool(h.flags & 0x02),
+        kv_cache=bool(h.flags & 0x04),
+        payload_length=h.payload_length,
+        metadata_length=h.metadata_length,
+        model_id=m.model_id,
+        hidden_dim=m.hidden_dim,
+        num_layers=m.num_layers,
+        payload_type=m.payload_type.name if hasattr(m.payload_type, "name") else str(m.payload_type),
+        dtype=m.dtype.name if hasattr(m.dtype, "name") else str(m.dtype),
+        tensor_shape=list(m.tensor_shape) if m.tensor_shape else [],
+        mode=m.mode.name if hasattr(m.mode, "name") else str(m.mode),
+        session_id=m.session_id,
+        source_agent_id=m.source_agent_id,
+        target_agent_id=m.target_agent_id,
+        avp_map_id=m.avp_map_id,
+        extra=dict(m.extra) if m.extra else {},
+        raw_size=msg.raw_size,
+    )

@@ -20,6 +20,14 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from ..errors import EngineNotAvailableError
 from ..types import ModelIdentity
 
+# Type aliases for engine-agnostic tensors.
+# These are Any at runtime (torch is optional) but document intent.
+TensorLike = Any
+"""A tensor-like object: torch.Tensor, numpy.ndarray, or similar."""
+
+KVCache = Any
+"""KV-cache: DynamicCache, tuple of (K, V) tuples, or None."""
+
 
 def _render_prompt(tokenizer: Any, messages: List[Dict[str, str]]) -> str:
     """Render chat messages using the tokenizer's chat template, with fallback."""
@@ -82,10 +90,10 @@ class EngineConnector(ABC):
 
     def extract_hidden_state(
         self,
-        input_ids: Any,
-        attention_mask: Optional[Any] = None,
-        past_key_values: Optional[Any] = None,
-    ) -> Tuple[Any, Any, Any]:
+        input_ids: TensorLike,
+        attention_mask: Optional[TensorLike] = None,
+        past_key_values: Optional[KVCache] = None,
+    ) -> Tuple[TensorLike, TensorLike, KVCache]:
         """Run forward pass and extract hidden states.
 
         Args:
@@ -103,9 +111,9 @@ class EngineConnector(ABC):
 
     def inject_and_generate(
         self,
-        inputs_embeds: Any,
-        attention_mask: Optional[Any] = None,
-        past_key_values: Optional[Any] = None,
+        inputs_embeds: TensorLike,
+        attention_mask: Optional[TensorLike] = None,
+        past_key_values: Optional[KVCache] = None,
         max_new_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.95,
@@ -128,7 +136,7 @@ class EngineConnector(ABC):
             "Use generate(prompt, context=) instead."
         )
 
-    def get_embedding_weights(self) -> Tuple[Any, Any]:
+    def get_embedding_weights(self) -> Tuple[Optional[TensorLike], Optional[TensorLike]]:
         """Get input and output embedding weight matrices.
 
         Returns:

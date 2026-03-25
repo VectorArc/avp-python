@@ -8,6 +8,14 @@ import numpy as np
 
 
 # --- Constants ---
+#
+# Version semantics:
+#   PROTOCOL_VERSION (header byte 2) — identifies the fixed header format.
+#     Changes only if the 12-byte header layout changes (nuclear option).
+#     Decoders MUST reject messages with unknown version bytes.
+#   AVP_VERSION_HEADER — transport binding version (HTTP AVP-Version header).
+#   AVP_VERSION_STRING — SDK/protocol feature version (handshake avp_version).
+#     Used for capability advertisement, not wire format gating.
 
 MAGIC = b"\x41\x56"  # "AV"
 PROTOCOL_VERSION = 0x01
@@ -17,7 +25,9 @@ CONTENT_TYPE = "application/avp+binary"
 AVP_VERSION_HEADER = "0.4"
 AVP_VERSION_STRING = "0.4.0"
 
-# Flag bit constants
+# Flag bit constants — fast-path routing hints.
+# If FLAG_KV_CACHE is set, metadata.payload_type MUST be KV_CACHE.
+# Decoders SHOULD validate consistency; metadata is authoritative on conflict.
 FLAG_COMPRESSED = 0x01
 FLAG_HAS_MAP = 0x02
 FLAG_KV_CACHE = 0x04
@@ -61,12 +71,17 @@ class ProjectionMethod(enum.Enum):
 
 
 class DataType(enum.IntEnum):
-    """Supported tensor data types."""
+    """Supported tensor data types.
+
+    Values 4-5 are reserved for future quantized types. Decoders
+    encountering an unknown value MUST reject the message.
+    """
 
     FLOAT32 = 0
     FLOAT16 = 1
     BFLOAT16 = 2
     INT8 = 3
+    # Reserved: FLOAT8 = 4, INT4 = 5
 
 
 # Mapping between DataType enum and string representations

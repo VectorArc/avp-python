@@ -13,11 +13,38 @@ can grow new fields without changing the function signature.
     result.metrics          # GenerateMetrics or None
 """
 
-from typing import TYPE_CHECKING, Any, Iterator, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from .context import AVPContext
     from .metrics import GenerateMetrics, ThinkMetrics
+
+
+@dataclass
+class InspectResult:
+    """Result of ``avp.inspect()`` — decoded AVP wire payload metadata."""
+
+    version: int = 0
+    flags: int = 0
+    compressed: bool = False
+    has_map: bool = False
+    kv_cache: bool = False
+    payload_length: int = 0
+    metadata_length: int = 0
+    model_id: str = ""
+    hidden_dim: int = 0
+    num_layers: int = 0
+    payload_type: str = ""
+    dtype: str = ""
+    tensor_shape: List[int] = field(default_factory=list)
+    mode: str = ""
+    session_id: str = ""
+    source_agent_id: str = ""
+    target_agent_id: str = ""
+    avp_map_id: str = ""
+    extra: Dict[str, str] = field(default_factory=dict)
+    raw_size: int = 0
 
 
 class ThinkResult:

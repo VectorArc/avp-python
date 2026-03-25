@@ -67,6 +67,10 @@ class AVPContext:
         from .codec import encode_kv_cache
         from .kv_cache import serialize_kv_cache
 
+        # These fields are stored in proto `extra` (not first-class proto
+        # fields) because they are SDK-private context metadata, not part
+        # of the wire format contract.  Other implementations MAY ignore
+        # them.  from_bytes() reads them back for identity checking.
         extra = {
             "model_hash": self.model_hash,
             "model_family": self.model_family,
@@ -97,6 +101,10 @@ class AVPContext:
     @classmethod
     def from_bytes(cls, data: bytes, device: str = "cpu") -> "AVPContext":
         """Deserialize AVP wire bytes back to an AVPContext.
+
+        Note: ``last_hidden_state`` is **not** serialized and will be
+        ``None`` on the restored context.  Cross-model rosetta via
+        serialized contexts is not supported — use in-process transfer.
 
         Args:
             data: AVP-encoded bytes (from to_bytes()).

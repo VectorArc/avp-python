@@ -20,6 +20,7 @@ enum DataType {
   FLOAT16 = 1;
   BFLOAT16 = 2;
   INT8 = 3;
+  // Reserved: FLOAT8 = 4; INT4 = 5;
 }
 
 // --- v0.2.0 Metadata ---

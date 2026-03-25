@@ -18,7 +18,7 @@ For direct connector access:
 # --- Easy API (start here) ---
 from .easy import generate, think
 from .context_store import ContextStore
-from .results import GenerateResult, ThinkResult
+from .results import GenerateResult, InspectResult, ThinkResult
 
 # --- Protocol layer ---
 from .codec import decode, encode
@@ -143,6 +143,7 @@ __all__ = [
     "ContextStore",
     "ThinkResult",
     "GenerateResult",
+    "InspectResult",
     # Observability (lazy — stdlib only)
     "ThinkMetrics",
     "GenerateMetrics",

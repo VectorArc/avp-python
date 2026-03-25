@@ -25,6 +25,9 @@ def _require_torch():
 
 
 # KVCacheHeader binary format: num_layers(I) + num_kv_heads(I) + head_dim(I) + seq_len(I) + dtype(B)
+# Version: this is KV-cache inner format v1.  If the layout needs to change,
+# add a kv_format_version field to the outer protobuf Metadata (non-breaking)
+# rather than changing this header (wire-breaking).
 _KV_HEADER_FMT = "<IIIIB"
 _KV_HEADER_SIZE = struct.calcsize(_KV_HEADER_FMT)
 

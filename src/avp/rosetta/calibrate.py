@@ -33,7 +33,7 @@ class AVPMap:
     w_map: Any           # torch.Tensor — see class docstring for shape
     bias: Optional[Any]  # torch.Tensor [D_tgt] or None
     target_norm: Any     # torch.Tensor scalar
-    method: Union[ProjectionMethod, str]  # ProjectionMethod enum (str accepted for compat)
+    method: ProjectionMethod  # coerced from str in __post_init__
     anchor_count: int
     validation_score: float
     # Vocab-overlap fields (cross-family projection)
