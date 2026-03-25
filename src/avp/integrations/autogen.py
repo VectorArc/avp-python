@@ -105,7 +105,8 @@ if HAS_AUTOGEN:
                     steps=self._avp_steps,
                 )
                 if self._avp_store is not None and self._avp_store_key:
-                    self._avp_store.store(self._avp_store_key, context)
+                    ctx = context.context if hasattr(context, "context") else context
+                    self._avp_store.store(self._avp_store_key, ctx)
                 text = f"[AVP: {self._avp_steps} latent steps completed]"
             else:
                 context = None
@@ -124,8 +125,6 @@ if HAS_AUTOGEN:
                     max_new_tokens=self._avp_max_new_tokens,
                     temperature=self._avp_temperature,
                 )
-                if isinstance(text, tuple):
-                    text = text[0]
 
             return CreateResult(
                 finish_reason="stop",

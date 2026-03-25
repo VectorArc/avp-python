@@ -36,53 +36,6 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Identity helpers
-# ---------------------------------------------------------------------------
-
-_identity_cache: Dict[str, Dict[str, Any]] = {}
-_identity_lock = threading.Lock()
-
-
-def _get_local_identity(model_name: str) -> Optional[Dict[str, Any]]:
-    """Extract model identity from HuggingFace config (downloads config only, not weights).
-
-    Returns None if transformers is not installed.
-    """
-    with _identity_lock:
-        if model_name in _identity_cache:
-            return _identity_cache[model_name]
-
-    try:
-        from transformers import AutoConfig
-        from .handshake import compute_model_hash
-    except ImportError:
-        return {"model_id": model_name}
-
-    try:
-        config = AutoConfig.from_pretrained(model_name)
-        cfg = config.to_dict()
-        hidden_dim = cfg.get("hidden_size", 0)
-        num_layers = cfg.get("num_hidden_layers", 0)
-        model_family = cfg.get("model_type", "")
-        model_hash = compute_model_hash(cfg)
-
-        identity = {
-            "model_hash": model_hash,
-            "hidden_dim": hidden_dim,
-            "num_layers": num_layers,
-            "model_family": model_family,
-            "model_id": model_name,
-        }
-    except Exception:
-        logger.warning("Failed to extract identity for %s", model_name, exc_info=True)
-        identity = {"model_id": model_name}
-
-    with _identity_lock:
-        _identity_cache[model_name] = identity
-    return identity
-
-
-# ---------------------------------------------------------------------------
 # Connector caching
 # ---------------------------------------------------------------------------
 
@@ -106,11 +59,9 @@ def _get_or_create_connector(model_name: str) -> Any:
 
 
 def clear_cache() -> None:
-    """Free cached connectors and identities to reclaim memory."""
+    """Free cached connectors to reclaim memory."""
     with _connector_lock:
         _connector_cache.clear()
-    with _identity_lock:
-        _identity_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +109,9 @@ def think(
     if not isinstance(prompt, str):
         from .errors import ConfigurationError
         raise ConfigurationError(f"think() prompt must be str, got {type(prompt).__name__}")
+    if not prompt:
+        from .errors import ConfigurationError
+        raise ConfigurationError("think() requires a non-empty prompt string")
 
     if debug_config is not None:
         collect_metrics = True
@@ -262,7 +216,8 @@ def generate(
         prior_key: Retrieve prior context from store under this key.
         max_new_tokens: Max tokens for generation.
         temperature: Sampling temperature.
-        collect_metrics: If True, return ``(str, GenerateMetrics)`` tuple.
+        collect_metrics: If True, populate ``result.metrics`` with
+            a ``GenerateMetrics`` instance.
         debug_config: Enable debug diagnostics via ``DebugConfig``.
             Implies ``collect_metrics=True``.
         content: **Deprecated.** Use ``prompt`` instead. Will be removed in v2.0.
@@ -284,15 +239,14 @@ def generate(
             from .errors import ConfigurationError
             raise ConfigurationError("Cannot pass both 'prompt' and 'content' to generate()")
         prompt = content
-    if not prompt:
-        from .errors import ConfigurationError
-        raise ConfigurationError("generate() requires a prompt string")
-
-    t_start = _time.perf_counter()
-
     if not isinstance(prompt, str):
         from .errors import ConfigurationError
         raise ConfigurationError(f"generate() prompt must be str, got {type(prompt).__name__}")
+    if not prompt:
+        from .errors import ConfigurationError
+        raise ConfigurationError("generate() requires a non-empty prompt string")
+
+    t_start = _time.perf_counter()
     if (store_key is not None or prior_key is not None) and store is None:
         from .errors import ConfigurationError
         raise ConfigurationError("store_key/prior_key require store= (pass a ContextStore)")

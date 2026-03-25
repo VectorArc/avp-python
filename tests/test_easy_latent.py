@@ -38,17 +38,6 @@ def _mock_connector(monkeypatch):
     mock.generate.return_value = "generated response"
 
     monkeypatch.setattr(easy, "_get_or_create_connector", lambda _name: mock)
-    monkeypatch.setattr(
-        easy,
-        "_get_local_identity",
-        lambda _name: {
-            "model_id": "test-model",
-            "model_hash": "test-hash",
-            "hidden_dim": 64,
-            "num_layers": 2,
-            "model_family": "gpt2",
-        },
-    )
     return mock
 
 
@@ -128,9 +117,8 @@ class TestThinkImport:
 
 class TestClearCache:
     def test_clear_cache_frees_connectors(self, _mock_connector):
-        from avp.easy import _connector_cache, _identity_cache, clear_cache, think
+        from avp.easy import _connector_cache, clear_cache, think
 
         think("test", model="test-model")
         clear_cache()
         assert len(_connector_cache) == 0
-        assert len(_identity_cache) == 0

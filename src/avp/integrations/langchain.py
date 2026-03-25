@@ -158,9 +158,10 @@ if HAS_LANGCHAIN:
                     steps=self.steps,
                 )
 
-                # Store context if a store is provided
+                # Store the AVPContext (unwrap ThinkResult)
                 if self.store is not None and self.store_key:
-                    self.store.store(self.store_key, context)
+                    ctx = context.context if hasattr(context, "context") else context
+                    self.store.store(self.store_key, ctx)
 
                 text = f"[AVP: {self.steps} latent steps completed]"
                 message = AIMessage(
@@ -186,10 +187,6 @@ if HAS_LANGCHAIN:
                     max_new_tokens=self.max_new_tokens,
                     temperature=self.temperature,
                 )
-
-                # avp.generate can return (text, metrics) tuple
-                if isinstance(text, tuple):
-                    text = text[0]
 
                 message = AIMessage(
                     content=text,

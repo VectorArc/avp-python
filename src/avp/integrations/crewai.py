@@ -118,7 +118,8 @@ if HAS_CREWAI:
                     steps=self._avp_steps,
                 )
                 if self._avp_store is not None and self._avp_store_key:
-                    self._avp_store.store(self._avp_store_key, context)
+                    ctx = context.context if hasattr(context, "context") else context
+                    self._avp_store.store(self._avp_store_key, ctx)
                 return f"[AVP: {self._avp_steps} latent steps completed]"
 
             else:
@@ -138,8 +139,6 @@ if HAS_CREWAI:
                     max_new_tokens=self._avp_max_new_tokens,
                     temperature=self._avp_temperature,
                 )
-                if isinstance(result, tuple):
-                    result = result[0]
                 return result
 
         def supports_stop_words(self) -> bool:

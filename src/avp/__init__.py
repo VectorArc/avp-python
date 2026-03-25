@@ -89,8 +89,8 @@ _ROSETTA_NAMES = {
 }
 
 # Transport classes are lazy-loaded because httpx is an optional dependency.
-# Access avp.AVPClient / avp.AVPAsyncClient / avp.create_app and they'll be
-# imported on first use; raises ImportError with install hint if httpx is missing.
+# Access avp.AVPClient / avp.create_app and they'll be imported on first
+# use; raises ImportError with install hint if httpx is missing.
 _TRANSPORT_NAMES = {"AVPClient", "create_app"}
 
 # Easy API helpers that need lazy loading

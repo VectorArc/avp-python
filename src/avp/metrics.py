@@ -46,10 +46,10 @@ class DebugConfig:
 class TransferDiagnostics:
     """Debug diagnostics for latent transfers.
 
-    Created when ``debug=True`` is passed to ``avp.think()`` or
-    ``avp.generate()``.  Critical issues (empty output, NaN/Inf) always
-    emit ``RuntimeWarning`` regardless of the debug flag; these fields
-    are only populated when diagnostics are collected.
+    Created when ``debug_config=DebugConfig()`` is passed to
+    ``avp.think()`` or ``avp.generate()``.  Critical issues (empty
+    output, NaN/Inf) always emit ``RuntimeWarning``; these fields are
+    only populated when diagnostics are collected.
     """
 
     # Always-on health checks
@@ -68,15 +68,15 @@ class TransferDiagnostics:
     quality_gate_passed: Optional[bool] = None
     quality_gate_reason: str = ""
 
-    # Projection metrics (debug=True, rosetta only)
+    # Projection metrics (debug_config, rosetta only)
     projection_method: str = ""
     hidden_state_norm: Optional[float] = None
     nearest_cos_sim: Optional[float] = None
 
-    # Norm trajectory (debug=True, latent only)
+    # Norm trajectory (debug_config, latent only)
     norm_trajectory: Optional[List[float]] = None
 
-    # Comparison mode (debug="compare")
+    # Comparison mode (debug_config with compare=True)
     text_baseline_output: Optional[str] = None
     text_overlap: Optional[float] = None
 
@@ -146,7 +146,7 @@ class ThinkMetrics:
     """Time spent in connector.think()."""
 
     diagnostics: Optional[TransferDiagnostics] = None
-    """Debug diagnostics (populated when debug=True)."""
+    """Debug diagnostics (populated when debug_config is set)."""
 
 
 @dataclass
@@ -175,6 +175,6 @@ class GenerateMetrics:
     """Time spent in connector.generate()."""
 
     diagnostics: Optional[TransferDiagnostics] = None
-    """Debug diagnostics (populated when debug=True)."""
+    """Debug diagnostics (populated when debug_config is set)."""
 
 

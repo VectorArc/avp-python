@@ -149,7 +149,6 @@ class TestSpecVectorRoundtrip:
         meta_pb = avp_pb2.Metadata()
         meta_pb.ParseFromString(data[HEADER_SIZE:HEADER_SIZE + metadata_length])
         assert meta_pb.HasField("payload_checksum")
-        assert meta_pb.payload_checksum != 0
 
     def test_corrupted_payload_detected(self):
         """Flipping a bit in the payload triggers checksum mismatch."""

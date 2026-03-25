@@ -10,8 +10,9 @@ def embedding_to_bytes(embedding: np.ndarray) -> bytes:
     """Convert a numpy embedding to raw little-endian bytes."""
     arr = np.ascontiguousarray(embedding)
     # Force little-endian to match AVP wire format spec.
-    # On LE systems (x86, most ARM) this is a no-op.
-    if arr.dtype.byteorder not in ("<", "=", "|"):
+    # On LE systems (x86, most ARM, all CUDA GPUs) this is a no-op.
+    import sys
+    if arr.dtype.byteorder == ">" or (arr.dtype.byteorder == "=" and sys.byteorder == "big"):
         arr = arr.astype(arr.dtype.newbyteorder("<"))
     return arr.tobytes()
 

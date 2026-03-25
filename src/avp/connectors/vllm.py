@@ -287,7 +287,7 @@ class VLLMConnector(EngineConnector):
                             output_embed = f.get_tensor(name)
                             break
             except Exception:
-                raise
+                raise  # re-raise safetensor load failures with original traceback
 
         # For tied weights, output == input
         if output_embed is None and self._config_dict.get("tie_word_embeddings", False):
@@ -366,6 +366,7 @@ class VLLMConnector(EngineConnector):
         temperature: float = 0.7,
         top_p: float = 0.95,
         do_sample: bool = True,
+        **kwargs: Any,
     ) -> str:
         """Generate text from a prompt (text-only, no latent context).
 
