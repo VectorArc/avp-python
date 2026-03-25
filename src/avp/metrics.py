@@ -6,7 +6,7 @@ or discard them as they please.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -82,6 +82,9 @@ class TransferDiagnostics:
 
     # Collected warnings
     warnings: List[str] = field(default_factory=list)
+
+    # Extensible — engine-specific or future diagnostics
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def healthy(self) -> bool:

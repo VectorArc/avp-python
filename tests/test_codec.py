@@ -47,8 +47,8 @@ def test_roundtrip_float32(dim):
     msg = avp.decode(data)
 
     assert msg.metadata.model_id == f"model-{dim}"
-    assert msg.metadata.embedding_dim == dim
-    assert msg.metadata.data_type == "float32"
+    assert msg.metadata.hidden_dim == dim
+    assert msg.metadata.dtype == avp.DataType.FLOAT32
     assert msg.embedding.shape == (dim,)
     np.testing.assert_array_equal(emb, msg.embedding)
 
@@ -59,7 +59,7 @@ def test_roundtrip_float16(dim):
     data = _encode_embedding(emb, model_id=f"model-fp16-{dim}")
     msg = avp.decode(data)
 
-    assert msg.metadata.data_type == "float16"
+    assert msg.metadata.dtype == avp.DataType.FLOAT16
     assert msg.embedding.dtype == np.float16
     np.testing.assert_array_equal(emb, msg.embedding)
 
@@ -75,8 +75,8 @@ def test_roundtrip_with_all_metadata():
     msg = avp.decode(data)
 
     assert msg.metadata.model_id == "all-MiniLM-L6-v2"
-    assert msg.metadata.agent_id == "agent-alice"
-    assert msg.metadata.task_id == "task-123"
+    assert msg.metadata.source_agent_id == "agent-alice"
+    assert msg.metadata.extra["task_id"] == "task-123"
     assert msg.metadata.extra["session"] == "abc"
     assert msg.metadata.extra["priority"] == "high"
     np.testing.assert_array_equal(emb, msg.embedding)

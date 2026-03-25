@@ -147,7 +147,32 @@ def decode(data: bytes) -> AVPMessage:
     if is_compressed:
         raw_payload = decompress(raw_payload)
 
-    dtype_enum = DataType(meta_pb.dtype) if meta_pb.dtype in DataType.__members__.values() else DataType.FLOAT32
+    # Decode enums safely — reject unknown wire values with a clear error
+    # instead of crashing (ValueError) or silently corrupting (wrong dtype).
+    try:
+        dtype_enum = DataType(meta_pb.dtype)
+    except ValueError:
+        raise DecodeError(
+            f"Unknown dtype value {meta_pb.dtype} in AVP message. "
+            f"Known values: {[e.value for e in DataType]}. "
+            "Upgrade your AVP SDK to decode this message."
+        )
+    try:
+        payload_type_enum = PayloadType(meta_pb.payload_type)
+    except ValueError:
+        raise DecodeError(
+            f"Unknown payload_type value {meta_pb.payload_type} in AVP message. "
+            f"Known values: {[e.value for e in PayloadType]}. "
+            "Upgrade your AVP SDK to decode this message."
+        )
+    try:
+        mode_enum = CommunicationMode(meta_pb.mode)
+    except ValueError:
+        raise DecodeError(
+            f"Unknown communication mode value {meta_pb.mode} in AVP message. "
+            f"Known values: {[e.value for e in CommunicationMode]}. "
+            "Upgrade your AVP SDK to decode this message."
+        )
 
     metadata = AVPMetadata(
         session_id=meta_pb.session_id,
@@ -156,10 +181,10 @@ def decode(data: bytes) -> AVPMessage:
         model_id=meta_pb.model_id,
         hidden_dim=meta_pb.hidden_dim,
         num_layers=meta_pb.num_layers,
-        payload_type=PayloadType(meta_pb.payload_type),
+        payload_type=payload_type_enum,
         dtype=dtype_enum,
         tensor_shape=tuple(meta_pb.tensor_shape),
-        mode=CommunicationMode(meta_pb.mode),
+        mode=mode_enum,
         compression="zstd" if is_compressed else None,
         avp_map_id=meta_pb.avp_map_id,
         extra=dict(meta_pb.extra),

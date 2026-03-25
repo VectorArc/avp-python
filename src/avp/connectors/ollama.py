@@ -330,14 +330,13 @@ class OllamaConnector(LlamaCppConnector):
             **kwargs,
         )
 
-    def get_model_identity(self) -> Any:
+    def get_model_identity(self) -> "ModelIdentity":
         """Return model identity using the Ollama name, not blob path."""
         from ..types import ModelIdentity
         return ModelIdentity(
             model_id=self._ollama_model_name,
-            hidden_size=self._n_embd,
+            hidden_dim=self._n_embd,
             num_layers=self._n_layer or 0,
-            vocab_size=self._n_vocab,
         )
 
     @staticmethod

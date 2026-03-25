@@ -68,7 +68,6 @@ def test_encode_decode_float16():
     msg = decode(data)
 
     assert msg.metadata.dtype == DataType.FLOAT16
-    assert msg.metadata.data_type == "float16"
     np.testing.assert_array_equal(hidden, msg.embedding)
 
 

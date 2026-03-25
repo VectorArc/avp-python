@@ -141,7 +141,7 @@ def test_session_info_defaults():
 # --- AVPMetadata ---
 
 
-def test_metadata_backward_compat():
+def test_metadata_field_access():
     meta = AVPMetadata(
         model_id="test",
         hidden_dim=384,
@@ -149,16 +149,10 @@ def test_metadata_backward_compat():
         source_agent_id="alice",
         extra={"task_id": "t123"},
     )
-    assert meta.embedding_dim == 384
-    assert meta.data_type == "float16"
-    assert meta.agent_id == "alice"
-    assert meta.task_id == "t123"
-
-
-def test_metadata_agent_id_none_when_empty():
-    meta = AVPMetadata()
-    assert meta.agent_id is None
-    assert meta.task_id is None
+    assert meta.hidden_dim == 384
+    assert meta.dtype == DataType.FLOAT16
+    assert meta.source_agent_id == "alice"
+    assert meta.extra["task_id"] == "t123"
 
 
 # --- AVPMessage ---

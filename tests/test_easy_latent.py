@@ -93,7 +93,8 @@ class TestThink:
     def test_rejects_non_string(self, _mock_connector):
         from avp.easy import think
 
-        with pytest.raises(TypeError, match="prompt must be str"):
+        from avp.errors import ConfigurationError
+        with pytest.raises(ConfigurationError, match="prompt must be str"):
             think(123, model="test-model")
 
     def test_with_metrics(self, _mock_connector):

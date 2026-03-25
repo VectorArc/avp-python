@@ -185,22 +185,25 @@ class TestGenerateStore:
 
 
 class TestGenerateValidation:
-    def test_rejects_non_string_content(self, _mock_connector):
+    def test_rejects_non_string_prompt(self, _mock_connector):
         from avp.easy import generate
+        from avp.errors import ConfigurationError
 
-        with pytest.raises(TypeError, match="content must be str"):
+        with pytest.raises(ConfigurationError, match="prompt must be str"):
             generate(123, model="test-model")
 
     def test_store_key_without_store_raises(self, _mock_connector):
         from avp.easy import generate
+        from avp.errors import ConfigurationError
 
-        with pytest.raises(ValueError, match="store_key/prior_key require store="):
+        with pytest.raises(ConfigurationError, match="store_key/prior_key require store="):
             generate("hello", model="test-model", store_key="key")
 
     def test_prior_key_without_store_raises(self, _mock_connector):
         from avp.easy import generate
+        from avp.errors import ConfigurationError
 
-        with pytest.raises(ValueError, match="store_key/prior_key require store="):
+        with pytest.raises(ConfigurationError, match="store_key/prior_key require store="):
             generate("hello", model="test-model", prior_key="key")
 
 

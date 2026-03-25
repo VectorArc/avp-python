@@ -100,6 +100,14 @@ class ContextStore:
                 if now <= e.stored_at + e.ttl
             ]
 
+    def __contains__(self, key: str) -> bool:
+        """Check if a non-expired entry exists for *key*."""
+        return self.get(key) is not None
+
+    def __len__(self) -> int:
+        """Number of active (non-expired) entries."""
+        return self.active_count
+
     def cleanup_expired(self) -> int:
         """Remove all expired entries.  Returns count removed."""
         with self._lock:

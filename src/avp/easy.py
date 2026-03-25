@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     from .context import AVPContext
+    from .context_store import ContextStore
     from .metrics import DebugConfig, GenerateMetrics, ThinkMetrics
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,8 @@ def think(
     t_start = _time.perf_counter()
 
     if not isinstance(prompt, str):
-        raise TypeError(f"think() prompt must be str, got {type(prompt).__name__}")
+        from .errors import ConfigurationError
+        raise ConfigurationError(f"think() prompt must be str, got {type(prompt).__name__}")
 
     if debug_config is not None:
         collect_metrics = True
@@ -195,20 +197,22 @@ def think(
 
 
 def generate(
-    content: str,
+    prompt: str = "",
     *,
     model: str,
     source_model: Optional[str] = None,
     cross_model: bool = False,
     steps: int = 20,
     context: Optional["AVPContext"] = None,
-    store: Optional[Any] = None,
+    store: Optional["ContextStore"] = None,
     store_key: Optional[str] = None,
     prior_key: Optional[str] = None,
     max_new_tokens: int = 512,
     temperature: float = 0.7,
     collect_metrics: bool = False,
     debug_config: Optional["DebugConfig"] = None,
+    # Deprecated — use ``prompt`` instead
+    content: Optional[str] = None,
 ) -> Union[str, Tuple[str, "GenerateMetrics"]]:
     """Think about a prompt, optionally store/retrieve context, and generate text.
 
@@ -218,15 +222,16 @@ def generate(
 
     Cross-model (Rosetta projection, experimental)::
 
-        text = avp.generate(prompt, model="target", source_model="source",
-                            cross_model=True)
+        text = avp.generate("Solve: 2+2", model="target",
+                            source_model="source", cross_model=True)
 
     With context store for multi-turn::
 
-        text = avp.generate(prompt, model=M, store=store, store_key="agent-a")
+        text = avp.generate("Solve: 2+2", model=M, store=store,
+                            store_key="agent-a")
 
     Args:
-        content: The prompt text.
+        prompt: The prompt text.
         model: HuggingFace model name/path (required).
         source_model: Source model for cross-model projection. When set,
             thinks on the source model and projects to the target (``model``)
@@ -245,17 +250,37 @@ def generate(
         collect_metrics: If True, return ``(str, GenerateMetrics)`` tuple.
         debug_config: Enable debug diagnostics via ``DebugConfig``.
             Implies ``collect_metrics=True``.
+        content: **Deprecated.** Use ``prompt`` instead. Will be removed in v2.0.
 
     Returns:
         Generated text response.
         If collect_metrics=True or debug_config is set, returns (str, GenerateMetrics).
     """
+    # Handle deprecated content= parameter
+    if content is not None:
+        import warnings as _w
+        _w.warn(
+            "generate(content=...) is deprecated, use generate(prompt=...) instead. "
+            "The 'content' parameter will be removed in v2.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if prompt:
+            from .errors import ConfigurationError
+            raise ConfigurationError("Cannot pass both 'prompt' and 'content' to generate()")
+        prompt = content
+    if not prompt:
+        from .errors import ConfigurationError
+        raise ConfigurationError("generate() requires a prompt string")
+
     t_start = _time.perf_counter()
 
-    if not isinstance(content, str):
-        raise TypeError(f"generate() content must be str, got {type(content).__name__}")
+    if not isinstance(prompt, str):
+        from .errors import ConfigurationError
+        raise ConfigurationError(f"generate() prompt must be str, got {type(prompt).__name__}")
     if (store_key is not None or prior_key is not None) and store is None:
-        raise ValueError("store_key/prior_key require store= (pass a ContextStore)")
+        from .errors import ConfigurationError
+        raise ConfigurationError("store_key/prior_key require store= (pass a ContextStore)")
 
     if debug_config is not None:
         collect_metrics = True
@@ -301,7 +326,7 @@ def generate(
             source_context = context
         elif steps > 0:
             source_context = source_connector.think(
-                content, steps=steps,
+                prompt, steps=steps,
                 _diagnostics=diagnostics,
             )
         else:
@@ -316,7 +341,7 @@ def generate(
 
         t_gen = _time.perf_counter()
         text = target_connector.generate(
-            content,
+            prompt,
             context=source_context,
             source=source_connector,
             cross_model=True,
@@ -334,7 +359,7 @@ def generate(
 
         # Compare mode
         if debug_config is not None and debug_config.compare:
-            _run_compare(diagnostics, target_connector, content, text,
+            _run_compare(diagnostics, target_connector, prompt, text,
                          max_new_tokens, temperature)
 
         if diagnostics is not None:
@@ -370,7 +395,7 @@ def generate(
     t_think = _time.perf_counter()
     if steps > 0:
         avp_context = connector.think(
-            content, steps=steps, context=context,
+            prompt, steps=steps, context=context,
             _diagnostics=diagnostics,
         )
     else:
@@ -386,7 +411,7 @@ def generate(
     # Generate text (connector already obtained above)
     t_gen = _time.perf_counter()
     text = connector.generate(
-        content,
+        prompt,
         context=avp_context,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
@@ -405,7 +430,7 @@ def generate(
 
     # Compare mode
     if debug_config is not None and debug_config.compare:
-        _run_compare(diagnostics, connector, content, text, max_new_tokens, temperature)
+        _run_compare(diagnostics, connector, prompt, text, max_new_tokens, temperature)
 
     if diagnostics is not None:
         logger.info("generate() debug: %s", diagnostics.summary())
@@ -431,7 +456,7 @@ def generate(
 def _run_compare(
     diagnostics: Optional[Any],
     connector: Any,
-    content: str,
+    prompt: str,
     latent_output: str,
     max_new_tokens: int,
     temperature: float,
@@ -441,7 +466,7 @@ def _run_compare(
         return
     try:
         baseline = connector.generate(
-            content,
+            prompt,
             context=None,
             max_new_tokens=max_new_tokens,
             temperature=temperature,

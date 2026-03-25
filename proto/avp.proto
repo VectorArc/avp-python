@@ -44,6 +44,7 @@ message Metadata {
   // Communication
   CommunicationMode mode = 10;
   optional string compression = 11;
+  reserved 12;  // was transfer_mode in v0.1.0; retired, do not reuse
   string avp_map_id = 13;
 
   // Extensible

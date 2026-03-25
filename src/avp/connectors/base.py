@@ -1,4 +1,18 @@
-"""Abstract base class for AVP engine connectors."""
+"""Abstract base class for AVP engine connectors.
+
+Extension policy
+----------------
+New methods added to ``EngineConnector`` will **always** have default
+implementations.  Existing abstract methods will not be removed or have
+their signatures changed.  This guarantees that any connector written
+against v1.0 will work on v1.x without modification.
+
+Minimal connector
+-----------------
+A minimal connector need only implement ``get_model_identity()`` and
+override ``generate()``.  All other methods have concrete defaults that
+raise ``NotImplementedError`` with descriptive messages.
+"""
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -44,19 +58,28 @@ def _tokenize_prompt(
 class EngineConnector(ABC):
     """Abstract interface for model inference backends.
 
-    Implementations wrap specific engines (HuggingFace, vLLM, etc.)
-    to provide a uniform interface for latent communication.
+    Implementations wrap specific engines (HuggingFace, vLLM, llama.cpp,
+    Ollama) to provide a uniform interface for latent communication.
 
-    High-level API (think/generate) is provided as concrete methods with
-    sensible defaults. Subclasses override as needed based on engine
-    capabilities.
+    **Extension policy:** New methods added to this class will always
+    have default implementations.  Subclasses need only implement
+    :meth:`get_model_identity` and override :meth:`generate`.  All other
+    methods have sensible defaults.
+
+    **Capability model:** Check :attr:`can_think` before calling
+    :meth:`think`.  Cross-model parameters (``source=``, ``cross_model=``)
+    are connector-specific and not part of this ABC.
+
+    **Factory methods** are connector-specific (``from_pretrained()``,
+    ``from_ollama()``, etc.) and not part of this interface.
     """
 
     @abstractmethod
     def get_model_identity(self) -> ModelIdentity:
         """Extract model identity for handshake."""
 
-    @abstractmethod
+    # --- Low-level API (optional — override for engines with tensor access) ---
+
     def extract_hidden_state(
         self,
         input_ids: Any,
@@ -73,8 +96,11 @@ class EngineConnector(ABC):
         Returns:
             Tuple of (last_hidden_state, all_hidden_states, past_key_values).
         """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not expose raw hidden states. "
+            "Use think() for latent context extraction."
+        )
 
-    @abstractmethod
     def inject_and_generate(
         self,
         inputs_embeds: Any,
@@ -97,16 +123,20 @@ class EngineConnector(ABC):
         Returns:
             Tuple of (generated_text_list, past_key_values).
         """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support embedding injection. "
+            "Use generate(prompt, context=) instead."
+        )
 
-    @abstractmethod
     def get_embedding_weights(self) -> Tuple[Any, Any]:
         """Get input and output embedding weight matrices.
 
         Returns:
             Tuple of (input_embedding_weight, output_embedding_weight).
+            Returns (None, None) if not available.
         """
+        return (None, None)
 
-    @abstractmethod
     def tokenize(self, text: str) -> Any:
         """Tokenize text into input IDs.
 
@@ -114,12 +144,15 @@ class EngineConnector(ABC):
             text: Input text string.
 
         Returns:
-            Token IDs tensor.
+            Token IDs (format depends on connector: torch.Tensor, list, etc.).
         """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not expose tokenization."
+        )
 
-    @abstractmethod
     def needs_realignment(self) -> bool:
         """Check if this model needs realignment (untied weights)."""
+        return False
 
     # --- High-level API ---
 
@@ -137,7 +170,7 @@ class EngineConnector(ABC):
         prompt: Union[str, List[Dict[str, str]]],
         steps: int = 20,
         context: Optional[Any] = None,
-        _diagnostics: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Any:
         """Generate latent context via thinking steps.
 
@@ -149,6 +182,7 @@ class EngineConnector(ABC):
             prompt: A string (wrapped as user message) or list of chat messages.
             steps: Number of latent thinking steps.
             context: Optional AVPContext from a prior think() call to continue from.
+            **kwargs: Connector-specific options.
 
         Returns:
             AVPContext with the accumulated KV-cache.
@@ -171,7 +205,7 @@ class EngineConnector(ABC):
         temperature: float = 0.7,
         top_p: float = 0.95,
         do_sample: bool = True,
-        _diagnostics: Optional[Any] = None,
+        **kwargs: Any,
     ) -> str:
         """Generate text, optionally conditioned on latent context.
 
@@ -182,6 +216,8 @@ class EngineConnector(ABC):
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
             do_sample: Whether to use sampling (True) or greedy decoding (False).
+            **kwargs: Connector-specific options (e.g. ``source=``,
+                ``cross_model=`` for rosetta-capable connectors).
 
         Returns:
             Generated text string.

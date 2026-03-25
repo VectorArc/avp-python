@@ -21,9 +21,9 @@ async def echo_handler(msg: avp.AVPMessage) -> dict:
     """Echo back metadata about the received message."""
     return {
         "model_id": msg.metadata.model_id,
-        "embedding_dim": msg.metadata.embedding_dim,
-        "data_type": msg.metadata.data_type,
-        "agent_id": msg.metadata.agent_id or "",
+        "hidden_dim": msg.metadata.hidden_dim,
+        "dtype": msg.metadata.dtype.name,
+        "source_agent_id": msg.metadata.source_agent_id or "",
         "compressed": msg.header.compressed,
     }
 
@@ -91,8 +91,8 @@ def test_client_transmit(server):
     data = resp.json()
     assert data["success"] is True
     assert data["model_id"] == "all-MiniLM-L6-v2"
-    assert data["embedding_dim"] == 384
-    assert data["agent_id"] == "test-agent"
+    assert data["hidden_dim"] == 384
+    assert data["source_agent_id"] == "test-agent"
     assert data["compressed"] is False
 
 
@@ -111,7 +111,7 @@ def test_client_transmit_compressed(server):
     data = resp.json()
     assert data["success"] is True
     assert data["compressed"] is True
-    assert data["embedding_dim"] == 1024
+    assert data["hidden_dim"] == 1024
 
 
 def test_client_transmit_float16(server):
@@ -124,8 +124,8 @@ def test_client_transmit_float16(server):
 
     data = resp.json()
     assert data["success"] is True
-    assert data["data_type"] == "float16"
-    assert data["embedding_dim"] == 768
+    assert data["dtype"] == "FLOAT16"
+    assert data["hidden_dim"] == 768
 
 
 def test_client_send_text(server):

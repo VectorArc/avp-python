@@ -39,7 +39,7 @@ from .types import (
 from .types import AVPHeader, DataType, PayloadType, ProjectionMethod, SessionInfo  # noqa: F401
 
 # --- Errors ---
-from .errors import AVPError, DecodeError, HandshakeError, IncompatibleModelsError
+from .errors import AVPError, ConfigurationError, DecodeError, HandshakeError, IncompatibleModelsError
 from .errors import (  # noqa: F401
     EngineNotAvailableError,
     InvalidMagicError,
@@ -183,6 +183,7 @@ __all__ = [
     "assess_transfer",
     # Errors
     "AVPError",
+    "ConfigurationError",
     "IncompatibleModelsError",
     "DecodeError",
     "HandshakeError",

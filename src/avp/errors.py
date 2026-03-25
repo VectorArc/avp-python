@@ -7,6 +7,10 @@ class AVPError(Exception):
     """Base error for all AVP operations."""
 
 
+class ConfigurationError(AVPError):
+    """Raised for invalid configuration or arguments to AVP functions."""
+
+
 class InvalidMagicError(AVPError):
     """Raised when the magic bytes don't match 0x4156."""
 

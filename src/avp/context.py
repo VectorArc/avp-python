@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass
+@dataclass(kw_only=True)
 class AVPContext:
     """Latent context produced by think(), consumed by generate() or another think().
 
@@ -73,7 +73,11 @@ class AVPContext:
             "num_steps": str(self.num_steps),
         }
 
-        kv_bytes, _ = serialize_kv_cache(self.past_key_values)
+        kv_bytes, kv_header = serialize_kv_cache(self.past_key_values)
+
+        # Map actual KV-cache dtype to wire DataType
+        _dtype_map = {"float32": DataType.FLOAT32, "float16": DataType.FLOAT16, "bfloat16": DataType.BFLOAT16}
+        actual_dtype = _dtype_map.get(kv_header.dtype, DataType.FLOAT32)
 
         metadata = AVPMetadata(
             session_id=session_id,
@@ -83,7 +87,7 @@ class AVPContext:
             hidden_dim=self.hidden_dim,
             num_layers=self.num_layers,
             payload_type=PayloadType.KV_CACHE,
-            dtype=DataType.FLOAT32,
+            dtype=actual_dtype,
             mode=CommunicationMode.LATENT,
             extra=extra,
         )

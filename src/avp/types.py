@@ -185,22 +185,6 @@ class AVPMetadata:
     avp_map_id: str = ""
     extra: Dict[str, str] = field(default_factory=dict)
 
-    # Backward compatibility with v0.1.0 field names
-    @property
-    def embedding_dim(self) -> int:
-        return self.hidden_dim
-
-    @property
-    def data_type(self) -> str:
-        return _DTYPE_TO_STR.get(self.dtype, "float32")
-
-    @property
-    def agent_id(self) -> Optional[str]:
-        return self.source_agent_id or None
-
-    @property
-    def task_id(self) -> Optional[str]:
-        return self.extra.get("task_id")
 
 
 @dataclass
@@ -220,7 +204,7 @@ class AVPMessage:
         """
         if not self.payload:
             return np.array([], dtype=np.float32)
-        dtype_str = self.metadata.data_type
+        dtype_str = _DTYPE_TO_STR.get(self.metadata.dtype, "float32")
         dt = np.dtype(dtype_str).newbyteorder("<")
         arr = np.frombuffer(self.payload, dtype=dt)
         return arr.copy()
