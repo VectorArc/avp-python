@@ -197,7 +197,7 @@ def create_app(
 
     app = FastAPI(title="AVP Agent", **fastapi_kwargs)
 
-    # --- v0.2.0 endpoints ---
+    # --- AVP v2 HTTP binding endpoints ---
 
     @app.post("/avp/v2/handshake")
     async def v2_handshake(request: Request) -> JSONResponse:

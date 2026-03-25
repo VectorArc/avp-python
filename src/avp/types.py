@@ -184,7 +184,7 @@ class SessionInfo:
 
 @dataclass
 class AVPMetadata:
-    """Decoded metadata from an AVP v0.3.0 message."""
+    """Decoded metadata from an AVP message."""
 
     session_id: str = ""
     source_agent_id: str = ""

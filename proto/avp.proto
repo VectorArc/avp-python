@@ -23,9 +23,9 @@ enum DataType {
   // Reserved: FLOAT8 = 4; INT4 = 5;
 }
 
-// --- v0.2.0 Metadata ---
+// --- Metadata ---
 
-// Metadata embedded in every AVP v0.2.0 message, serialized via Protocol Buffers.
+// Metadata embedded in every AVP message, serialized via Protocol Buffers.
 message Metadata {
   // Identity
   string session_id = 1;
