@@ -213,26 +213,28 @@ class TestGenerateValidation:
 
 
 class TestGenerateMetrics:
-    def test_collect_metrics_returns_tuple(self, _mock_connector):
+    def test_collect_metrics_on_result(self, _mock_connector):
         from avp.easy import generate
         from avp.metrics import GenerateMetrics
+        from avp.results import GenerateResult
 
         result = generate("hello", model="test-model", collect_metrics=True)
-        assert isinstance(result, tuple)
-        text, metrics = result
-        assert text == "generated response"
-        assert isinstance(metrics, GenerateMetrics)
+        assert isinstance(result, GenerateResult)
+        assert isinstance(result, str)
+        assert result == "generated response"
+        assert isinstance(result.metrics, GenerateMetrics)
 
     def test_metrics_fields(self, _mock_connector):
         from avp.context_store import ContextStore
         from avp.easy import generate
 
         store = ContextStore()
-        _, metrics = generate(
+        result = generate(
             "hello", model="test-model", steps=10,
             store=store, store_key="a",
             collect_metrics=True,
         )
+        metrics = result.metrics
         assert metrics.model == "test-model"
         assert metrics.steps == 10
         assert metrics.stored is True
@@ -243,9 +245,9 @@ class TestGenerateMetrics:
     def test_metrics_no_store(self, _mock_connector):
         from avp.easy import generate
 
-        _, metrics = generate("hello", model="test-model", collect_metrics=True)
-        assert metrics.stored is False
-        assert metrics.has_prior_context is False
+        result = generate("hello", model="test-model", collect_metrics=True)
+        assert result.metrics.stored is False
+        assert result.metrics.has_prior_context is False
 
     def test_metrics_with_prior(self, _mock_connector):
         from avp.context_store import ContextStore
@@ -253,19 +255,21 @@ class TestGenerateMetrics:
 
         store = ContextStore()
         generate("first", model="test-model", store=store, store_key="a")
-        _, metrics = generate(
+        result = generate(
             "second", model="test-model",
             store=store, prior_key="a",
             collect_metrics=True,
         )
-        assert metrics.has_prior_context is True
+        assert result.metrics.has_prior_context is True
 
     def test_without_metrics_returns_str(self, _mock_connector):
         from avp.easy import generate
+        from avp.results import GenerateResult
 
         result = generate("hello", model="test-model")
         assert isinstance(result, str)
-        assert not isinstance(result, tuple)
+        assert isinstance(result, GenerateResult)
+        assert result.metrics is None
 
 
 # ---------------------------------------------------------------------------

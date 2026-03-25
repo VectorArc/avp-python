@@ -53,14 +53,18 @@ def _mock_connector(monkeypatch):
 
 
 class TestThink:
-    def test_returns_avp_context(self, _mock_connector):
+    def test_returns_think_result(self, _mock_connector):
+        from avp.results import ThinkResult
         from avp.context import AVPContext
         from avp.easy import think
 
-        ctx = think("test problem", model="test-model")
-        assert isinstance(ctx, AVPContext)
-        assert ctx.model_hash == "test-hash"
-        assert ctx.num_steps == 5
+        result = think("test problem", model="test-model")
+        assert isinstance(result, ThinkResult)
+        assert isinstance(result.context, AVPContext)
+        # Attribute delegation to context
+        assert result.model_hash == "test-hash"
+        assert result.num_steps == 5
+        assert result.metrics is None
 
     def test_default_steps_20(self, _mock_connector):
         from avp.easy import think
@@ -100,13 +104,16 @@ class TestThink:
     def test_with_metrics(self, _mock_connector):
         from avp.easy import think
         from avp.metrics import ThinkMetrics
+        from avp.results import ThinkResult
 
         result = think("test", model="test-model", collect_metrics=True)
-        assert isinstance(result, tuple)
+        assert isinstance(result, ThinkResult)
+        assert isinstance(result.metrics, ThinkMetrics)
+        assert result.metrics.model == "test-model"
+        assert result.metrics.steps == 20
+        # Tuple unpacking backward compat
         ctx, metrics = result
         assert isinstance(metrics, ThinkMetrics)
-        assert metrics.model == "test-model"
-        assert metrics.steps == 20
         assert metrics.duration_s > 0
 
 

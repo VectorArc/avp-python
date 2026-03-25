@@ -20,12 +20,14 @@ For direct connector access (advanced):
 import logging
 import time as _time
 import threading
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
     from .context import AVPContext
     from .context_store import ContextStore
     from .metrics import DebugConfig, GenerateMetrics, ThinkMetrics
+
+from .results import GenerateResult, ThinkResult
 
 logger = logging.getLogger(__name__)
 
@@ -121,29 +123,32 @@ def think(
     context: Optional["AVPContext"] = None,
     collect_metrics: bool = False,
     debug_config: Optional["DebugConfig"] = None,
-) -> Union["AVPContext", Tuple["AVPContext", "ThinkMetrics"]]:
-    """Run latent thinking steps on a prompt. Returns AVPContext.
+) -> ThinkResult:
+    """Run latent thinking steps on a prompt.
 
-    Equivalent to creating a HuggingFaceConnector and calling
-    ``connector.think()``, but handles model loading and caching for you.
+    Returns a :class:`ThinkResult` that wraps an AVPContext.  Attribute
+    access is delegated to the context, so ``result.past_key_values``
+    works.  Tuple unpacking is supported for backward compatibility::
+
+        context, metrics = avp.think(..., collect_metrics=True)
 
     Examples::
 
-        context = avp.think("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
-        context = avp.think("Continue", model="Qwen/...", context=prior_context)
+        result = avp.think("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
+        result.context          # AVPContext
+        result.past_key_values  # delegates to context
 
     Args:
         prompt: The text prompt to think about.
         model: HuggingFace model name/path (required).
         steps: Number of latent thinking steps. Default 20.
-        context: Prior AVPContext to continue from.
-        collect_metrics: If True, return ``(AVPContext, ThinkMetrics)`` tuple.
+        context: Prior AVPContext or ThinkResult to continue from.
+        collect_metrics: If True, populate ``result.metrics``.
         debug_config: Enable debug diagnostics via ``DebugConfig``.
             Implies ``collect_metrics=True``.
 
     Returns:
-        AVPContext containing the KV-cache and metadata.
-        If collect_metrics=True or debug_config is set, returns (AVPContext, ThinkMetrics).
+        ThinkResult wrapping the AVPContext and optional metrics.
     """
     t_start = _time.perf_counter()
 
@@ -153,6 +158,10 @@ def think(
 
     if debug_config is not None:
         collect_metrics = True
+
+    # Unwrap ThinkResult if passed as context (backward compat)
+    if isinstance(context, ThinkResult):
+        context = context.context
 
     diagnostics = None
     if debug_config is not None:
@@ -175,6 +184,7 @@ def think(
         model, steps, think_duration,
     )
 
+    metrics = None
     if collect_metrics:
         from .metrics import ThinkMetrics
 
@@ -186,9 +196,8 @@ def think(
             think_duration_s=think_duration,
             diagnostics=diagnostics,
         )
-        return avp_context, metrics
 
-    return avp_context
+    return ThinkResult(avp_context, metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +222,7 @@ def generate(
     debug_config: Optional["DebugConfig"] = None,
     # Deprecated — use ``prompt`` instead
     content: Optional[str] = None,
-) -> Union[str, Tuple[str, "GenerateMetrics"]]:
+) -> GenerateResult:
     """Think about a prompt, optionally store/retrieve context, and generate text.
 
     One-liner for the common think + generate pattern::
@@ -256,8 +265,8 @@ def generate(
         content: **Deprecated.** Use ``prompt`` instead. Will be removed in v2.0.
 
     Returns:
-        Generated text response.
-        If collect_metrics=True or debug_config is set, returns (str, GenerateMetrics).
+        GenerateResult (subclass of str).  Access metrics via
+        ``result.metrics`` (None when ``collect_metrics=False``).
     """
     # Handle deprecated content= parameter
     if content is not None:
@@ -287,6 +296,10 @@ def generate(
 
     if debug_config is not None:
         collect_metrics = True
+
+    # Unwrap ThinkResult if passed as context (backward compat)
+    if isinstance(context, ThinkResult):
+        context = context.context
 
     diagnostics = None
     if debug_config is not None:
@@ -368,6 +381,7 @@ def generate(
         if diagnostics is not None:
             logger.info("generate() debug: %s", diagnostics.summary())
 
+        metrics = None
         if collect_metrics:
             from .metrics import GenerateMetrics
 
@@ -381,9 +395,8 @@ def generate(
                 generate_duration_s=generate_duration,
                 diagnostics=diagnostics,
             )
-            return text, metrics
 
-        return text
+        return GenerateResult(text, metrics=metrics)
 
     # Same-model path
 
@@ -438,6 +451,7 @@ def generate(
     if diagnostics is not None:
         logger.info("generate() debug: %s", diagnostics.summary())
 
+    metrics = None
     if collect_metrics:
         from .metrics import GenerateMetrics
 
@@ -451,9 +465,8 @@ def generate(
             generate_duration_s=generate_duration,
             diagnostics=diagnostics,
         )
-        return text, metrics
 
-    return text
+    return GenerateResult(text, metrics=metrics)
 
 
 def _run_compare(
