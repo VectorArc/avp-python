@@ -64,8 +64,12 @@ class ShapeMismatchError(AVPError):
         super().__init__(f"Shape mismatch: expected {expected}, got {got}")
 
 
-class RealignmentError(AVPError):
-    """Raised when realignment matrix computation or application fails."""
+class ProjectionError(AVPError):
+    """Raised when cross-model projection or realignment fails."""
+
+
+# Deprecated alias — use ProjectionError instead
+RealignmentError = ProjectionError
 
 
 

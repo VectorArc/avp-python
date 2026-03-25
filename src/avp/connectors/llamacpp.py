@@ -1117,7 +1117,7 @@ class LlamaCppConnector(EngineConnector):
         )
 
     def inject_and_generate(self, inputs_embeds, attention_mask=None,
-                            past_key_values=None, max_new_tokens=256,
+                            past_key_values=None, max_new_tokens=512,
                             temperature=0.7, top_p=0.95):
         raise NotImplementedError(
             "Use generate(prompt, context=) for embedding injection on llama.cpp"

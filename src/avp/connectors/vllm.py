@@ -169,7 +169,7 @@ class VLLMConnector(EngineConnector):
         inputs_embeds: Any,
         attention_mask: Optional[Any] = None,
         past_key_values: Optional[Any] = None,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.95,
     ) -> Tuple[List[str], Any]:

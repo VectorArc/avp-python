@@ -238,7 +238,10 @@ def generate(
             via Rosetta Stone. Requires ``cross_model=True``.
         cross_model: Must be True to enable cross-model projection.
             Cross-model (Rosetta Stone) is experimental — accuracy varies
-            by task type. Default False.
+            by task type (structured tasks like math/code work well,
+            comprehension tasks may degrade). Default False. A future
+            minor version may change the default to True once rosetta
+            is production-validated.
         steps: Number of latent thinking steps. Default 20. Set to 0 for
             text-only generation without latent context.
         context: Prior AVPContext to continue from.

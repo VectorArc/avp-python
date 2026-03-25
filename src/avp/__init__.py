@@ -42,6 +42,7 @@ from .types import AVPHeader, DataType, PayloadType, ProjectionMethod, SessionIn
 from .errors import AVPError, ConfigurationError, DecodeError, HandshakeError, IncompatibleModelsError
 from .errors import (  # noqa: F401
     EngineNotAvailableError,
+    ProjectionError,
     InvalidMagicError,
     RealignmentError,
     SessionError,
