@@ -1102,13 +1102,12 @@ class LlamaCppConnector(EngineConnector):
 
     # --- EngineConnector ABC implementation ---
 
-    def get_model_identity(self) -> Any:
+    def get_model_identity(self) -> "ModelIdentity":
         from ..types import ModelIdentity
         return ModelIdentity(
             model_id=self._model_path,
-            hidden_size=self._n_embd,
+            hidden_dim=self._n_embd,
             num_layers=self._n_layer or 0,
-            vocab_size=self._n_vocab,
         )
 
     def extract_hidden_state(self, input_ids, attention_mask=None, past_key_values=None):
