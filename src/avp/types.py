@@ -57,7 +57,7 @@ class CommunicationMode(enum.IntEnum):
     """Communication mode negotiated during handshake."""
 
     LATENT = 0
-    JSON = 1
+    JSON = 1  # Proto uses JSON_MODE (reserved word workaround); wire value is the same
 
     def __str__(self) -> str:
         return self.name
