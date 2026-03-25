@@ -50,6 +50,11 @@ message Metadata {
   // Extensible
   map<string, string> extra = 14;
 
+  // Integrity — CRC32 of pre-compression payload bytes (optional).
+  // Omit (0) for same-process transfers where corruption is not a concern.
+  // Decoders SHOULD verify when present and reject on mismatch.
+  optional uint32 payload_checksum = 15;
+
 }
 
 // --- Responses ---

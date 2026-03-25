@@ -11,6 +11,7 @@ Wire format:
 """
 
 import struct
+import zlib
 
 from . import avp_pb2
 from .compression import compress, decompress
@@ -69,6 +70,9 @@ def encode(
     if metadata.extra:
         for k, v in metadata.extra.items():
             meta_pb.extra[k] = v
+
+    # CRC32 of pre-compression payload for integrity verification
+    meta_pb.payload_checksum = zlib.crc32(payload) & 0xFFFFFFFF
 
     meta_bytes = meta_pb.SerializeToString()
 
@@ -146,6 +150,16 @@ def decode(data: bytes) -> AVPMessage:
     is_compressed = bool(flags & FLAG_COMPRESSED)
     if is_compressed:
         raw_payload = decompress(raw_payload)
+
+    # Verify payload integrity if checksum is present
+    if meta_pb.HasField("payload_checksum"):
+        expected_crc = meta_pb.payload_checksum
+        actual_crc = zlib.crc32(raw_payload) & 0xFFFFFFFF
+        if actual_crc != expected_crc:
+            raise DecodeError(
+                f"Payload checksum mismatch: expected {expected_crc:#010x}, "
+                f"got {actual_crc:#010x}. Message may be corrupted."
+            )
 
     # Decode enums safely — reject unknown wire values with a clear error
     # instead of crashing (ValueError) or silently corrupting (wrong dtype).
