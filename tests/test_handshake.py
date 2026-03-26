@@ -43,7 +43,8 @@ def test_hello_message_roundtrip():
     restored = HelloMessage.from_dict(d)
 
     assert restored.agent_id == "agent-1"
-    assert restored.avp_version == "0.4.0"
+    from avp.types import AVP_VERSION_STRING
+    assert restored.avp_version == AVP_VERSION_STRING
     assert restored.identity.model_family == "llama"
     assert restored.identity.hidden_dim == 4096
     assert restored.capabilities["latent"] is True

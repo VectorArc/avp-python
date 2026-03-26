@@ -41,7 +41,8 @@ def test_json_message_roundtrip_json():
 
 def test_json_message_defaults():
     msg = JSONMessage()
-    assert msg.avp_version == "0.4.0"
+    from avp.types import AVP_VERSION_STRING
+    assert msg.avp_version == AVP_VERSION_STRING
     assert msg.session_id == ""
     assert msg.content == ""
     assert msg.extra == {}

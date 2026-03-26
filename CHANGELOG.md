@@ -4,6 +4,41 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-03-25
+
+### Added
+
+- **Result objects** — `think()` returns `ThinkResult`, `generate()` returns `GenerateResult` (str subclass). No more Union return types. Metrics accessible via `result.metrics` instead of tuple unpacking.
+- **`InspectResult`** — `avp.inspect()` returns a typed dataclass instead of `Dict[str, Any]`.
+- **CRC32 payload checksum** — Optional integrity check on wire payloads (proto field 15). Encode always writes, decode verifies when present. Catches corruption and truncation.
+- **`ConfigurationError`** — New error class for invalid arguments to `think()`/`generate()`. Subclass of `AVPError`, catchable by `except AVPError`.
+- **`ProjectionError`** — New error class for cross-model projection failures. `RealignmentError` kept as alias.
+- **`TensorLike`, `KVCache`** — Type aliases on `EngineConnector` for documentation.
+- **`ContextStore.__contains__` and `__len__`** — `"key" in store` and `len(store)` now work.
+- **Spec test vector validation** — 8 new tests cross-validate SDK against published spec hex baselines.
+
+### Changed
+
+- **`generate(prompt=)` replaces `generate(content=)`** — `content=` is deprecated with `DeprecationWarning`, will be removed in v2.0.
+- **`EngineConnector` ABC simplified** — 1 abstract method (`get_model_identity`) instead of 6. All others have concrete defaults. Third-party connectors now need minimal boilerplate.
+- **`AVPContext` is `kw_only`** — Positional construction no longer allowed.
+- **`store` parameter typed** — `Optional[Any]` changed to `Optional[ContextStore]` in `generate()`.
+- **`to_bytes()` dtype fix** — Reads actual dtype from KV-cache header instead of hardcoding FLOAT32.
+- **Enum decode safety** — Unknown wire values for `DataType`, `PayloadType`, `CommunicationMode` now raise `DecodeError` with actionable message instead of crashing or silently corrupting.
+- **Endianness enforced** — `embedding_to_bytes()` forces little-endian on big-endian hosts.
+- **`inject_and_generate` default** — `max_new_tokens` aligned to 512 across all connectors (was 256 on some).
+
+### Fixed
+
+- **`OllamaConnector.get_model_identity()`** — Used wrong field names (`hidden_size` instead of `hidden_dim`, nonexistent `vocab_size`). Runtime crash.
+- **`LlamaCppConnector.get_model_identity()`** — Same bug as Ollama.
+- **Integrations stored `ThinkResult` instead of `AVPContext`** — LangChain, CrewAI, AutoGen now unwrap before storing.
+
+### Removed
+
+- **`AVPMetadata` compat properties** — `.embedding_dim`, `.data_type`, `.agent_id`, `.task_id` removed (never on PyPI, zero external users).
+- **Dead code** — `_get_local_identity()` and cache (~37 lines), tuple guards in integrations.
+
 ## [0.4.0] - 2026-03-23
 
 ### Added
