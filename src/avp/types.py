@@ -23,7 +23,7 @@ HEADER_SIZE = 12  # 2 magic + 1 version + 1 flags + 4 payload_len + 4 metadata_l
 
 CONTENT_TYPE = "application/avp+binary"
 AVP_VERSION_HEADER = "0.4"
-AVP_VERSION_STRING = "0.4.1"
+AVP_VERSION_STRING = "0.4.2"
 
 # Flag bit constants — fast-path routing hints.
 # If FLAG_KV_CACHE is set, metadata.payload_type MUST be KV_CACHE.

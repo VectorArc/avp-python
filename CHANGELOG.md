@@ -4,6 +4,21 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-03-29
+
+### Added
+
+- **`model=` accepts `Union[str, EngineConnector]`** — The Easy API (`think()`, `generate()`) now accepts either a model name string (auto-creates HuggingFaceConnector) or a pre-built `EngineConnector` instance. All backends (Ollama, llama.cpp, vLLM) are now first-class in the Easy API. `source_model=` widened the same way for cross-model projection.
+- **`ModelSpec` type alias** — `Union[str, EngineConnector]`, importable from top-level `avp`.
+- **`EngineConnector` top-level export** — `from avp import EngineConnector` now works (previously required `from avp.connectors.base import EngineConnector`).
+- **`can_think` validation in `generate()`** — Raises `ConfigurationError` with actionable message (suggests `steps=0`) when a connector without think support is passed with `steps > 0`.
+- 19 new tests for connector parameter handling and backward compatibility.
+
+### Changed
+
+- **`generate()` parameter count reduced** — 15 parameters (down from 17 in the unreleased connector= approach). Removed `connector=` and `source_connector=` before they shipped to PyPI.
+- **Framework integrations** (ChatAVP, AVPLLM, AVPChatCompletionClient) keep separate `model`/`connector` fields for Pydantic compatibility, resolve internally before calling Easy API.
+
 ## [0.4.1] - 2026-03-25
 
 ### Added
