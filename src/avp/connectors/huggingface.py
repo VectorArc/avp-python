@@ -608,7 +608,6 @@ class HuggingFaceConnector(EngineConnector):
         )
 
         past_kv = None
-        cache_position = None
 
         # prompt_len must be computed BEFORE extending attention_mask with
         # past KV-cache entries.  model.generate() returns sequences shaped
@@ -625,12 +624,8 @@ class HuggingFaceConnector(EngineConnector):
             past_kv = context.past_key_values
             past_len = _past_length(past_kv)
 
-            cache_position = torch.arange(
-                past_len,
-                past_len + input_ids.shape[-1],
-                dtype=torch.long,
-                device=self.device,
-            )
+            # cache_position is managed internally by generate() in
+            # transformers >=5.0 when past_key_values is provided.
             if past_len > 0:
                 past_mask = torch.ones(
                     (attention_mask.shape[0], past_len),
@@ -653,7 +648,6 @@ class HuggingFaceConnector(EngineConnector):
                 gen_kwargs["top_p"] = top_p
             if past_kv is not None:
                 gen_kwargs["past_key_values"] = past_kv
-                gen_kwargs["cache_position"] = cache_position
             outputs = self.model.generate(**gen_kwargs)
 
         generated_ids = outputs.sequences[0, prompt_len:]
