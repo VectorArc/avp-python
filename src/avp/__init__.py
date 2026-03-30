@@ -2,12 +2,15 @@
 
 Start here:
     >>> import avp
-    >>> context = avp.think("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
-    >>> answer = avp.generate("Analyze this", model="Qwen/Qwen2.5-7B-Instruct",
-    ...                        context=context)
+    >>> from avp import OllamaConnector
+    >>> conn = OllamaConnector.from_ollama("qwen2.5:7b")
+    >>> context = avp.think("Analyze this", model=conn)
+    >>> answer = avp.generate("Solve it", model=conn, context=context)
 
-Or as a one-liner:
-    >>> answer = avp.generate("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
+With a HuggingFace model name (auto-creates connector):
+    >>> context = avp.think("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
+    >>> answer = avp.generate("Solve it", model="Qwen/Qwen2.5-7B-Instruct",
+    ...                        context=context)
 
 For direct connector access:
     >>> connector = avp.HuggingFaceConnector.from_pretrained("Qwen/...")
@@ -94,7 +97,7 @@ _ROSETTA_NAMES = {
 _TRANSPORT_NAMES = {"AVPClient", "create_app"}
 
 # Easy API helpers that need lazy loading
-_EASY_NAMES = {"clear_cache", "inspect"}
+_EASY_NAMES = {"clear_cache", "inspect", "ModelSpec"}
 
 # Metrics classes — lazy-loaded to avoid unconditional import
 _METRICS_NAMES = {
@@ -125,6 +128,9 @@ def __getattr__(name: str):
     if name == "OllamaConnector":
         from .connectors.ollama import OllamaConnector
         return OllamaConnector
+    if name == "EngineConnector":
+        from .connectors.base import EngineConnector
+        return EngineConnector
     if name in _EASY_NAMES:
         from . import easy as _easy
         return getattr(_easy, name)
@@ -140,6 +146,7 @@ __all__ = [
     "generate",
     "inspect",
     "clear_cache",
+    "ModelSpec",
     "ContextStore",
     "ThinkResult",
     "GenerateResult",
@@ -150,6 +157,7 @@ __all__ = [
     "TransferDiagnostics",
     "DebugConfig",
     # Connectors (lazy — requires torch/transformers/vllm/llama-cpp-python)
+    "EngineConnector",
     "HuggingFaceConnector",
     "VLLMConnector",
     "LlamaCppConnector",

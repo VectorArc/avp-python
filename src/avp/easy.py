@@ -2,14 +2,18 @@
 
     import avp
 
-    # Get latent context
-    context = avp.think("Analyze this problem", model="Qwen/Qwen2.5-7B-Instruct")
+    # With any connector (Ollama, llama.cpp, etc.)
+    from avp import OllamaConnector
+    conn = OllamaConnector.from_ollama("qwen2.5:7b")
+    context = avp.think("Analyze this", model=conn)
+    answer = avp.generate("Solve it", model=conn, context=context)
 
-    # Generate with latent context
+    # With a HuggingFace model name (auto-creates connector)
+    context = avp.think("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
     answer = avp.generate("Solve it", model="Qwen/Qwen2.5-7B-Instruct", context=context)
 
     # Or do both in one call
-    answer = avp.generate("Analyze and solve: 24*17+3", model="Qwen/Qwen2.5-7B-Instruct")
+    answer = avp.generate("Analyze and solve: 24*17+3", model=conn)
 
 For direct connector access (advanced):
     connector = avp.HuggingFaceConnector.from_pretrained("Qwen/...")
@@ -23,9 +27,10 @@ for a future release.
 import logging
 import time as _time
 import threading
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 if TYPE_CHECKING:
+    from .connectors.base import EngineConnector
     from .context import AVPContext
     from .context_store import ContextStore
     from .metrics import DebugConfig
@@ -34,6 +39,10 @@ if TYPE_CHECKING:
 from .results import GenerateResult, ThinkResult
 
 logger = logging.getLogger(__name__)
+
+# Type alias for model specification: name (str) or pre-built connector.
+ModelSpec = Union[str, "EngineConnector"]
+"""A model specifier: HuggingFace model name (str) or EngineConnector instance."""
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +54,12 @@ _connector_lock = threading.Lock()
 
 
 def _get_or_create_connector(model_name: str) -> Any:
-    """Get or create a cached HuggingFaceConnector for latent operations."""
+    """Get or create a cached HuggingFaceConnector.
+
+    Called when ``model=`` receives a string.  The connector is cached
+    by name so repeated calls reuse the same instance.  Always creates
+    a HuggingFaceConnector (requires ``avp[hf]``).
+    """
     with _connector_lock:
         if model_name in _connector_cache:
             return _connector_cache[model_name]
@@ -65,6 +79,39 @@ def clear_cache() -> None:
         _connector_cache.clear()
 
 
+def _resolve_model(model: Any) -> Any:
+    """Resolve a model specifier to a connector instance.
+
+    - ``str``: auto-creates and caches a HuggingFaceConnector (requires avp[hf]).
+    - ``EngineConnector``: returned as-is (caller owns lifecycle).
+    """
+    if isinstance(model, str):
+        return _get_or_create_connector(model)
+    from .connectors.base import EngineConnector
+    if isinstance(model, EngineConnector):
+        return model
+    from .errors import ConfigurationError
+    raise ConfigurationError(
+        f"model= must be a model name (str) or EngineConnector instance, "
+        f"got {type(model).__name__}"
+    )
+
+
+def _resolve_model_label(model: Any) -> str:
+    """Derive a human-readable model label for metrics and logging."""
+    if model is None:
+        return "unknown"
+    if isinstance(model, str):
+        return model
+    try:
+        identity = model.get_model_identity()
+        if identity and identity.model_id:
+            return identity.model_id
+    except Exception:
+        pass
+    return type(model).__name__
+
+
 # ---------------------------------------------------------------------------
 # think()
 # ---------------------------------------------------------------------------
@@ -73,7 +120,7 @@ def clear_cache() -> None:
 def think(
     prompt: str,
     *,
-    model: str,
+    model: Optional[ModelSpec] = None,
     steps: int = 20,
     context: Optional["AVPContext"] = None,
     collect_metrics: bool = False,
@@ -89,13 +136,18 @@ def think(
 
     Examples::
 
+        # With a connector (any backend)
+        from avp import OllamaConnector
+        conn = OllamaConnector.from_ollama("qwen2.5:7b")
+        result = avp.think("Analyze this", model=conn)
+
+        # With a model name (auto-creates HuggingFace backend)
         result = avp.think("Analyze this", model="Qwen/Qwen2.5-7B-Instruct")
-        result.context          # AVPContext
-        result.past_key_values  # delegates to context
 
     Args:
         prompt: The text prompt to think about.
-        model: HuggingFace model name/path (required).
+        model: A model name (str, auto-creates HuggingFaceConnector) or
+            an :class:`EngineConnector` instance (any backend).
         steps: Number of latent thinking steps. Default 20.
         context: Prior AVPContext or ThinkResult to continue from.
         collect_metrics: If True, populate ``result.metrics``.
@@ -107,12 +159,14 @@ def think(
     """
     t_start = _time.perf_counter()
 
+    from .errors import ConfigurationError
+
     if not isinstance(prompt, str):
-        from .errors import ConfigurationError
         raise ConfigurationError(f"think() prompt must be str, got {type(prompt).__name__}")
     if not prompt:
-        from .errors import ConfigurationError
         raise ConfigurationError("think() requires a non-empty prompt string")
+    if model is None:
+        raise ConfigurationError("think() requires model= (str or EngineConnector)")
 
     if debug_config is not None:
         collect_metrics = True
@@ -121,14 +175,23 @@ def think(
     if isinstance(context, ThinkResult):
         context = context.context
 
+    model_label = _resolve_model_label(model)
+    resolved = _resolve_model(model)
+
+    if not getattr(resolved, "can_think", False):
+        raise ConfigurationError(
+            f"{type(resolved).__name__} does not support latent thinking "
+            f"(can_think=False). Use a connector with think() support "
+            f"(HuggingFaceConnector, LlamaCppConnector, OllamaConnector)."
+        )
+
     diagnostics = None
     if debug_config is not None:
         from .metrics import TransferDiagnostics
-        diagnostics = TransferDiagnostics(target_model=model)
+        diagnostics = TransferDiagnostics(target_model=model_label)
 
-    connector = _get_or_create_connector(model)
     t_think = _time.perf_counter()
-    avp_context = connector.think(
+    avp_context = resolved.think(
         prompt, steps=steps, context=context,
         _diagnostics=diagnostics,
     )
@@ -139,7 +202,7 @@ def think(
 
     logger.info(
         "think() model=%s steps=%d duration=%.3fs",
-        model, steps, think_duration,
+        model_label, steps, think_duration,
     )
 
     metrics = None
@@ -147,7 +210,7 @@ def think(
         from .metrics import ThinkMetrics
 
         metrics = ThinkMetrics(
-            model=model,
+            model=model_label,
             steps=steps,
             has_prior_context=context is not None,
             duration_s=_time.perf_counter() - t_start,
@@ -166,8 +229,8 @@ def think(
 def generate(
     prompt: str = "",
     *,
-    model: str,
-    source_model: Optional[str] = None,
+    model: Optional[ModelSpec] = None,
+    source_model: Optional[ModelSpec] = None,
     cross_model: bool = False,
     steps: int = 20,
     context: Optional["AVPContext"] = None,
@@ -183,32 +246,36 @@ def generate(
 ) -> GenerateResult:
     """Think about a prompt, optionally store/retrieve context, and generate text.
 
-    One-liner for the common think + generate pattern::
+    With a connector::
+
+        from avp import OllamaConnector
+        conn = OllamaConnector.from_ollama("qwen2.5:7b")
+        text = avp.generate("Solve: 2+2", model=conn)
+
+    With a model name::
 
         text = avp.generate("Solve: 2+2", model="Qwen/Qwen2.5-7B-Instruct")
 
-    Cross-model (Rosetta projection, experimental)::
+    Cross-model::
 
-        text = avp.generate("Solve: 2+2", model="target",
-                            source_model="source", cross_model=True)
+        text = avp.generate("Solve: 2+2", model=target_conn,
+                            source_model=source_conn, cross_model=True)
 
     With context store for multi-turn::
 
-        text = avp.generate("Solve: 2+2", model=M, store=store,
+        text = avp.generate("Solve: 2+2", model=conn, store=store,
                             store_key="agent-a")
 
     Args:
         prompt: The prompt text.
-        model: HuggingFace model name/path (required).
-        source_model: Source model for cross-model projection. When set,
-            thinks on the source model and projects to the target (``model``)
-            via Rosetta Stone. Requires ``cross_model=True``.
+        model: A model name (str, auto-creates HuggingFaceConnector) or
+            an :class:`EngineConnector` instance (any backend).
+        source_model: Source model for cross-model projection.  Accepts
+            the same types as ``model``.
         cross_model: Must be True to enable cross-model projection.
             Cross-model (Rosetta Stone) is experimental — accuracy varies
             by task type (structured tasks like math/code work well,
-            comprehension tasks may degrade). Default False. A future
-            minor version may change the default to True once rosetta
-            is production-validated.
+            comprehension tasks may degrade). Default False.
         steps: Number of latent thinking steps. Default 20. Set to 0 for
             text-only generation without latent context.
         context: Prior AVPContext to continue from.
@@ -240,16 +307,17 @@ def generate(
             from .errors import ConfigurationError
             raise ConfigurationError("Cannot pass both 'prompt' and 'content' to generate()")
         prompt = content
+    from .errors import ConfigurationError
+
     if not isinstance(prompt, str):
-        from .errors import ConfigurationError
         raise ConfigurationError(f"generate() prompt must be str, got {type(prompt).__name__}")
     if not prompt:
-        from .errors import ConfigurationError
         raise ConfigurationError("generate() requires a non-empty prompt string")
+    if model is None:
+        raise ConfigurationError("generate() requires model= (str or EngineConnector)")
 
     t_start = _time.perf_counter()
     if (store_key is not None or prior_key is not None) and store is None:
-        from .errors import ConfigurationError
         raise ConfigurationError("store_key/prior_key require store= (pass a ContextStore)")
 
     if debug_config is not None:
@@ -259,12 +327,15 @@ def generate(
     if isinstance(context, ThinkResult):
         context = context.context
 
+    model_label = _resolve_model_label(model)
+    source_label = _resolve_model_label(source_model) if source_model is not None else None
+
     diagnostics = None
     if debug_config is not None:
         from .metrics import TransferDiagnostics
         diagnostics = TransferDiagnostics(
-            target_model=model,
-            source_model=source_model,
+            target_model=model_label,
+            source_model=source_label,
         )
 
     # Cross-model path: think on source, project to target
@@ -280,13 +351,21 @@ def generate(
             UserWarning,
             stacklevel=2,
         )
-        source_model = None  # fall through to same-model path on target
+        source_model = None
         if diagnostics is not None:
             diagnostics.source_model = None
 
     if source_model is not None:
-        source_connector = _get_or_create_connector(source_model)
-        target_connector = _get_or_create_connector(model)
+        resolved_source = _resolve_model(source_model)
+        resolved_target = _resolve_model(model)
+
+        # Validate source can think (only needed when no context provided)
+        if steps > 0 and context is None and not getattr(resolved_source, "can_think", False):
+            raise ConfigurationError(
+                f"{type(resolved_source).__name__} does not support latent thinking "
+                f"(can_think=False). Use a source that supports think(), "
+                f"or provide context= from a prior think() call."
+            )
 
         # Retrieve prior context from store
         if prior_key is not None and store is not None:
@@ -299,7 +378,7 @@ def generate(
         if context is not None:
             source_context = context
         elif steps > 0:
-            source_context = source_connector.think(
+            source_context = resolved_source.think(
                 prompt, steps=steps,
                 _diagnostics=diagnostics,
             )
@@ -314,10 +393,10 @@ def generate(
             stored = True
 
         t_gen = _time.perf_counter()
-        text = target_connector.generate(
+        text = resolved_target.generate(
             prompt,
             context=source_context,
-            source=source_connector,
+            source=resolved_source,
             cross_model=True,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -327,13 +406,13 @@ def generate(
 
         logger.info(
             "generate() cross-model %s→%s think=%.3fs generate=%.3fs total=%.3fs",
-            source_model, model, think_duration, generate_duration,
+            source_label, model_label, think_duration, generate_duration,
             _time.perf_counter() - t_start,
         )
 
         # Compare mode
         if debug_config is not None and debug_config.compare:
-            _run_compare(diagnostics, target_connector, prompt, text,
+            _run_compare(diagnostics, resolved_target, prompt, text,
                          max_new_tokens, temperature)
 
         if diagnostics is not None:
@@ -344,7 +423,7 @@ def generate(
             from .metrics import GenerateMetrics
 
             metrics = GenerateMetrics(
-                model=model,
+                model=model_label,
                 steps=steps,
                 has_prior_context=context is not None,
                 stored=stored,
@@ -357,6 +436,16 @@ def generate(
         return GenerateResult(text, metrics=metrics)
 
     # Same-model path
+    resolved = _resolve_model(model)
+
+    # Validate can_think when latent steps are requested
+    if steps > 0 and not getattr(resolved, "can_think", False):
+        raise ConfigurationError(
+            f"{type(resolved).__name__} does not support latent thinking "
+            f"(can_think=False). Either pass steps=0 for text-only generation, "
+            f"or use a connector that supports think() "
+            f"(HuggingFaceConnector, LlamaCppConnector, OllamaConnector)."
+        )
 
     # Retrieve prior context from store
     if prior_key is not None and store is not None:
@@ -365,10 +454,9 @@ def generate(
             context = prior
 
     # Think — call connector directly to share the same diagnostics object
-    connector = _get_or_create_connector(model)
     t_think = _time.perf_counter()
     if steps > 0:
-        avp_context = connector.think(
+        avp_context = resolved.think(
             prompt, steps=steps, context=context,
             _diagnostics=diagnostics,
         )
@@ -384,7 +472,7 @@ def generate(
 
     # Generate text (connector already obtained above)
     t_gen = _time.perf_counter()
-    text = connector.generate(
+    text = resolved.generate(
         prompt,
         context=avp_context,
         max_new_tokens=max_new_tokens,
@@ -395,7 +483,7 @@ def generate(
 
     logger.debug(
         "generate() model=%s steps=%d stored=%s prior=%s",
-        model, steps, store_key, prior_key,
+        model_label, steps, store_key, prior_key,
     )
     logger.info(
         "generate() think=%.3fs generate=%.3fs total=%.3fs",
@@ -404,7 +492,7 @@ def generate(
 
     # Compare mode
     if debug_config is not None and debug_config.compare:
-        _run_compare(diagnostics, connector, prompt, text, max_new_tokens, temperature)
+        _run_compare(diagnostics, resolved, prompt, text, max_new_tokens, temperature)
 
     if diagnostics is not None:
         logger.info("generate() debug: %s", diagnostics.summary())
@@ -414,7 +502,7 @@ def generate(
         from .metrics import GenerateMetrics
 
         metrics = GenerateMetrics(
-            model=model,
+            model=model_label,
             steps=steps,
             has_prior_context=context is not None,
             stored=stored,

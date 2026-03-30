@@ -27,6 +27,15 @@ Multi-agent with latent context::
     researcher.invoke("Analyze this math problem: 24 * 17 + 3")
     answer = solver.invoke("Solve step by step: 24 * 17 + 3")
 
+With any connector (e.g. Ollama)::
+
+    from avp import OllamaConnector
+    conn = OllamaConnector.from_ollama("qwen2.5:7b")
+    researcher = ChatAVP(connector=conn, role="think",
+                         store=store, store_key="task-1")
+    solver = ChatAVP(connector=conn, role="generate",
+                     store=store, store_key="task-1")
+
 Cross-model::
 
     researcher = ChatAVP(model="Qwen/Qwen2.5-7B-Instruct", role="think",
@@ -96,14 +105,22 @@ if HAS_LANGCHAIN:
         generate in one call via ``avp.generate()``).
         """
 
-        model: str
-        """HuggingFace model ID (e.g. 'Qwen/Qwen2.5-7B-Instruct')."""
+        model: Optional[str] = None
+        """Model name (e.g. 'Qwen/Qwen2.5-7B-Instruct' or 'qwen2.5:7b').
+        Ignored when ``connector`` is provided."""
+
+        connector: Optional[Any] = None
+        """An EngineConnector instance (e.g. OllamaConnector). When provided,
+        ``model`` is ignored for connector creation."""
 
         role: str = "generate"
         """Agent role: 'think' (store context) or 'generate' (use context)."""
 
         source_model: Optional[str] = None
         """Source model for cross-model rosetta (e.g. the researcher's model)."""
+
+        source_connector: Optional[Any] = None
+        """An EngineConnector for the source model in cross-model projection."""
 
         cross_model: bool = False
         """Enable cross-model rosetta projection."""
@@ -154,7 +171,7 @@ if HAS_LANGCHAIN:
                 # Think-only: run latent steps, store context, return ack
                 context = avp.think(
                     prompt,
-                    model=self.model,
+                    model=self.connector or self.model,
                     steps=self.steps,
                 )
 
@@ -177,8 +194,8 @@ if HAS_LANGCHAIN:
 
                 text = avp.generate(
                     prompt,
-                    model=self.model,
-                    source_model=self.source_model,
+                    model=self.connector or self.model,
+                    source_model=self.source_connector or self.source_model,
                     cross_model=self.cross_model,
                     steps=self.steps,
                     context=context,

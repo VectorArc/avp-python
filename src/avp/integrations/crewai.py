@@ -56,9 +56,11 @@ if HAS_CREWAI:
 
         def __init__(
             self,
-            model: str,
+            model: Optional[str] = None,
+            connector: Optional[Any] = None,
             role: str = "generate",
             source_model: Optional[str] = None,
+            source_connector: Optional[Any] = None,
             cross_model: bool = False,
             steps: int = 20,
             max_new_tokens: int = 512,
@@ -67,8 +69,10 @@ if HAS_CREWAI:
             store_key: Optional[str] = None,
         ):
             self._avp_model = model
+            self._avp_connector = connector
             self._avp_role = role
             self._avp_source_model = source_model
+            self._avp_source_connector = source_connector
             self._avp_cross_model = cross_model
             self._avp_steps = steps
             self._avp_max_new_tokens = max_new_tokens
@@ -114,7 +118,7 @@ if HAS_CREWAI:
             if self._avp_role == "think":
                 context = avp.think(
                     prompt,
-                    model=self._avp_model,
+                    model=self._avp_connector or self._avp_model,
                     steps=self._avp_steps,
                 )
                 if self._avp_store is not None and self._avp_store_key:
@@ -129,8 +133,8 @@ if HAS_CREWAI:
 
                 result = avp.generate(
                     prompt,
-                    model=self._avp_model,
-                    source_model=self._avp_source_model,
+                    model=self._avp_connector or self._avp_model,
+                    source_model=self._avp_source_connector or self._avp_source_model,
                     cross_model=self._avp_cross_model,
                     steps=self._avp_steps,
                     context=context,
