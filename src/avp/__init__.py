@@ -170,6 +170,8 @@ __all__ = [
     "extract_model_identity",
     "SessionManager",
     # Types
+    "OutputType",
+    "PayloadType",
     "ModelIdentity",
     "CommunicationMode",
     "CompressionLevel",

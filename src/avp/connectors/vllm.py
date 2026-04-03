@@ -169,7 +169,7 @@ class VLLMConnector(EngineConnector):
         return "auto"
 
     @property
-    def has_tokenizer(self) -> bool:
+    def can_tokenize(self) -> bool:
         return True
 
     # --- Tokenization overrides ---

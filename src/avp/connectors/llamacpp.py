@@ -330,11 +330,7 @@ class LlamaCppConnector(EngineConnector):
             )
 
         # --- Build return context ---
-        # Resolve OutputType → PayloadType (wire value)
-        if output == OutputType.AUTO or output == OutputType.KV_CACHE:
-            resolved_payload = PayloadType.KV_CACHE
-        else:
-            resolved_payload = PayloadType.HIDDEN_STATE
+        resolved_payload = output.resolve()
 
         total_steps = accumulated_steps + steps_completed
 
@@ -569,7 +565,7 @@ class LlamaCppConnector(EngineConnector):
 
         # Warn about kwargs that won't be forwarded on latent paths
         if kwargs:
-            logger.debug(
+            logger.warning(
                 "generate(): kwargs %s ignored on latent generation path "
                 "(only temperature, top_p, grammar are used with latent context)",
                 list(kwargs.keys()),
@@ -1266,7 +1262,7 @@ class LlamaCppConnector(EngineConnector):
         return "float32"
 
     @property
-    def has_tokenizer(self) -> bool:
+    def can_tokenize(self) -> bool:
         return True
 
     # --- Tokenization overrides ---
@@ -1274,7 +1270,7 @@ class LlamaCppConnector(EngineConnector):
     def tokenize(self, text: str) -> List[int]:
         if not HAS_LLAMACPP:
             raise ImportError("llama-cpp-python required")
-        return self._model.tokenize(text.encode("utf-8"), add_bos=False)
+        return self._model.tokenize(text.encode("utf-8"), add_bos=False, special=True)
 
     def detokenize(self, token_ids: List[int]) -> str:
         if not HAS_LLAMACPP:

@@ -151,7 +151,7 @@ class EngineConnector(ABC):
         return "float32"
 
     @property
-    def has_tokenizer(self) -> bool:
+    def can_tokenize(self) -> bool:
         """Whether this connector exposes tokenization capabilities.
 
         When ``True``, :meth:`tokenize`, :meth:`detokenize`, and

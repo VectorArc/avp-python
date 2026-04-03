@@ -45,19 +45,6 @@ class AVPContext:
     last_hidden_state: Any = None
     """Last hidden state [1, D] from think() for cross-model projection."""
 
-    engine_state: Any = None
-    """Engine-specific context handle (e.g., llama_context pointer).
-
-    Set by connectors that maintain live inference state.  Not serialized
-    by ``to_bytes()`` — this is a same-process, same-lifetime reference.
-    """
-
-    engine_position: int = 0
-    """Current position in the engine context's KV-cache.
-
-    Updated by connectors after think()/generate() operations.
-    """
-
     @property
     def payload_type(self) -> "PayloadType":
         """The effective payload type of this context."""

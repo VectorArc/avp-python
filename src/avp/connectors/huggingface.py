@@ -194,7 +194,7 @@ class HuggingFaceConnector(EngineConnector):
         return dt.replace("torch.", "") if dt.startswith("torch.") else dt
 
     @property
-    def has_tokenizer(self) -> bool:
+    def can_tokenize(self) -> bool:
         return True
 
     # --- Tokenization overrides ---
@@ -337,13 +337,6 @@ class HuggingFaceConnector(EngineConnector):
             input_embeds.weight if input_embeds else None,
             output_embeds.weight if output_embeds else None,
         )
-
-    def tokenize(self, text: str) -> Any:
-        return self.tokenizer(
-            text,
-            add_special_tokens=False,
-            return_tensors="pt",
-        )["input_ids"].to(self._device)
 
     def needs_realignment(self) -> bool:
         return needs_realignment(self.model)
@@ -544,11 +537,7 @@ class HuggingFaceConnector(EngineConnector):
             raise ValueError(f"steps must be >= 0, got {steps}")
 
         # Resolve AUTO → KV_CACHE (same-model default)
-        # Resolve OutputType → PayloadType (wire value)
-        if output == OutputType.AUTO or output == OutputType.KV_CACHE:
-            resolved_payload = PayloadType.KV_CACHE
-        else:
-            resolved_payload = PayloadType.HIDDEN_STATE
+        resolved_payload = output.resolve()
 
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)

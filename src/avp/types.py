@@ -68,6 +68,16 @@ class OutputType(enum.Enum):
     """Only the last hidden state ``[1, D]``.  KV-cache is freed
     immediately, reducing VRAM."""
 
+    def resolve(self) -> "PayloadType":
+        """Resolve this output request to a concrete wire PayloadType.
+
+        ``AUTO`` and ``KV_CACHE`` resolve to ``PayloadType.KV_CACHE``.
+        ``HIDDEN_STATE`` resolves to ``PayloadType.HIDDEN_STATE``.
+        """
+        if self == OutputType.HIDDEN_STATE:
+            return PayloadType.HIDDEN_STATE
+        return PayloadType.KV_CACHE
+
 
 class PayloadType(enum.IntEnum):
     """Payload type in AVP wire format.

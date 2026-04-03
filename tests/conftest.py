@@ -38,9 +38,18 @@ class MockTokenizer:
         t = torch.tensor([ids])
         return {"input_ids": t}
 
+    def encode(self, text, add_special_tokens=False, **kw):
+        return [ord(c) % (self.vocab_size - 2) + 2 for c in text]
+
     def decode(self, ids, skip_special_tokens=True, **kw):
         chars = [chr(int(i) % 128) for i in ids if int(i) >= 2 or not skip_special_tokens]
         return "".join(chars).strip()
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, **kw):
+        parts = [f"<|{m['role']}|>\n{m['content']}" for m in messages]
+        if add_generation_prompt:
+            parts.append("<|assistant|>")
+        return "\n".join(parts)
 
     def get_vocab(self):
         return {f"token_{i}": i for i in range(self.vocab_size)}
