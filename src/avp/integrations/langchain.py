@@ -125,7 +125,7 @@ if HAS_LANGCHAIN:
         cross_model: bool = False
         """Enable cross-model rosetta projection."""
 
-        steps: int = 10
+        steps: int = 20
         """Number of latent thinking steps."""
 
         max_new_tokens: int = 512

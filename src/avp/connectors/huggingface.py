@@ -520,7 +520,7 @@ class HuggingFaceConnector(EngineConnector):
     def think(
         self,
         prompt: Union[str, List[Dict[str, str]]],
-        steps: int = 10,
+        steps: int = 20,
         context: Optional[AVPContext] = None,
         output: PayloadType = PayloadType.AUTO,
         _diagnostics: Optional[Any] = None,

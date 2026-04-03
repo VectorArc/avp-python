@@ -330,7 +330,7 @@ class EngineConnector(ABC):
     def think(
         self,
         prompt: Union[str, List[Dict[str, str]]],
-        steps: int = 10,
+        steps: int = 20,
         context: Optional[Any] = None,
         output: PayloadType = PayloadType.AUTO,
         **kwargs: Any,

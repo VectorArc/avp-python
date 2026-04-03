@@ -199,7 +199,7 @@ class LlamaCppConnector(EngineConnector):
     def think(
         self,
         prompt: Union[str, list],
-        steps: int = 10,
+        steps: int = 20,
         context: Optional[Any] = None,
         output: PayloadType = PayloadType.AUTO,
         **kwargs: Any,
@@ -1384,7 +1384,7 @@ class LlamaCppConnector(EngineConnector):
         self,
         ctx: Any,
         n_past: int,
-        steps: int = 10,
+        steps: int = 20,
     ) -> tuple:
         """Run N latent consolidation steps on a caller-owned context.
 

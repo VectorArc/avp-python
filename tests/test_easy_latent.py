@@ -55,12 +55,12 @@ class TestThink:
         assert result.num_steps == 5
         assert result.metrics is None
 
-    def test_default_steps_10(self, _mock_connector):
+    def test_default_steps_20(self, _mock_connector):
         from avp.easy import think
 
         think("test", model="test-model")
         call_kwargs = _mock_connector.think.call_args[1]
-        assert call_kwargs["steps"] == 10
+        assert call_kwargs["steps"] == 20
 
     def test_custom_steps(self, _mock_connector):
         from avp.easy import think
@@ -99,7 +99,7 @@ class TestThink:
         assert isinstance(result, ThinkResult)
         assert isinstance(result.metrics, ThinkMetrics)
         assert result.metrics.model == "test-model"
-        assert result.metrics.steps == 10
+        assert result.metrics.steps == 20
         # Tuple unpacking backward compat
         ctx, metrics = result
         assert isinstance(metrics, ThinkMetrics)

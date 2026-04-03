@@ -62,7 +62,7 @@ if HAS_CREWAI:
             source_model: Optional[str] = None,
             source_connector: Optional[Any] = None,
             cross_model: bool = False,
-            steps: int = 10,
+            steps: int = 20,
             max_new_tokens: int = 512,
             temperature: float = 0.7,
             store: Optional[Any] = None,
