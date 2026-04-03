@@ -251,6 +251,7 @@ def generate(
     debug_config: Optional["DebugConfig"] = None,
     # Deprecated — use ``prompt`` instead
     content: Optional[str] = None,
+    **kwargs: Any,
 ) -> GenerateResult:
     """Think about a prompt, optionally store/retrieve context, and generate text.
 
@@ -409,6 +410,7 @@ def generate(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             _diagnostics=diagnostics,
+            **kwargs,
         )
         generate_duration = _time.perf_counter() - t_gen
 
@@ -486,6 +488,7 @@ def generate(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         _diagnostics=diagnostics,
+        **kwargs,
     )
     generate_duration = _time.perf_counter() - t_gen
 

@@ -476,13 +476,19 @@ class LlamaCppConnector(EngineConnector):
         if max_new_tokens is not None:
             max_tokens = max_new_tokens
 
-        # If no context, just generate normally
+        # Strip AVP-internal kwargs before forwarding
+        kwargs.pop("_diagnostics", None)
+        kwargs.pop("source", None)
+        kwargs.pop("cross_model", None)
+
+        # If no context, just generate normally (kwargs forwarded)
         if context is None:
             output = self._model(
                 prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                **kwargs,
             )
             return output["choices"][0]["text"]
 
@@ -502,6 +508,7 @@ class LlamaCppConnector(EngineConnector):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
+                **kwargs,
             )
             return output["choices"][0]["text"]
 

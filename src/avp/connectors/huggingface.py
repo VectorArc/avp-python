@@ -533,11 +533,11 @@ class HuggingFaceConnector(EngineConnector):
             AVPContext with accumulated KV-cache.
 
         Raises:
-            ValueError: If steps < 1.
+            ValueError: If steps < 0.
             IncompatibleModelsError: If context is from a different model.
         """
-        if steps < 1:
-            raise ValueError(f"steps must be >= 1, got {steps}")
+        if steps < 0:
+            raise ValueError(f"steps must be >= 0, got {steps}")
 
         # Resolve AUTO → KV_CACHE (same-model default)
         if output == PayloadType.AUTO:
@@ -618,6 +618,7 @@ class HuggingFaceConnector(EngineConnector):
         top_p: float = 0.95,
         do_sample: bool = True,
         _diagnostics: Optional[Any] = None,
+        **kwargs: Any,
     ) -> str:
         """Generate text, optionally conditioned on latent context from think().
 
@@ -708,17 +709,25 @@ class HuggingFaceConnector(EngineConnector):
                 attention_mask = torch.cat([past_mask, attention_mask], dim=-1)
 
         with torch.no_grad():
+            # Build generation kwargs: user kwargs override sampling defaults
             gen_kwargs = dict(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
                 pad_token_id=self.tokenizer.pad_token_id,
-                return_dict_in_generate=True,
             )
             if do_sample:
                 gen_kwargs["temperature"] = temperature
                 gen_kwargs["top_p"] = top_p
+            # User kwargs override sampling params (e.g., logits_processor,
+            # stopping_criteria, streamer, top_k, repetition_penalty)
+            kwargs.pop("_diagnostics", None)
+            kwargs.pop("source", None)
+            kwargs.pop("cross_model", None)
+            gen_kwargs.update(kwargs)
+            # Structural invariants — AVP requires these, not user-overridable
+            gen_kwargs["input_ids"] = input_ids
+            gen_kwargs["attention_mask"] = attention_mask
+            gen_kwargs["return_dict_in_generate"] = True
             if past_kv is not None:
                 gen_kwargs["past_key_values"] = past_kv
             outputs = self.model.generate(**gen_kwargs)

@@ -177,10 +177,16 @@ class TestHuggingFaceThink:
         with pytest.raises(IncompatibleModelsError, match="model_hash"):
             tiny_tied_connector.think("test", context=fake_ctx)
 
-    def test_think_zero_steps_raises(self, tiny_tied_connector):
-        """steps < 1 raises ValueError."""
-        with pytest.raises(ValueError, match="steps must be >= 1"):
-            tiny_tied_connector.think("test", steps=0)
+    def test_think_negative_steps_raises(self, tiny_tied_connector):
+        """steps < 0 raises ValueError."""
+        with pytest.raises(ValueError, match="steps must be >= 0"):
+            tiny_tied_connector.think("test", steps=-1)
+
+    def test_think_zero_steps_returns_context(self, tiny_tied_connector):
+        """steps=0 returns AVPContext with KV prefill only (no latent steps)."""
+        result = tiny_tied_connector.think("test", steps=0)
+        assert result is not None
+        assert result.num_steps == 0
 
 
 # ---- HuggingFace generate() tests ----

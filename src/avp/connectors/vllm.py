@@ -373,6 +373,7 @@ class VLLMConnector(EngineConnector):
         max_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.95,
+        **kwargs: Any,
     ) -> List[str]:
         """Native text-in/text-out generation (vLLM's sweet spot).
 
@@ -381,6 +382,8 @@ class VLLMConnector(EngineConnector):
             max_tokens: Maximum tokens per response.
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
+            **kwargs: Additional SamplingParams options (e.g., ``top_k``,
+                ``repetition_penalty``, ``stop``, ``presence_penalty``).
 
         Returns:
             List of generated text strings.
@@ -392,6 +395,7 @@ class VLLMConnector(EngineConnector):
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
+            **kwargs,
         )
 
         outputs = self._engine.generate(prompts, sampling_params)
@@ -440,8 +444,13 @@ class VLLMConnector(EngineConnector):
         rendered = _render_prompt(self._tokenizer, messages)
 
         temp = temperature if do_sample else 0.0
+        # Strip AVP-internal kwargs before forwarding to SamplingParams
+        kwargs.pop("_diagnostics", None)
+        kwargs.pop("source", None)
+        kwargs.pop("cross_model", None)
         result = self.generate_text(
-            [rendered], max_tokens=max_new_tokens, temperature=temp, top_p=top_p
+            [rendered], max_tokens=max_new_tokens, temperature=temp,
+            top_p=top_p, **kwargs,
         )
         return result[0]
 
