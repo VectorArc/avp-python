@@ -4,6 +4,12 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-04-02
+
+### Fixed
+
+- Stale `0.4.2` version string in `handshake.py` — now uses `AVP_VERSION_STRING` constant.
+
 ## [0.5.0] - 2026-04-02
 
 ### Added
