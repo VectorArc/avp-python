@@ -4,6 +4,25 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-04-02
+
+### Added
+
+- **`output=PayloadType` on `think()`** — Controls what the returned context contains. `PayloadType.AUTO` (default) lets the system decide, `PayloadType.KV_CACHE` returns full KV-cache, `PayloadType.HIDDEN_STATE` returns only the last hidden state vector `[1, D]` (KV-cache freed immediately, ~14KB vs ~76MB). Enables flexible transfer granularity for bandwidth-constrained or cross-process scenarios.
+- **`PayloadType.AUTO`** — SDK-only sentinel (`-1`) that resolves to the optimal payload type at runtime. Never serialized.
+- **`AVPContext.payload_type` property** — Derived from data present: `KV_CACHE` if `past_key_values` is set, `HIDDEN_STATE` if only hidden state. Raises `ValueError` on empty context.
+- **Same-model hidden state injection in `generate()`** — `generate()` now accepts same-model contexts with only a hidden state (previously gated behind `cross_model=True`). Uses existing embedding injection path.
+- Type validation for `output=` in Easy API — rejects non-`PayloadType` values with actionable `ConfigurationError`.
+
+### Removed
+
+- **`PayloadType.EMBEDDING`** — Removed from SDK enum and proto schema. Was never used in production code. Proto value 2 is available for future use.
+
+### Changed
+
+- `PayloadType` enum reordered: `AUTO = -1`, `HIDDEN_STATE = 0`, `KV_CACHE = 1`.
+- Proto schema cleaned: `EMBEDDING` removed from both `avp-python/proto/avp.proto` and `avp-spec/schemas/avp.proto`.
+
 ## [0.4.2] - 2026-03-29
 
 ### Added
