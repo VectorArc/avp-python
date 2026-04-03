@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from .errors import HandshakeError
-from .types import CommunicationMode, ModelIdentity, SessionInfo
+from .types import AVP_VERSION_STRING, CommunicationMode, ModelIdentity, SessionInfo
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ class HelloMessage:
     """Message exchanged during AVP handshake."""
 
     agent_id: str = ""
-    avp_version: str = "0.4.2"
+    avp_version: str = AVP_VERSION_STRING
     identity: Optional[ModelIdentity] = None
     capabilities: Dict[str, Any] = field(default_factory=dict)
 
@@ -44,7 +44,7 @@ class HelloMessage:
             identity = ModelIdentity.from_dict(d["identity"])
         return cls(
             agent_id=d.get("agent_id", ""),
-            avp_version=d.get("avp_version", "0.4.2"),
+            avp_version=d.get("avp_version", AVP_VERSION_STRING),
             identity=identity,
             capabilities=d.get("capabilities", {}),
         )
