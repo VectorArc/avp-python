@@ -241,7 +241,7 @@ class LlamaCppConnector(EngineConnector):
                 emb_batch.pos[0] = n_past
                 emb_batch.seq_id[0][0] = 0
                 emb_batch.n_seq_id[0] = 1
-                emb_batch.logits[0] = 1 if step == steps - 1 else 0
+                emb_batch.logits[0] = 1
 
                 rc = lc.llama_decode(think_ctx, emb_batch)
                 if rc != 0:
