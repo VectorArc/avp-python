@@ -255,54 +255,6 @@ class EngineConnector(ABC):
 
     # --- Low-level API (optional — override for engines with tensor access) ---
 
-    def extract_hidden_state(
-        self,
-        input_ids: TensorLike,
-        attention_mask: Optional[TensorLike] = None,
-        past_key_values: Optional[KVCache] = None,
-    ) -> Tuple[TensorLike, TensorLike, KVCache]:
-        """Run forward pass and extract hidden states.
-
-        Args:
-            input_ids: Token IDs tensor [batch, seq_len].
-            attention_mask: Attention mask tensor.
-            past_key_values: Optional KV-cache from prior turns.
-
-        Returns:
-            Tuple of (last_hidden_state, all_hidden_states, past_key_values).
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not expose raw hidden states. "
-            "Use think() for latent context extraction."
-        )
-
-    def inject_and_generate(
-        self,
-        inputs_embeds: TensorLike,
-        attention_mask: Optional[TensorLike] = None,
-        past_key_values: Optional[KVCache] = None,
-        max_new_tokens: int = 512,
-        temperature: float = 0.7,
-        top_p: float = 0.95,
-    ) -> Tuple[Any, Any]:
-        """Generate text from injected embeddings.
-
-        Args:
-            inputs_embeds: Embedding tensor [batch, seq_len, hidden_dim].
-            attention_mask: Attention mask tensor.
-            past_key_values: Optional KV-cache.
-            max_new_tokens: Maximum tokens to generate.
-            temperature: Sampling temperature.
-            top_p: Nucleus sampling threshold.
-
-        Returns:
-            Tuple of (generated_text_list, past_key_values).
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support embedding injection. "
-            "Use generate(prompt, context=) instead."
-        )
-
     def get_embedding_weights(self) -> Tuple[Optional[TensorLike], Optional[TensorLike]]:
         """Get input and output embedding weight matrices.
 
