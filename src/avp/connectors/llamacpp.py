@@ -29,7 +29,7 @@ Requires: ``pip install avp[llamacpp]`` (installs llama-cpp-python)
 
 import logging
 import weakref
-from typing import Any, Optional
+from typing import Any, List, Optional, Set
 
 from .base import EngineConnector
 from ..types import PayloadType
@@ -1128,6 +1128,80 @@ class LlamaCppConnector(EngineConnector):
             num_layers=self._n_layer or 0,
         )
 
+    # --- Model introspection overrides ---
+
+    @property
+    def context_length(self) -> int:
+        return self._n_ctx
+
+    @property
+    def vocab_size(self) -> int:
+        return self._n_vocab
+
+    @property
+    def dtype(self) -> str:
+        # llama.cpp always returns float32 embeddings to Python
+        return "float32"
+
+    @property
+    def has_tokenizer(self) -> bool:
+        return True
+
+    # --- Tokenization overrides ---
+
+    def tokenize(self, text: str) -> List[int]:
+        if not HAS_LLAMACPP:
+            raise ImportError("llama-cpp-python required")
+        return self._model.tokenize(text.encode("utf-8"), add_bos=False)
+
+    def detokenize(self, token_ids: List[int]) -> str:
+        if not HAS_LLAMACPP:
+            raise ImportError("llama-cpp-python required")
+        return self._model.detokenize(token_ids, special=True).decode(
+            "utf-8", errors="replace"
+        )
+
+    def apply_chat_template(
+        self,
+        messages: List[dict],
+        add_generation_prompt: bool = True,
+    ) -> str:
+        template = self._get_chat_template()
+        if template:
+            rendered = self._render_chat_template(
+                template, messages, add_generation_prompt=add_generation_prompt,
+            )
+            if rendered:
+                return rendered
+        # Fallback: ChatML
+        parts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+        if add_generation_prompt:
+            parts.append("<|im_start|>assistant")
+        return "\n".join(parts)
+
+    @property
+    def stop_token_ids(self) -> Set[int]:
+        return self._get_stop_tokens()
+
+    @property
+    def stop_strings(self) -> List[str]:
+        return self._get_stop_strings()
+
+    # --- Embedding weights ---
+
+    def get_embedding_weights(self):
+        embed_weight, _target_norm = self._get_embed_weight()
+        if embed_weight is None:
+            return (None, None)
+        # GGUF models are typically tied-weight: input == output
+        return (embed_weight, embed_weight)
+
+    # --- Low-level stubs ---
+
     def extract_hidden_state(self, input_ids, attention_mask=None, past_key_values=None):
         raise NotImplementedError(
             "Use think() for hidden state extraction on llama.cpp"
@@ -1139,16 +1213,6 @@ class LlamaCppConnector(EngineConnector):
         raise NotImplementedError(
             "Use generate(prompt, context=) for embedding injection on llama.cpp"
         )
-
-    def get_embedding_weights(self):
-        # GGUF models store weights in quantized format — extracting
-        # full-precision embed weights requires dequantization
-        return (None, None)
-
-    def tokenize(self, text):
-        if not HAS_LLAMACPP:
-            raise ImportError("llama-cpp-python required")
-        return self._model.tokenize(text.encode("utf-8"), add_bos=True)
 
     def needs_realignment(self) -> bool:
         # GGUF models typically have tied weights

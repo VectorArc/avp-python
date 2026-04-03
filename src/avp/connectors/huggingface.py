@@ -7,7 +7,7 @@ Requires torch and transformers — uses lazy imports.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from ..context import AVPContext
 from ..errors import EngineNotAvailableError, IncompatibleModelsError, RealignmentError
@@ -97,10 +97,10 @@ class HuggingFaceConnector(EngineConnector):
             raise ValueError("Provide either (model, tokenizer) or model_id")
 
         if device:
-            self.device = device
+            self._device = device
             self.model = self.model.to(device)
         else:
-            self.device = str(next(self.model.parameters()).device)
+            self._device = str(next(self.model.parameters()).device)
 
         # Ensure pad token (following LatentMAS: try eos first, then add <pad>)
         if self.tokenizer.pad_token_id is None:
@@ -172,6 +172,67 @@ class HuggingFaceConnector(EngineConnector):
     def get_model_identity(self) -> ModelIdentity:
         return self._identity
 
+    # --- Model introspection overrides ---
+
+    @property
+    def context_length(self) -> int:
+        max_pos = getattr(self.model.config, "max_position_embeddings", 0)
+        return int(max_pos) if max_pos else 0
+
+    @property
+    def vocab_size(self) -> int:
+        return int(getattr(self.model.config, "vocab_size", 0))
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    @property
+    def dtype(self) -> str:
+        dt = str(self.model.dtype)
+        # "torch.bfloat16" → "bfloat16"
+        return dt.replace("torch.", "") if dt.startswith("torch.") else dt
+
+    @property
+    def has_tokenizer(self) -> bool:
+        return True
+
+    # --- Tokenization overrides ---
+
+    def tokenize(self, text: str) -> List[int]:
+        return self.tokenizer.encode(text, add_special_tokens=False)
+
+    def detokenize(self, token_ids: List[int]) -> str:
+        return self.tokenizer.decode(token_ids, skip_special_tokens=False)
+
+    def apply_chat_template(
+        self,
+        messages: List[Dict[str, str]],
+        add_generation_prompt: bool = True,
+    ) -> str:
+        return self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt,
+        )
+
+    @property
+    def stop_token_ids(self) -> Set[int]:
+        ids: Set[int] = set()
+        eos = self.tokenizer.eos_token_id
+        if eos is not None:
+            ids.add(eos)
+        # Some tokenizers expose additional stop tokens
+        for attr in ("additional_special_tokens_ids",):
+            extra = getattr(self.tokenizer, attr, None)
+            if extra:
+                ids.update(extra)
+        return ids
+
+    @property
+    def stop_strings(self) -> List[str]:
+        # HF generate() handles stop tokens internally; no text-based
+        # stop strings needed for standard generation loops.
+        return []
+
     def extract_hidden_state(
         self,
         input_ids: Any,
@@ -189,9 +250,9 @@ class HuggingFaceConnector(EngineConnector):
             raise ValueError("input_ids must be 2D [batch, seq_len]")
 
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, device=self.device)
+            attention_mask = torch.ones_like(input_ids, device=self._device)
         else:
-            attention_mask = attention_mask.to(self.device)
+            attention_mask = attention_mask.to(self._device)
 
         # Prepend past attention if using KV-cache
         if past_key_values is not None:
@@ -206,7 +267,7 @@ class HuggingFaceConnector(EngineConnector):
 
         with torch.no_grad():
             outputs = self.model(
-                input_ids=input_ids.to(self.device),
+                input_ids=input_ids.to(self._device),
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=True,
@@ -235,13 +296,13 @@ class HuggingFaceConnector(EngineConnector):
             if past_key_values is not None:
                 total_len += _past_length(past_key_values)
             attention_mask = torch.ones(
-                (batch_size, total_len), dtype=torch.long, device=self.device
+                (batch_size, total_len), dtype=torch.long, device=self._device
             )
 
         with torch.no_grad():
             outputs = self.model.generate(
-                inputs_embeds=inputs_embeds.to(self.device),
-                attention_mask=attention_mask.to(self.device),
+                inputs_embeds=inputs_embeds.to(self._device),
+                attention_mask=attention_mask.to(self._device),
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 top_p=top_p,
@@ -278,7 +339,7 @@ class HuggingFaceConnector(EngineConnector):
             text,
             add_special_tokens=False,
             return_tensors="pt",
-        )["input_ids"].to(self.device)
+        )["input_ids"].to(self._device)
 
     def needs_realignment(self) -> bool:
         return needs_realignment(self.model)
@@ -287,7 +348,7 @@ class HuggingFaceConnector(EngineConnector):
         """Load or compute realignment matrix."""
         if self._w_realign is None:
             self._w_realign, self._target_norm = get_or_compute_realignment(
-                self.model, self._model_hash, device=self.device
+                self.model, self._model_hash, device=self._device
             )
         return self._w_realign, self._target_norm
 
@@ -299,7 +360,7 @@ class HuggingFaceConnector(EngineConnector):
         embeddings. LatentMAS always normalizes, even without the projection.
         """
         if self._target_norm is None:
-            self._target_norm = compute_target_norm(self.model, device=self.device)
+            self._target_norm = compute_target_norm(self.model, device=self._device)
         return self._target_norm
 
     def generate_latent_steps(
@@ -344,9 +405,9 @@ class HuggingFaceConnector(EngineConnector):
             raise ValueError("input_ids must be 2D [batch, seq_len]")
 
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, device=self.device)
+            attention_mask = torch.ones_like(input_ids, device=self._device)
         else:
-            attention_mask = attention_mask.to(self.device)
+            attention_mask = attention_mask.to(self._device)
 
         # Prepend past attention
         if past_key_values is not None:
@@ -362,7 +423,7 @@ class HuggingFaceConnector(EngineConnector):
         # Initial forward pass
         with torch.no_grad():
             outputs = self.model(
-                input_ids=input_ids.to(self.device),
+                input_ids=input_ids.to(self._device),
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
                 use_cache=True,
@@ -404,7 +465,7 @@ class HuggingFaceConnector(EngineConnector):
             # Convert numpy projection result back to torch for model forward
             latent_vec = torch.from_numpy(
                 np.ascontiguousarray(latent_np)
-            ).to(device=self.device, dtype=self.model.dtype)
+            ).to(device=self._device, dtype=self.model.dtype)
             latent_embed = latent_vec.unsqueeze(1)  # [B, 1, D]
 
             # Build attention mask for this step
@@ -412,7 +473,7 @@ class HuggingFaceConnector(EngineConnector):
             latent_mask = torch.ones(
                 (latent_embed.shape[0], past_len + 1),
                 dtype=torch.long,
-                device=self.device,
+                device=self._device,
             )
 
             with torch.no_grad():
@@ -485,7 +546,7 @@ class HuggingFaceConnector(EngineConnector):
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)
         input_ids, attention_mask = _tokenize_prompt(
-            self.tokenizer, prompt_text, self.device
+            self.tokenizer, prompt_text, self._device
         )
 
         past_kv = None
@@ -609,7 +670,7 @@ class HuggingFaceConnector(EngineConnector):
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)
         input_ids, attention_mask = _tokenize_prompt(
-            self.tokenizer, prompt_text, self.device
+            self.tokenizer, prompt_text, self._device
         )
 
         past_kv = None
@@ -751,9 +812,9 @@ class HuggingFaceConnector(EngineConnector):
             projected = projected.unsqueeze(0)
 
         # Prime this model's KV-cache with projected embedding
-        embed_input = projected.to(self.device).to(self.model.dtype)
+        embed_input = projected.to(self._device).to(self.model.dtype)
         embed_mask = torch.ones(
-            (1, embed_input.shape[1]), dtype=torch.long, device=self.device,
+            (1, embed_input.shape[1]), dtype=torch.long, device=self._device,
         )
         with torch.no_grad():
             prime_out = self.model(
@@ -786,7 +847,7 @@ class HuggingFaceConnector(EngineConnector):
         # Tier 2: Disk registry (~/.avp/maps/)
         from ..rosetta.registry import load_map
         avp_map = load_map(
-            source._model_hash, self._model_hash, device=self.device,
+            source._model_hash, self._model_hash, device=self._device,
         )
         if avp_map is not None:
             self._avp_map_cache[cache_key] = avp_map
@@ -797,7 +858,7 @@ class HuggingFaceConnector(EngineConnector):
         avp_map = calibrate(
             source.model, self.model,
             source.tokenizer, self.tokenizer,
-            device=self.device,
+            device=self._device,
         )
         self._avp_map_cache[cache_key] = avp_map
         return avp_map
