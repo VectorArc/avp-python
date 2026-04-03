@@ -46,11 +46,18 @@ class CompressionLevel(enum.Enum):
 
 
 class PayloadType(enum.IntEnum):
-    """Type of tensor payload in an AVP message."""
+    """Payload type for AVP communication.
 
+    ``HIDDEN_STATE`` and ``KV_CACHE`` correspond to wire format values
+    in the proto schema (0 and 1 respectively).
+
+    ``AUTO`` is SDK-only — it resolves to one of the concrete types
+    at runtime and is never serialized.
+    """
+
+    AUTO = -1
     HIDDEN_STATE = 0
     KV_CACHE = 1
-    EMBEDDING = 2
 
 
 class CommunicationMode(enum.IntEnum):
@@ -215,7 +222,7 @@ class AVPMessage:
     def embedding(self) -> np.ndarray:
         """Backward-compatible access to payload as numpy array.
 
-        Only valid for EMBEDDING and HIDDEN_STATE payload types.
+        Only valid for HIDDEN_STATE payload types.
         """
         if not self.payload:
             return np.array([], dtype=np.float32)

@@ -27,7 +27,7 @@ def _encode_embedding(emb, model_id="", compression=avp.CompressionLevel.NONE,
     metadata = AVPMetadata(
         model_id=model_id,
         hidden_dim=emb.shape[0],
-        payload_type=PayloadType.EMBEDDING,
+        payload_type=PayloadType.HIDDEN_STATE,
         dtype=dtype_enum,
         tensor_shape=emb.shape,
         source_agent_id=agent_id,

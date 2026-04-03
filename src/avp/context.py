@@ -1,7 +1,12 @@
 """AVPContext — wraps a KV-cache with metadata for the high-level API."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .types import PayloadType
 
 
 @dataclass(kw_only=True)
@@ -39,6 +44,16 @@ class AVPContext:
 
     last_hidden_state: Any = None
     """Last hidden state [1, D] from think() for cross-model projection."""
+
+    @property
+    def payload_type(self) -> "PayloadType":
+        """The effective payload type of this context."""
+        from .types import PayloadType
+        if self.past_key_values is not None:
+            return PayloadType.KV_CACHE
+        if self.last_hidden_state is not None:
+            return PayloadType.HIDDEN_STATE
+        raise ValueError("AVPContext has neither KV-cache nor hidden state")
 
     def to_bytes(
         self,

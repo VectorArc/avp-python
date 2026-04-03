@@ -7,7 +7,6 @@ package avp;
 enum PayloadType {
   HIDDEN_STATE = 0;
   KV_CACHE = 1;
-  EMBEDDING = 2;
 }
 
 enum CommunicationMode {

@@ -32,6 +32,7 @@ import weakref
 from typing import Any, Optional
 
 from .base import EngineConnector
+from ..types import PayloadType
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,7 @@ class LlamaCppConnector(EngineConnector):
         self,
         prompt: str,
         steps: int = 10,
+        output: PayloadType = PayloadType.AUTO,
         **kwargs: Any,
     ) -> Any:
         """Run N latent thinking steps and return an AVPContext.
@@ -260,6 +262,29 @@ class LlamaCppConnector(EngineConnector):
             normalize_to_target(hidden, target_norm), dtype=np.float32,
         )
 
+        logger.info(
+            "think(): %d/%d latent steps, n_past=%d, hidden norm=%.3f",
+            steps_completed, steps, n_past, float(np.linalg.norm(hidden)),
+        )
+
+        # Resolve AUTO → KV_CACHE (same-model default for llama.cpp)
+        if output == PayloadType.AUTO:
+            output = PayloadType.KV_CACHE
+
+        # output=HIDDEN_STATE: return only the hidden state, free C context
+        if output == PayloadType.HIDDEN_STATE:
+            lc.llama_free(think_ctx)
+            return AVPContext(
+                past_key_values=None,
+                model_hash="",
+                num_steps=steps_completed,
+                seq_len=n_past,
+                hidden_dim=n_embd,
+                num_layers=self._n_layer or 0,
+                last_hidden_state=hidden,
+            )
+
+        # Default: return full context with live KV-cache
         context = AVPContext(
             past_key_values=None,
             model_hash="",
@@ -277,11 +302,6 @@ class LlamaCppConnector(EngineConnector):
         # that free the context themselves to avoid double-free.
         context._llamacpp_finalizer = weakref.finalize(
             context, LlamaCppConnector._free_ctx, think_ctx,
-        )
-
-        logger.info(
-            "think(): %d/%d latent steps, n_past=%d, hidden norm=%.3f",
-            steps_completed, steps, n_past, float(np.linalg.norm(hidden)),
         )
 
         return context
@@ -466,17 +486,15 @@ class LlamaCppConnector(EngineConnector):
             )
             return output["choices"][0]["text"]
 
-        # Check for a live think context (same-model, from think())
+        # Check for a live think context (full KV-cache path)
         think_ctx = getattr(context, "_llamacpp_ctx", None)
-        if think_ctx is not None and not cross_model:
+        if think_ctx is not None:
             return self._generate_on_think_ctx(
                 prompt, context, max_tokens, temperature, top_p,
             )
 
-        # Fallback: cross-model or no live context — use embedding injection.
-        # Free the C context if present (not used by this path).
-        self._release_ctx(context)
-
+        # No live context — use embedding injection (hidden state path).
+        # Works for both same-model (output="hidden_state") and cross-model.
         hidden = getattr(context, "last_hidden_state", None)
         if hidden is None:
             output = self._model(

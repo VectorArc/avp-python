@@ -19,7 +19,7 @@ from ..realign import (
     needs_realignment,
     project_to_embedding_space,
 )
-from ..types import ModelIdentity
+from ..types import ModelIdentity, PayloadType
 from .base import EngineConnector, _render_prompt, _tokenize_prompt
 
 logger = logging.getLogger(__name__)
@@ -457,6 +457,7 @@ class HuggingFaceConnector(EngineConnector):
         prompt: Union[str, List[Dict[str, str]]],
         steps: int = 20,
         context: Optional[AVPContext] = None,
+        output: PayloadType = PayloadType.AUTO,
         _diagnostics: Optional[Any] = None,
     ) -> AVPContext:
         """Generate latent context via thinking steps.
@@ -476,6 +477,10 @@ class HuggingFaceConnector(EngineConnector):
         """
         if steps < 1:
             raise ValueError(f"steps must be >= 1, got {steps}")
+
+        # Resolve AUTO → KV_CACHE (same-model default)
+        if output == PayloadType.AUTO:
+            output = PayloadType.KV_CACHE
 
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)
@@ -531,7 +536,7 @@ class HuggingFaceConnector(EngineConnector):
             _diagnostics.norm_trajectory = norms
 
         return AVPContext(
-            past_key_values=past_kv,
+            past_key_values=None if output == PayloadType.HIDDEN_STATE else past_kv,  # AUTO resolves to KV_CACHE
             model_hash=self._model_hash,
             num_steps=accumulated_steps + steps,
             seq_len=_past_length(past_kv),
@@ -620,6 +625,13 @@ class HuggingFaceConnector(EngineConnector):
                     f"Context model_hash {context.model_hash!r} does not match "
                     f"this connector's model_hash {self._model_hash!r}. "
                     "Pass source= with the source connector for cross-model projection."
+                )
+            # Same-model hidden state (no KV-cache): use embedding injection
+            if context.past_key_values is None and context.last_hidden_state is not None:
+                return self.inject_and_generate(
+                    input_ids, attention_mask, context.last_hidden_state,
+                    max_new_tokens=max_new_tokens, temperature=temperature,
+                    top_p=top_p, do_sample=do_sample,
                 )
             past_kv = context.past_key_values
             past_len = _past_length(past_kv)

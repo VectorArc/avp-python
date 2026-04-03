@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..errors import EngineNotAvailableError
-from ..types import ModelIdentity
+from ..types import ModelIdentity, PayloadType
 
 # Type aliases for engine-agnostic tensors.
 # These are Any at runtime (torch is optional) but document intent.
@@ -178,6 +178,7 @@ class EngineConnector(ABC):
         prompt: Union[str, List[Dict[str, str]]],
         steps: int = 20,
         context: Optional[Any] = None,
+        output: PayloadType = PayloadType.AUTO,
         **kwargs: Any,
     ) -> Any:
         """Generate latent context via thinking steps.
@@ -190,10 +191,23 @@ class EngineConnector(ABC):
             prompt: A string (wrapped as user message) or list of chat messages.
             steps: Number of latent thinking steps.
             context: Optional AVPContext from a prior think() call to continue from.
+            output: What to include in the returned context:
+
+                ``PayloadType.AUTO`` (default): let the system decide.
+                    Currently resolves to ``KV_CACHE`` for same-model
+                    and ``HIDDEN_STATE`` for cross-model.
+
+                ``PayloadType.KV_CACHE``: full KV-cache + hidden state.
+                    Best for same-model, same-process transfer.
+
+                ``PayloadType.HIDDEN_STATE``: only the last hidden state ``[1, D]``.
+                    KV-cache is freed immediately, reducing VRAM.
+                    Use for cross-process, bandwidth-constrained, or
+                    structured tasks where a single vector suffices.
             **kwargs: Connector-specific options.
 
         Returns:
-            AVPContext with the accumulated KV-cache.
+            AVPContext with the accumulated KV-cache or hidden state only.
 
         Raises:
             EngineNotAvailableError: If this connector doesn't support latent thinking.

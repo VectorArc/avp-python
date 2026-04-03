@@ -73,7 +73,7 @@ def _make_metadata(emb, model_id="", agent_id=""):
     return AVPMetadata(
         model_id=model_id,
         hidden_dim=emb.shape[0],
-        payload_type=PayloadType.EMBEDDING,
+        payload_type=PayloadType.HIDDEN_STATE,
         dtype=_STR_TO_DTYPE.get(dtype_str, DataType.FLOAT32),
         tensor_shape=emb.shape,
         source_agent_id=agent_id,

@@ -39,7 +39,7 @@ def test_avp_version_string():
 def test_payload_type_values():
     assert PayloadType.HIDDEN_STATE == 0
     assert PayloadType.KV_CACHE == 1
-    assert PayloadType.EMBEDDING == 2
+    assert PayloadType.AUTO == -1
 
 
 def test_communication_mode_values():
