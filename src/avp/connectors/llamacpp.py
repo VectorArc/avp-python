@@ -307,6 +307,7 @@ class LlamaCppConnector(EngineConnector):
             n_past += n_tokens
 
         # --- Latent thinking via run_latent_steps ---
+        n_past_before_steps = n_past
         if steps > 0:
             hidden, n_past = self.run_latent_steps(think_ctx, n_past, steps)
             if hidden is None:
@@ -332,6 +333,7 @@ class LlamaCppConnector(EngineConnector):
         # --- Build return context ---
         resolved_payload = output.resolve()
 
+        steps_completed = n_past - n_past_before_steps
         total_steps = accumulated_steps + steps_completed
 
         if resolved_payload == PayloadType.HIDDEN_STATE:
