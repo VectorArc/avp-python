@@ -29,7 +29,7 @@ Requires: ``pip install avp[llamacpp]`` (installs llama-cpp-python)
 
 import logging
 import weakref
-from typing import Any, List, Optional, Set
+from typing import Any, List, Optional, Set, Union
 
 from .base import EngineConnector
 from ..types import PayloadType
@@ -133,8 +133,9 @@ class LlamaCppConnector(EngineConnector):
 
     def think(
         self,
-        prompt: str,
+        prompt: Union[str, list],
         steps: int = 10,
+        context: Optional[Any] = None,
         output: PayloadType = PayloadType.AUTO,
         **kwargs: Any,
     ) -> Any:
@@ -146,8 +147,14 @@ class LlamaCppConnector(EngineConnector):
         decode the solver prompt directly onto the enriched KV-cache.
 
         Args:
-            prompt: The input prompt.
+            prompt: Input prompt as a string or list of chat message dicts.
             steps: Number of latent thinking steps (default: 10).
+                Can be 0 for pure KV-cache prefill without latent steps.
+            context: Optional AVPContext from a prior think() call to
+                continue from.  When provided with a live llama_context,
+                the prompt is decoded onto the existing KV-cache and
+                latent steps continue from the current position.
+            output: What to include in the returned context.
 
         Returns:
             AVPContext containing the enriched hidden state and live context.
@@ -160,51 +167,79 @@ class LlamaCppConnector(EngineConnector):
         from ..context import AVPContext
         from ..realign import normalize_to_target, project_to_embedding_space
 
-        model_ptr = self._model._model.model
         n_embd = self._n_embd
 
-        # Create context with embeddings=True — gives us hidden states
-        # via llama_get_embeddings_ith without cb_eval (which corrupts
-        # the context and breaks generation).
-        ctx_params = lc.llama_context_default_params()
-        ctx_params.n_ctx = self._n_ctx
-        ctx_params.n_batch = self._n_ctx  # Must fit full prompt in one decode
-        ctx_params.embeddings = True
+        # Normalize prompt to formatted string, then tokenize
+        if isinstance(prompt, list):
+            formatted = self.apply_chat_template(prompt)
+        else:
+            formatted = self.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+            )
+        tokens = self._tokenize_with_special(formatted)
 
-        think_ctx = lc.llama_new_context_with_model(model_ptr, ctx_params)
-        if not think_ctx:
-            logger.warning("think(): Failed to create context")
-            return None
+        # --- Context reuse vs fresh creation ---
+        accumulated_steps = 0
+        owns_context = False  # True if we created the context (must free on error)
 
-        # Apply chat template and tokenize. Without the template,
-        # instruct models don't know when to start/stop generating.
-        tokens = self._apply_chat_template(prompt)
-        n_tokens = len(tokens)
+        prior_ctx = getattr(context, "_llamacpp_ctx", None) if context is not None else None
 
-        # Step 0: Initial forward pass on prompt tokens
-        batch = lc.llama_batch_init(n_tokens, 0, 1)
-        try:
-            for i, tok in enumerate(tokens):
-                batch.token[i] = tok
-                batch.pos[i] = i
-                batch.seq_id[i][0] = 0
-                batch.n_seq_id[i] = 1
-                batch.logits[i] = 1 if i == n_tokens - 1 else 0
-            batch.n_tokens = n_tokens
+        if prior_ctx is not None:
+            # Reuse existing live context
+            think_ctx = prior_ctx
+            n_past = context._llamacpp_n_past
+            accumulated_steps = getattr(context, "num_steps", 0)
+        else:
+            # Create fresh context
+            model_ptr = self._model._model.model
+            ctx_params = lc.llama_context_default_params()
+            ctx_params.n_ctx = self._n_ctx
+            ctx_params.n_batch = self._n_ctx
+            ctx_params.embeddings = True
 
-            rc = lc.llama_decode(think_ctx, batch)
-            if rc != 0:
-                logger.warning("think(): initial decode failed (rc=%d)", rc)
-                lc.llama_free(think_ctx)
+            think_ctx = lc.llama_new_context_with_model(model_ptr, ctx_params)
+            if not think_ctx:
+                logger.warning("think(): Failed to create context")
                 return None
-        finally:
-            lc.llama_batch_free(batch)
+            owns_context = True
+            n_past = 0
 
-        # Extract hidden state via embeddings API (no cb_eval)
+        # --- Decode prompt tokens onto context ---
+        n_tokens = len(tokens)
+        if n_tokens > 0:
+            if n_past + n_tokens + steps > self._n_ctx:
+                logger.warning(
+                    "think(): prompt (%d) + n_past (%d) + steps (%d) > n_ctx (%d)",
+                    n_tokens, n_past, steps, self._n_ctx,
+                )
+
+            batch = lc.llama_batch_init(n_tokens, 0, 1)
+            try:
+                for i, tok in enumerate(tokens):
+                    batch.token[i] = tok
+                    batch.pos[i] = n_past + i
+                    batch.seq_id[i][0] = 0
+                    batch.n_seq_id[i] = 1
+                    batch.logits[i] = 1 if i == n_tokens - 1 else 0
+                batch.n_tokens = n_tokens
+
+                rc = lc.llama_decode(think_ctx, batch)
+                if rc != 0:
+                    logger.warning("think(): prompt decode failed (rc=%d)", rc)
+                    if owns_context:
+                        lc.llama_free(think_ctx)
+                    return None
+            finally:
+                lc.llama_batch_free(batch)
+
+            n_past += n_tokens
+
+        # Extract hidden state via embeddings API
         hidden = self._get_embeddings(lc, think_ctx, n_embd)
         if hidden is None:
             logger.warning("think(): llama_get_embeddings_ith returned NULL")
-            lc.llama_free(think_ctx)
+            if owns_context:
+                lc.llama_free(think_ctx)
             return None
 
         # Load embedding weights from GGUF for projection (cached, numpy)
@@ -212,12 +247,14 @@ class LlamaCppConnector(EngineConnector):
         if target_norm is None:
             target_norm = float(np.linalg.norm(hidden, axis=-1).mean())
 
-        n_past = n_tokens
         steps_completed = 0
 
-        # Steps 1..N: latent thinking loop
+        # --- Latent thinking loop ---
         for step in range(steps):
-            # Project hidden state back to embedding space
+            if n_past >= self._n_ctx:
+                logger.warning("think(): context full at step %d, stopping", step)
+                break
+
             if embed_weight is not None:
                 projected = project_to_embedding_space(
                     hidden, embed_weight, temperature=1.0,
@@ -229,7 +266,6 @@ class LlamaCppConnector(EngineConnector):
                 projected.squeeze(axis=0), dtype=np.float32,
             )
 
-            # Inject via batch.embd
             emb_batch = lc.llama_batch_init(1, n_embd, 1)
             try:
                 ctypes.memmove(
@@ -253,7 +289,6 @@ class LlamaCppConnector(EngineConnector):
             n_past += 1
             steps_completed += 1
 
-            # Extract new hidden state
             new_hidden = self._get_embeddings(lc, think_ctx, n_embd)
             if new_hidden is not None:
                 hidden = new_hidden
@@ -267,44 +302,44 @@ class LlamaCppConnector(EngineConnector):
             steps_completed, steps, n_past, float(np.linalg.norm(hidden)),
         )
 
-        # Resolve AUTO → KV_CACHE (same-model default for llama.cpp)
+        # --- Build return context ---
         if output == PayloadType.AUTO:
             output = PayloadType.KV_CACHE
 
-        # output=HIDDEN_STATE: return only the hidden state, free C context
+        total_steps = accumulated_steps + steps_completed
+
         if output == PayloadType.HIDDEN_STATE:
-            lc.llama_free(think_ctx)
+            if owns_context:
+                lc.llama_free(think_ctx)
             return AVPContext(
                 past_key_values=None,
                 model_hash="",
-                num_steps=steps_completed,
+                num_steps=total_steps,
                 seq_len=n_past,
                 hidden_dim=n_embd,
                 num_layers=self._n_layer or 0,
                 last_hidden_state=hidden,
             )
 
-        # Default: return full context with live KV-cache
-        context = AVPContext(
+        result = AVPContext(
             past_key_values=None,
             model_hash="",
-            num_steps=steps_completed,
+            num_steps=total_steps,
             seq_len=n_past,
             hidden_dim=n_embd,
             num_layers=self._n_layer or 0,
             last_hidden_state=hidden,
         )
-        context._llamacpp_ctx = think_ctx
-        context._llamacpp_n_past = n_past
+        result._llamacpp_ctx = think_ctx
+        result._llamacpp_n_past = n_past
 
-        # Register destructor so the C context is freed even if
-        # generate() is never called. Detached in generate() paths
-        # that free the context themselves to avoid double-free.
-        context._llamacpp_finalizer = weakref.finalize(
-            context, LlamaCppConnector._free_ctx, think_ctx,
-        )
+        # Register finalizer only for contexts we created (not reused)
+        if owns_context:
+            result._llamacpp_finalizer = weakref.finalize(
+                result, LlamaCppConnector._free_ctx, think_ctx,
+            )
 
-        return context
+        return result
 
     def _apply_chat_template(self, prompt: str) -> list:
         """Apply the model's own chat template and tokenize.
@@ -447,6 +482,8 @@ class LlamaCppConnector(EngineConnector):
         max_new_tokens: Optional[int] = None,
         temperature: float = 0.7,
         top_p: float = 0.95,
+        grammar: Optional[str] = None,
+        keep_context: bool = False,
         **kwargs: Any,
     ) -> str:
         """Generate text, optionally using latent context.
@@ -468,6 +505,13 @@ class LlamaCppConnector(EngineConnector):
             max_new_tokens: Alias for max_tokens (ABC compatibility).
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
+            grammar: Optional GBNF grammar string for constrained generation.
+                Constrains output tokens to match the grammar rules.
+                Compatible with all generation paths including latent context.
+            keep_context: If ``True`` and ``context`` has a live
+                llama_context, do NOT free it after generation.  The
+                context's ``_llamacpp_n_past`` is updated to reflect
+                the post-generation position.  Default: ``False``.
 
         Returns:
             Generated text string.
@@ -483,6 +527,9 @@ class LlamaCppConnector(EngineConnector):
 
         # If no context, just generate normally (kwargs forwarded)
         if context is None:
+            if grammar is not None:
+                from llama_cpp import LlamaGrammar
+                kwargs["grammar"] = LlamaGrammar.from_string(grammar)
             output = self._model(
                 prompt,
                 max_tokens=max_tokens,
@@ -497,6 +544,7 @@ class LlamaCppConnector(EngineConnector):
         if think_ctx is not None:
             return self._generate_on_think_ctx(
                 prompt, context, max_tokens, temperature, top_p,
+                grammar=grammar, keep_context=keep_context,
             )
 
         # No live context — use embedding injection (hidden state path).
@@ -517,6 +565,7 @@ class LlamaCppConnector(EngineConnector):
 
         return self._generate_with_embedding(
             prompt, hidden, max_tokens, temperature, top_p,
+            grammar=grammar,
         )
 
     def _generate_on_think_ctx(
@@ -526,6 +575,8 @@ class LlamaCppConnector(EngineConnector):
         max_tokens: int,
         temperature: float,
         top_p: float,
+        grammar: Optional[str] = None,
+        keep_context: bool = False,
     ) -> str:
         """Generate on the live think context's enriched KV-cache.
 
@@ -540,10 +591,6 @@ class LlamaCppConnector(EngineConnector):
         n_past = context._llamacpp_n_past
 
         try:
-            # If the solver prompt is different from the think prompt,
-            # decode it onto the think context so the model can attend
-            # to both. If same prompt (or empty), skip — the KV-cache
-            # already has everything we need.
             n_cur = n_past
 
             if prompt:
@@ -567,12 +614,8 @@ class LlamaCppConnector(EngineConnector):
                         lc.llama_batch_free(batch)
                     n_cur = n_past + len(tokens)
 
-            # Autoregressive generation with both token ID and text-based
-            # stop detection. Token ID catches EOS/<|im_end|> when the model
-            # emits them as special tokens. Text-based catches the common
-            # case where quantized/small models hallucinate multi-turn
-            # continuations (e.g., bare "Human:" without ChatML markers).
-            sampler = self._make_sampler(lc, temperature, top_p)
+            vocab = lc.llama_model_get_vocab(self._model._model.model) if grammar else None
+            sampler = self._make_sampler(lc, temperature, top_p, grammar=grammar, vocab=vocab)
             next_batch = lc.llama_batch_init(1, 0, 1)
             stop_tokens = self._get_stop_tokens()
             stop_strings = self._get_stop_strings()
@@ -636,12 +679,16 @@ class LlamaCppConnector(EngineConnector):
             return generated_text
 
         finally:
-            # Detach the destructor before manual free to avoid double-free
-            finalizer = getattr(context, "_llamacpp_finalizer", None)
-            if finalizer:
-                finalizer.detach()
-            lc.llama_free(think_ctx)
-            context._llamacpp_ctx = None
+            if keep_context:
+                # Caller retains ownership — update position
+                context._llamacpp_n_past = n_cur
+            else:
+                # Default: detach finalizer and free
+                finalizer = getattr(context, "_llamacpp_finalizer", None)
+                if finalizer:
+                    finalizer.detach()
+                lc.llama_free(think_ctx)
+                context._llamacpp_ctx = None
 
     def _generate_with_embedding(
         self,
@@ -650,6 +697,7 @@ class LlamaCppConnector(EngineConnector):
         max_tokens: int,
         temperature: float,
         top_p: float,
+        grammar: Optional[str] = None,
     ) -> str:
         """Generate text with a prepended embedding via batch.embd.
 
@@ -746,7 +794,8 @@ class LlamaCppConnector(EngineConnector):
                 llama_cpp.llama_batch_free(tok_batch)
 
             # Step 3: Autoregressive generation with text-based stop detection
-            sampler = self._make_sampler(llama_cpp, temperature, top_p)
+            vocab = llama_cpp.llama_model_get_vocab(model_ptr) if grammar else None
+            sampler = self._make_sampler(llama_cpp, temperature, top_p, grammar=grammar, vocab=vocab)
             n_cur = 1 + n_prompt  # current position (1 embd + L prompt)
             stop_tokens = self._get_stop_tokens()
             stop_strings = self._get_stop_strings()
@@ -1058,16 +1107,39 @@ class LlamaCppConnector(EngineConnector):
         context._llamacpp_ctx = None
 
     @staticmethod
-    def _make_sampler(lc: Any, temperature: float, top_p: float) -> Any:
+    def _make_sampler(
+        lc: Any,
+        temperature: float,
+        top_p: float,
+        grammar: Optional[str] = None,
+        vocab: Any = None,
+    ) -> Any:
         """Create a sampler chain matching llama-cpp-python's behavior.
 
         When temperature=0, uses greedy sampling only (no top_k/top_p/dist).
         This matches llama-cpp-python's _init_sampler which switches to
         greedy for temp=0. Using temp(0)+dist(0) produces garbage due to
         -inf logit handling in the softmax.
+
+        Args:
+            lc: The ``llama_cpp.llama_cpp`` C API module.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
+            grammar: Optional GBNF grammar string for constrained generation.
+            vocab: llama_vocab pointer (required when grammar is set).
+                Obtain via ``lc.llama_model_get_vocab(model_ptr)``.
         """
         sampler_params = lc.llama_sampler_chain_default_params()
         sampler = lc.llama_sampler_chain_init(sampler_params)
+
+        # Grammar goes first — filters invalid tokens before other samplers
+        if grammar is not None and vocab is not None:
+            grammar_s = lc.llama_sampler_init_grammar(
+                vocab,
+                grammar.encode("utf-8"),
+                b"root",
+            )
+            lc.llama_sampler_chain_add(sampler, grammar_s)
 
         if temperature == 0.0:
             greedy_s = lc.llama_sampler_init_greedy()
@@ -1206,6 +1278,176 @@ class LlamaCppConnector(EngineConnector):
             return (None, None)
         # GGUF models are typically tied-weight: input == output
         return (embed_weight, embed_weight)
+
+    # --- Latent primitives (for consumers managing their own context) ---
+
+    def create_inference_context(
+        self,
+        n_ctx: Optional[int] = None,
+        embeddings: bool = True,
+        n_batch: Optional[int] = None,
+    ) -> Any:
+        """Create a new llama_context sharing this connector's model weights.
+
+        The returned context has its own KV-cache but shares weight
+        tensors (no extra VRAM for weights).  Multiple contexts can
+        coexist on the same model.
+
+        This is the public replacement for accessing
+        ``connector._model._model.model`` directly.
+
+        Args:
+            n_ctx: Context window size.  Defaults to the connector's
+                configured ``n_ctx``.
+            embeddings: Enable hidden state extraction via
+                ``llama_get_embeddings_ith``.  Required for
+                :meth:`run_latent_steps`.  Default: ``True``.
+            n_batch: Maximum batch size for decode calls.  Defaults
+                to ``n_ctx``.
+
+        Returns:
+            A context dict with keys ``ptr`` (C llama_context pointer),
+            ``n_ctx`` (int), and ``embeddings`` (bool).  The caller
+            owns the context and MUST call :meth:`release_inference_context`
+            when done.
+
+        Raises:
+            RuntimeError: If context creation fails (typically OOM).
+        """
+        from llama_cpp import llama_cpp as lc
+
+        ctx_n = n_ctx or self._n_ctx
+        model_ptr = self._model._model.model
+        ctx_params = lc.llama_context_default_params()
+        ctx_params.n_ctx = ctx_n
+        ctx_params.n_batch = n_batch or ctx_n
+        ctx_params.embeddings = embeddings
+
+        ctx = lc.llama_new_context_with_model(model_ptr, ctx_params)
+        if not ctx:
+            raise RuntimeError(
+                f"Failed to create llama_context (n_ctx={ctx_n}). "
+                "This usually means insufficient VRAM."
+            )
+        return {"ptr": ctx, "n_ctx": ctx_n, "embeddings": embeddings}
+
+    def release_inference_context(self, ctx: Any) -> None:
+        """Free a context created by :meth:`create_inference_context`.
+
+        Safe to call multiple times — the pointer is set to ``None``
+        after the first free.
+
+        Args:
+            ctx: The context dict returned by ``create_inference_context()``.
+        """
+        ptr = ctx.get("ptr") if isinstance(ctx, dict) else None
+        if ptr is None:
+            return
+        try:
+            from llama_cpp import llama_cpp as lc
+            lc.llama_free(ptr)
+        except Exception:
+            pass
+        ctx["ptr"] = None
+
+    def run_latent_steps(
+        self,
+        ctx: Any,
+        n_past: int,
+        steps: int = 10,
+    ) -> tuple:
+        """Run N latent consolidation steps on a caller-owned context.
+
+        Each step extracts the hidden state from the last position,
+        projects it to embedding space, normalizes, injects as a new
+        position, and runs a forward pass.  The KV-cache grows by
+        ``steps`` positions.
+
+        The context MUST have been created with ``embeddings=True``
+        and have at least one decoded position.  The connector does
+        NOT take ownership of ``ctx``.
+
+        Args:
+            ctx: Live llama_context pointer (C), or a context dict
+                from :meth:`create_inference_context` (uses ``ctx["ptr"]``).
+            n_past: Current KV-cache position count.
+            steps: Number of latent steps (default: 10).
+
+        Returns:
+            Tuple of ``(last_hidden_state, new_n_past)`` where
+            ``last_hidden_state`` is numpy ``[1, n_embd]`` float32.
+            Returns ``(None, n_past)`` if extraction fails.
+        """
+        import ctypes
+
+        import numpy as np
+        from llama_cpp import llama_cpp as lc
+
+        from ..realign import normalize_to_target, project_to_embedding_space
+
+        # Accept both raw pointer and context dict
+        ctx_ptr = ctx["ptr"] if isinstance(ctx, dict) else ctx
+
+        n_embd = self._n_embd
+        embed_weight, target_norm = self._get_embed_weight()
+
+        hidden = self._get_embeddings(lc, ctx_ptr, n_embd)
+        if hidden is None:
+            return None, n_past
+
+        if target_norm is None:
+            target_norm = float(np.linalg.norm(hidden, axis=-1).mean())
+
+        steps_completed = 0
+        for step in range(steps):
+            if embed_weight is not None:
+                projected = project_to_embedding_space(
+                    hidden, embed_weight, temperature=1.0,
+                )
+                projected = normalize_to_target(projected, target_norm)
+            else:
+                projected = normalize_to_target(hidden, target_norm)
+
+            proj_np = np.ascontiguousarray(
+                projected.squeeze(axis=0), dtype=np.float32,
+            )
+
+            emb_batch = lc.llama_batch_init(1, n_embd, 1)
+            try:
+                ctypes.memmove(
+                    emb_batch.embd,
+                    proj_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    ctypes.sizeof(ctypes.c_float) * n_embd,
+                )
+                emb_batch.n_tokens = 1
+                emb_batch.pos[0] = n_past
+                emb_batch.seq_id[0][0] = 0
+                emb_batch.n_seq_id[0] = 1
+                emb_batch.logits[0] = 1
+
+                rc = lc.llama_decode(ctx_ptr, emb_batch)
+                if rc != 0:
+                    logger.warning("run_latent_steps: step %d failed (rc=%d)", step, rc)
+                    break
+            finally:
+                lc.llama_batch_free(emb_batch)
+
+            n_past += 1
+            steps_completed += 1
+
+            new_hidden = self._get_embeddings(lc, ctx_ptr, n_embd)
+            if new_hidden is not None:
+                hidden = new_hidden
+
+        hidden = np.ascontiguousarray(
+            normalize_to_target(hidden, target_norm), dtype=np.float32,
+        )
+
+        logger.info(
+            "run_latent_steps: %d/%d steps, n_past=%d, norm=%.3f",
+            steps_completed, steps, n_past, float(np.linalg.norm(hidden)),
+        )
+        return hidden, n_past
 
     # --- Low-level stubs ---
 
