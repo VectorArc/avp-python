@@ -29,10 +29,65 @@ Requires: ``pip install avp[llamacpp]`` (installs llama-cpp-python)
 
 import logging
 import weakref
+from dataclasses import dataclass, field
 from typing import Any, List, Optional, Set, Union
 
 from .base import EngineConnector
 from ..types import PayloadType
+
+
+@dataclass
+class LlamaCppInferenceContext:
+    """Handle to a live llama_context created by the connector.
+
+    The caller owns this context and must close it when done — either
+    via :meth:`close`, the context manager protocol, or garbage
+    collection (safety net).
+
+    Usage::
+
+        ctx = connector.create_inference_context()
+        try:
+            hidden, n_past = connector.run_latent_steps(ctx, n_past=100)
+        finally:
+            ctx.close()
+
+        # Or as a context manager:
+        with connector.create_inference_context() as ctx:
+            hidden, n_past = connector.run_latent_steps(ctx, n_past=100)
+    """
+
+    ptr: Any
+    """Raw ``llama_context`` ctypes pointer."""
+
+    n_ctx: int
+    """Context window size."""
+
+    embeddings: bool
+    """Whether hidden state extraction is enabled."""
+
+    _closed: bool = field(default=False, repr=False)
+
+    def close(self) -> None:
+        """Free the underlying C context.  Safe to call multiple times."""
+        if self._closed or self.ptr is None:
+            return
+        try:
+            from llama_cpp import llama_cpp as lc
+            lc.llama_free(self.ptr)
+        except Exception:
+            pass
+        self.ptr = None
+        self._closed = True
+
+    def __enter__(self) -> "LlamaCppInferenceContext":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        self.close()
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +220,7 @@ class LlamaCppConnector(EngineConnector):
         from llama_cpp import llama_cpp as lc
 
         from ..context import AVPContext
-        from ..realign import normalize_to_target, project_to_embedding_space
+        from ..realign import normalize_to_target
 
         n_embd = self._n_embd
 
@@ -185,10 +240,17 @@ class LlamaCppConnector(EngineConnector):
         prior_ctx = getattr(context, "_llamacpp_ctx", None) if context is not None else None
 
         if prior_ctx is not None:
-            # Reuse existing live context
+            # Reuse existing live context — transfer ownership
             think_ctx = prior_ctx
             n_past = context._llamacpp_n_past
             accumulated_steps = getattr(context, "num_steps", 0)
+            # Detach old finalizer to prevent use-after-free: the old
+            # AVPContext must no longer free this pointer.
+            old_finalizer = getattr(context, "_llamacpp_finalizer", None)
+            if old_finalizer:
+                old_finalizer.detach()
+            context._llamacpp_ctx = None  # invalidate old reference
+            owns_context = True  # register finalizer on the new result
         else:
             # Create fresh context
             model_ptr = self._model._model.model
@@ -234,73 +296,28 @@ class LlamaCppConnector(EngineConnector):
 
             n_past += n_tokens
 
-        # Extract hidden state via embeddings API
-        hidden = self._get_embeddings(lc, think_ctx, n_embd)
-        if hidden is None:
-            logger.warning("think(): llama_get_embeddings_ith returned NULL")
-            if owns_context:
-                lc.llama_free(think_ctx)
-            return None
-
-        # Load embedding weights from GGUF for projection (cached, numpy)
-        embed_weight, target_norm = self._get_embed_weight()
-        if target_norm is None:
-            target_norm = float(np.linalg.norm(hidden, axis=-1).mean())
-
-        steps_completed = 0
-
-        # --- Latent thinking loop ---
-        for step in range(steps):
-            if n_past >= self._n_ctx:
-                logger.warning("think(): context full at step %d, stopping", step)
-                break
-
-            if embed_weight is not None:
-                projected = project_to_embedding_space(
-                    hidden, embed_weight, temperature=1.0,
-                )
-                projected = normalize_to_target(projected, target_norm)
-            else:
-                projected = normalize_to_target(hidden, target_norm)
-            proj_np = np.ascontiguousarray(
-                projected.squeeze(axis=0), dtype=np.float32,
+        # --- Latent thinking via run_latent_steps ---
+        if steps > 0:
+            hidden, n_past = self.run_latent_steps(think_ctx, n_past, steps)
+            if hidden is None:
+                logger.warning("think(): latent steps failed")
+                if owns_context:
+                    lc.llama_free(think_ctx)
+                return None
+        else:
+            # steps=0: just extract hidden state from prefill
+            hidden = self._get_embeddings(lc, think_ctx, n_embd)
+            if hidden is None:
+                logger.warning("think(): llama_get_embeddings_ith returned NULL")
+                if owns_context:
+                    lc.llama_free(think_ctx)
+                return None
+            embed_weight, target_norm = self._get_embed_weight()
+            if target_norm is None:
+                target_norm = float(np.linalg.norm(hidden, axis=-1).mean())
+            hidden = np.ascontiguousarray(
+                normalize_to_target(hidden, target_norm), dtype=np.float32,
             )
-
-            emb_batch = lc.llama_batch_init(1, n_embd, 1)
-            try:
-                ctypes.memmove(
-                    emb_batch.embd,
-                    proj_np.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-                    ctypes.sizeof(ctypes.c_float) * n_embd,
-                )
-                emb_batch.n_tokens = 1
-                emb_batch.pos[0] = n_past
-                emb_batch.seq_id[0][0] = 0
-                emb_batch.n_seq_id[0] = 1
-                emb_batch.logits[0] = 1
-
-                rc = lc.llama_decode(think_ctx, emb_batch)
-                if rc != 0:
-                    logger.warning("think(): step %d decode failed (rc=%d)", step, rc)
-                    break
-            finally:
-                lc.llama_batch_free(emb_batch)
-
-            n_past += 1
-            steps_completed += 1
-
-            new_hidden = self._get_embeddings(lc, think_ctx, n_embd)
-            if new_hidden is not None:
-                hidden = new_hidden
-
-        hidden = np.ascontiguousarray(
-            normalize_to_target(hidden, target_norm), dtype=np.float32,
-        )
-
-        logger.info(
-            "think(): %d/%d latent steps, n_past=%d, hidden norm=%.3f",
-            steps_completed, steps, n_past, float(np.linalg.norm(hidden)),
-        )
 
         # --- Build return context ---
         if output == PayloadType.AUTO:
@@ -333,11 +350,9 @@ class LlamaCppConnector(EngineConnector):
         result._llamacpp_ctx = think_ctx
         result._llamacpp_n_past = n_past
 
-        # Register finalizer only for contexts we created (not reused)
-        if owns_context:
-            result._llamacpp_finalizer = weakref.finalize(
-                result, LlamaCppConnector._free_ctx, think_ctx,
-            )
+        result._llamacpp_finalizer = weakref.finalize(
+            result, LlamaCppConnector._free_ctx, think_ctx,
+        )
 
         return result
 
@@ -539,12 +554,26 @@ class LlamaCppConnector(EngineConnector):
             )
             return output["choices"][0]["text"]
 
+        # Warn about kwargs that won't be forwarded on latent paths
+        if kwargs:
+            logger.debug(
+                "generate(): kwargs %s ignored on latent generation path "
+                "(only temperature, top_p, grammar are used with latent context)",
+                list(kwargs.keys()),
+            )
+
         # Check for a live think context (full KV-cache path)
         think_ctx = getattr(context, "_llamacpp_ctx", None)
         if think_ctx is not None:
             return self._generate_on_think_ctx(
                 prompt, context, max_tokens, temperature, top_p,
                 grammar=grammar, keep_context=keep_context,
+            )
+
+        if keep_context:
+            logger.warning(
+                "generate(): keep_context=True ignored — context has no live "
+                "llama_context (was it created with output=HIDDEN_STATE?)"
             )
 
         # No live context — use embedding injection (hidden state path).
@@ -1286,7 +1315,7 @@ class LlamaCppConnector(EngineConnector):
         n_ctx: Optional[int] = None,
         embeddings: bool = True,
         n_batch: Optional[int] = None,
-    ) -> Any:
+    ) -> "LlamaCppInferenceContext":
         """Create a new llama_context sharing this connector's model weights.
 
         The returned context has its own KV-cache but shares weight
@@ -1306,10 +1335,9 @@ class LlamaCppConnector(EngineConnector):
                 to ``n_ctx``.
 
         Returns:
-            A context dict with keys ``ptr`` (C llama_context pointer),
-            ``n_ctx`` (int), and ``embeddings`` (bool).  The caller
-            owns the context and MUST call :meth:`release_inference_context`
-            when done.
+            A :class:`LlamaCppInferenceContext` wrapping the C context.
+            The caller owns it and must close it (via ``close()``,
+            ``with`` statement, or garbage collection).
 
         Raises:
             RuntimeError: If context creation fails (typically OOM).
@@ -1329,26 +1357,17 @@ class LlamaCppConnector(EngineConnector):
                 f"Failed to create llama_context (n_ctx={ctx_n}). "
                 "This usually means insufficient VRAM."
             )
-        return {"ptr": ctx, "n_ctx": ctx_n, "embeddings": embeddings}
+        return LlamaCppInferenceContext(ptr=ctx, n_ctx=ctx_n, embeddings=embeddings)
 
-    def release_inference_context(self, ctx: Any) -> None:
+    def release_inference_context(self, ctx: "LlamaCppInferenceContext") -> None:
         """Free a context created by :meth:`create_inference_context`.
 
-        Safe to call multiple times — the pointer is set to ``None``
-        after the first free.
+        Equivalent to ``ctx.close()``.  Safe to call multiple times.
 
         Args:
-            ctx: The context dict returned by ``create_inference_context()``.
+            ctx: The :class:`LlamaCppInferenceContext` to free.
         """
-        ptr = ctx.get("ptr") if isinstance(ctx, dict) else None
-        if ptr is None:
-            return
-        try:
-            from llama_cpp import llama_cpp as lc
-            lc.llama_free(ptr)
-        except Exception:
-            pass
-        ctx["ptr"] = None
+        ctx.close()
 
     def run_latent_steps(
         self,
@@ -1362,6 +1381,11 @@ class LlamaCppConnector(EngineConnector):
         projects it to embedding space, normalizes, injects as a new
         position, and runs a forward pass.  The KV-cache grows by
         ``steps`` positions.
+
+        Args:
+            ctx: A :class:`LlamaCppInferenceContext` (uses ``ctx.ptr``),
+                or a raw C ``llama_context`` pointer.  Must have been
+                created with ``embeddings=True``.
 
         The context MUST have been created with ``embeddings=True``
         and have at least one decoded position.  The connector does
@@ -1385,8 +1409,13 @@ class LlamaCppConnector(EngineConnector):
 
         from ..realign import normalize_to_target, project_to_embedding_space
 
-        # Accept both raw pointer and context dict
-        ctx_ptr = ctx["ptr"] if isinstance(ctx, dict) else ctx
+        # Accept LlamaCppInferenceContext, raw pointer, or legacy dict
+        if isinstance(ctx, LlamaCppInferenceContext):
+            ctx_ptr = ctx.ptr
+        elif isinstance(ctx, dict):
+            ctx_ptr = ctx["ptr"]
+        else:
+            ctx_ptr = ctx
 
         n_embd = self._n_embd
         embed_weight, target_norm = self._get_embed_weight()
