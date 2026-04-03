@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Set, Union
 
 from .base import EngineConnector
-from ..types import PayloadType
+from ..types import OutputType, PayloadType
 
 
 @dataclass
@@ -201,7 +201,7 @@ class LlamaCppConnector(EngineConnector):
         prompt: Union[str, list],
         steps: int = 20,
         context: Optional[Any] = None,
-        output: PayloadType = PayloadType.AUTO,
+        output: OutputType = OutputType.AUTO,
         **kwargs: Any,
     ) -> Any:
         """Run N latent thinking steps and return an AVPContext.
@@ -330,12 +330,15 @@ class LlamaCppConnector(EngineConnector):
             )
 
         # --- Build return context ---
-        if output == PayloadType.AUTO:
-            output = PayloadType.KV_CACHE
+        # Resolve OutputType → PayloadType (wire value)
+        if output == OutputType.AUTO or output == OutputType.KV_CACHE:
+            resolved_payload = PayloadType.KV_CACHE
+        else:
+            resolved_payload = PayloadType.HIDDEN_STATE
 
         total_steps = accumulated_steps + steps_completed
 
-        if output == PayloadType.HIDDEN_STATE:
+        if resolved_payload == PayloadType.HIDDEN_STATE:
             if owns_context:
                 lc.llama_free(think_ctx)
             return AVPContext(

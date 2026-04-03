@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .results import InspectResult
 
 from .results import GenerateResult, ThinkResult
-from .types import PayloadType
+from .types import OutputType, PayloadType
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ def think(
     model: Optional[ModelSpec] = None,
     steps: int = 20,
     context: Optional["AVPContext"] = None,
-    output: PayloadType = PayloadType.AUTO,
+    output: OutputType = OutputType.AUTO,
     collect_metrics: bool = False,
     debug_config: Optional["DebugConfig"] = None,
 ) -> ThinkResult:
@@ -169,10 +169,10 @@ def think(
         raise ConfigurationError("think() requires a non-empty prompt string")
     if model is None:
         raise ConfigurationError("think() requires model= (str or EngineConnector)")
-    if not isinstance(output, PayloadType):
+    if not isinstance(output, OutputType):
         raise ConfigurationError(
-            f"think() output= must be a PayloadType value, got {type(output).__name__}. "
-            "Use PayloadType.AUTO, PayloadType.KV_CACHE, or PayloadType.HIDDEN_STATE."
+            f"think() output= must be an OutputType value, got {type(output).__name__}. "
+            "Use OutputType.AUTO, OutputType.KV_CACHE, or OutputType.HIDDEN_STATE."
         )
 
     if debug_config is not None:

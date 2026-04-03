@@ -19,7 +19,7 @@ from ..realign import (
     needs_realignment,
     project_to_embedding_space,
 )
-from ..types import ModelIdentity, PayloadType
+from ..types import ModelIdentity, OutputType, PayloadType
 from .base import EngineConnector, _render_prompt, _tokenize_prompt
 
 logger = logging.getLogger(__name__)
@@ -522,7 +522,7 @@ class HuggingFaceConnector(EngineConnector):
         prompt: Union[str, List[Dict[str, str]]],
         steps: int = 20,
         context: Optional[AVPContext] = None,
-        output: PayloadType = PayloadType.AUTO,
+        output: OutputType = OutputType.AUTO,
         _diagnostics: Optional[Any] = None,
     ) -> AVPContext:
         """Generate latent context via thinking steps.
@@ -544,8 +544,11 @@ class HuggingFaceConnector(EngineConnector):
             raise ValueError(f"steps must be >= 0, got {steps}")
 
         # Resolve AUTO → KV_CACHE (same-model default)
-        if output == PayloadType.AUTO:
-            output = PayloadType.KV_CACHE
+        # Resolve OutputType → PayloadType (wire value)
+        if output == OutputType.AUTO or output == OutputType.KV_CACHE:
+            resolved_payload = PayloadType.KV_CACHE
+        else:
+            resolved_payload = PayloadType.HIDDEN_STATE
 
         messages = _to_messages(prompt)
         prompt_text = _render_prompt(self.tokenizer, messages)
@@ -601,7 +604,7 @@ class HuggingFaceConnector(EngineConnector):
             _diagnostics.norm_trajectory = norms
 
         return AVPContext(
-            past_key_values=None if output == PayloadType.HIDDEN_STATE else past_kv,  # AUTO resolves to KV_CACHE
+            past_key_values=None if resolved_payload == PayloadType.HIDDEN_STATE else past_kv,
             model_hash=self._model_hash,
             num_steps=accumulated_steps + hidden_states.shape[0] - 1,  # actual steps (excludes initial)
             seq_len=_past_length(past_kv),

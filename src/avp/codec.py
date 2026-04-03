@@ -36,20 +36,6 @@ from .types import (
 _HEADER_FMT = "<2sBBII"
 
 
-def _resolve_payload_type(pt: PayloadType) -> PayloadType:
-    """Resolve AUTO to a concrete type before wire encoding.
-
-    AUTO (-1) must never appear on the wire — only 0 (HIDDEN_STATE)
-    and 1 (KV_CACHE) are valid proto values.
-    """
-    if pt == PayloadType.AUTO:
-        raise ValueError(
-            "PayloadType.AUTO must be resolved to KV_CACHE or "
-            "HIDDEN_STATE before encoding. This is a bug in the "
-            "connector — it should resolve AUTO before returning."
-        )
-    return pt
-
 
 def encode(
     payload: bytes,
@@ -74,7 +60,7 @@ def encode(
         model_id=metadata.model_id,
         hidden_dim=metadata.hidden_dim,
         num_layers=metadata.num_layers,
-        payload_type=int(_resolve_payload_type(metadata.payload_type)),
+        payload_type=int(metadata.payload_type),
         dtype=int(metadata.dtype),
         tensor_shape=list(metadata.tensor_shape),
         mode=int(metadata.mode),

@@ -45,17 +45,38 @@ class CompressionLevel(enum.Enum):
     MAX = 19
 
 
-class PayloadType(enum.IntEnum):
-    """Payload type for AVP communication.
+class OutputType(enum.Enum):
+    """Requested output type for :meth:`think`.
 
-    ``HIDDEN_STATE`` and ``KV_CACHE`` correspond to wire format values
-    in the proto schema (0 and 1 respectively).
+    Controls what the connector includes in the returned context.
+    This is an API-level hint — it never appears on the wire.
 
-    ``AUTO`` is SDK-only — it resolves to one of the concrete types
-    at runtime and is never serialized.
+    Use as the ``output=`` parameter on ``think()``::
+
+        result = avp.think("prompt", model=conn, output=OutputType.AUTO)
     """
 
-    AUTO = -1
+    AUTO = "auto"
+    """Let the system decide (default).  Currently resolves to
+    ``KV_CACHE`` for same-model and ``HIDDEN_STATE`` for cross-model."""
+
+    KV_CACHE = "kv_cache"
+    """Full KV-cache + hidden state.  Best for same-model,
+    same-process transfer."""
+
+    HIDDEN_STATE = "hidden_state"
+    """Only the last hidden state ``[1, D]``.  KV-cache is freed
+    immediately, reducing VRAM."""
+
+
+class PayloadType(enum.IntEnum):
+    """Payload type in AVP wire format.
+
+    Values correspond to the proto schema (field 7 of Metadata).
+    This enum only contains wire-valid values — it never carries
+    API-level hints like "auto".
+    """
+
     HIDDEN_STATE = 0
     KV_CACHE = 1
 

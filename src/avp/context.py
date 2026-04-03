@@ -96,7 +96,7 @@ class AVPContext:
             raise ValueError(
                 "Cannot serialize a HIDDEN_STATE-only context via to_bytes(). "
                 "Only KV_CACHE contexts (with past_key_values) support "
-                "serialization. Use output=PayloadType.KV_CACHE in think()."
+                "serialization. Use output=OutputType.KV_CACHE in think()."
             )
 
         kv_bytes, kv_header = serialize_kv_cache(self.past_key_values)
