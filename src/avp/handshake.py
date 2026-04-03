@@ -138,6 +138,16 @@ def extract_model_identity(
     # Standard keys with GPT-2 fallbacks (n_embd, n_layer, n_head)
     hidden_dim = config_dict.get("hidden_size", 0) or config_dict.get("n_embd", 0)
     num_layers = config_dict.get("num_hidden_layers", 0) or config_dict.get("n_layer", 0)
+
+    if hidden_dim == 0:
+        import warnings
+        warnings.warn(
+            f"extract_model_identity: hidden_dim=0 for model {model_id!r}. "
+            "This usually means the config is missing 'hidden_size'. "
+            "Downstream projection and handshake matching may fail.",
+            UserWarning,
+            stacklevel=2,
+        )
     num_heads = config_dict.get("num_attention_heads", 0) or config_dict.get("n_head", 0)
     num_kv_heads = config_dict.get("num_key_value_heads", num_heads)
     head_dim = config_dict.get("head_dim", 0) or (

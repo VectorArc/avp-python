@@ -68,7 +68,7 @@ if HAS_AUTOGEN:
             source_model: Optional[str] = None,
             source_connector: Optional[Any] = None,
             cross_model: bool = False,
-            steps: int = 20,
+            steps: int = 10,
             max_new_tokens: int = 512,
             temperature: float = 0.7,
             store: Optional[Any] = None,

@@ -153,6 +153,16 @@ class LlamaCppConnector(EngineConnector):
                     pass
                 break
 
+        # Compute model hash from GGUF metadata for compatibility checks
+        from ..handshake import compute_model_hash
+        arch = meta.get("general.architecture", "")
+        self._model_hash = compute_model_hash({
+            "architectures": [arch] if arch else [],
+            "hidden_size": self._n_embd,
+            "num_hidden_layers": self._n_layer or 0,
+            "vocab_size": self._n_vocab,
+        })
+
         logger.info(
             "LlamaCppConnector loaded: %s (n_embd=%d, n_vocab=%d, n_layer=%s)",
             model_path, self._n_embd, self._n_vocab, self._n_layer,
@@ -330,7 +340,7 @@ class LlamaCppConnector(EngineConnector):
                 lc.llama_free(think_ctx)
             return AVPContext(
                 past_key_values=None,
-                model_hash="",
+                model_hash=self._model_hash,
                 num_steps=total_steps,
                 seq_len=n_past,
                 hidden_dim=n_embd,
@@ -1232,6 +1242,7 @@ class LlamaCppConnector(EngineConnector):
         from ..types import ModelIdentity
         return ModelIdentity(
             model_id=self._model_path,
+            model_hash=self._model_hash,
             hidden_dim=self._n_embd,
             num_layers=self._n_layer or 0,
         )

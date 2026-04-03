@@ -62,12 +62,12 @@ class TestGenerateBasic:
         _mock_connector.think.assert_called_once()
         _mock_connector.generate.assert_called_once()
 
-    def test_steps_default_20(self, _mock_connector):
+    def test_steps_default_10(self, _mock_connector):
         from avp.easy import generate
 
         generate("hello", model="test-model")
         call_args = _mock_connector.think.call_args
-        assert call_args[1]["steps"] == 20
+        assert call_args[1]["steps"] == 10
 
     def test_custom_steps(self, _mock_connector):
         from avp.easy import generate

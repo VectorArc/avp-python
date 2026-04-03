@@ -92,6 +92,13 @@ class AVPContext:
             "num_steps": str(self.num_steps),
         }
 
+        if self.past_key_values is None:
+            raise ValueError(
+                "Cannot serialize a HIDDEN_STATE-only context via to_bytes(). "
+                "Only KV_CACHE contexts (with past_key_values) support "
+                "serialization. Use output=PayloadType.KV_CACHE in think()."
+            )
+
         kv_bytes, kv_header = serialize_kv_cache(self.past_key_values)
 
         # Map actual KV-cache dtype to wire DataType
@@ -105,7 +112,7 @@ class AVPContext:
             model_id=model_id,
             hidden_dim=self.hidden_dim,
             num_layers=self.num_layers,
-            payload_type=PayloadType.KV_CACHE,
+            payload_type=self.payload_type,
             dtype=actual_dtype,
             mode=CommunicationMode.LATENT,
             extra=extra,

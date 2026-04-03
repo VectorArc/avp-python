@@ -286,6 +286,7 @@ class HuggingFaceConnector(EngineConnector):
         max_new_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.95,
+        do_sample: bool = True,
     ) -> Tuple[List[str], Any]:
         """Generate text from injected embeddings."""
         import torch
@@ -299,18 +300,21 @@ class HuggingFaceConnector(EngineConnector):
                 (batch_size, total_len), dtype=torch.long, device=self._device
             )
 
+        gen_kwargs: dict = dict(
+            inputs_embeds=inputs_embeds.to(self._device),
+            attention_mask=attention_mask.to(self._device),
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample,
+            pad_token_id=self.tokenizer.pad_token_id,
+            return_dict_in_generate=True,
+            past_key_values=past_key_values,
+        )
+        if do_sample:
+            gen_kwargs["temperature"] = temperature
+            gen_kwargs["top_p"] = top_p
+
         with torch.no_grad():
-            outputs = self.model.generate(
-                inputs_embeds=inputs_embeds.to(self._device),
-                attention_mask=attention_mask.to(self._device),
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=True,
-                pad_token_id=self.tokenizer.pad_token_id,
-                return_dict_in_generate=True,
-                past_key_values=past_key_values,
-            )
+            outputs = self.model.generate(**gen_kwargs)
 
         # Decode generated tokens (skip prompt tokens).
         # model.generate() sequences contain [input_len + generated_len] —
@@ -516,7 +520,7 @@ class HuggingFaceConnector(EngineConnector):
     def think(
         self,
         prompt: Union[str, List[Dict[str, str]]],
-        steps: int = 20,
+        steps: int = 10,
         context: Optional[AVPContext] = None,
         output: PayloadType = PayloadType.AUTO,
         _diagnostics: Optional[Any] = None,
@@ -599,7 +603,7 @@ class HuggingFaceConnector(EngineConnector):
         return AVPContext(
             past_key_values=None if output == PayloadType.HIDDEN_STATE else past_kv,  # AUTO resolves to KV_CACHE
             model_hash=self._model_hash,
-            num_steps=accumulated_steps + steps,
+            num_steps=accumulated_steps + hidden_states.shape[0] - 1,  # actual steps (excludes initial)
             seq_len=_past_length(past_kv),
             model_family=self._identity.model_family,
             hidden_dim=self._identity.hidden_dim,
