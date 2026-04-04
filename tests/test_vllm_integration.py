@@ -100,9 +100,9 @@ def test_tokenization(connector):
     tokens = connector.tokenize("Hello, world!")
 
     assert tokens is not None
-    assert tokens.shape[0] == 1  # batch dim
-    assert tokens.shape[1] > 0  # at least one token
-    assert tokens.dtype in (torch.long, torch.int64, torch.int32)
+    assert isinstance(tokens, list)
+    assert len(tokens) > 0
+    assert all(isinstance(t, int) for t in tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +221,7 @@ def test_prompt_embeds_injection(connector):
     # Create a small embedding sequence (3 tokens worth)
     # Use actual embedding vectors from the model
     token_ids = connector.tokenize("Hello world")
-    embeds = input_embed[token_ids[0]]  # [seq_len, hidden_dim]
+    embeds = input_embed[torch.tensor(token_ids)]  # [seq_len, hidden_dim]
     embeds = embeds.unsqueeze(0)  # [1, seq_len, hidden_dim]
 
     texts, kv = connector.inject_and_generate(
