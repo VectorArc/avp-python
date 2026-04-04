@@ -70,7 +70,11 @@ class ThinkResult:
     # --- Backward compat: delegate attribute access to context ---
 
     def __getattr__(self, name: str) -> Any:
-        # Only called for attributes not found on ThinkResult itself
+        # Only called for attributes not found on ThinkResult itself.
+        # Guard against infinite recursion if context is not set
+        # (e.g., during unpickling before __init__ runs).
+        if name == "context":
+            raise AttributeError("ThinkResult has no context (not initialized)")
         return getattr(self.context, name)
 
     # --- Backward compat: tuple unpacking ---
@@ -120,3 +124,7 @@ class GenerateResult(str):
             f"GenerateResult({text_preview!r}, "
             f"metrics={'...' if self.metrics else None})"
         )
+
+    def __reduce__(self) -> tuple:
+        """Support pickling — preserves metrics across serialize/deserialize."""
+        return (GenerateResult, (str(self), self.metrics))

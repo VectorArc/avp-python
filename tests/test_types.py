@@ -37,9 +37,18 @@ def test_avp_version_string():
 
 
 def test_payload_type_values():
+    """PayloadType only contains wire-valid values (no AUTO)."""
     assert PayloadType.HIDDEN_STATE == 0
     assert PayloadType.KV_CACHE == 1
-    assert PayloadType.AUTO == -1
+    assert len(PayloadType) == 2
+
+
+def test_output_type_values():
+    """OutputType is the API-level enum for think(output=)."""
+    from avp.types import OutputType
+    assert OutputType.AUTO.value == "auto"
+    assert OutputType.KV_CACHE.value == "kv_cache"
+    assert OutputType.HIDDEN_STATE.value == "hidden_state"
 
 
 def test_communication_mode_values():

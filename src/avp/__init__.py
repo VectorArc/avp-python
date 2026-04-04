@@ -40,7 +40,7 @@ from .types import (
     CompressionLevel,
     ModelIdentity,
 )
-from .types import AVPHeader, DataType, PayloadType, ProjectionMethod, SessionInfo  # noqa: F401
+from .types import AVPHeader, DataType, OutputType, PayloadType, ProjectionMethod, SessionInfo  # noqa: F401
 
 # --- Errors ---
 from .errors import AVPError, ConfigurationError, DecodeError, HandshakeError, IncompatibleModelsError
@@ -170,6 +170,8 @@ __all__ = [
     "extract_model_identity",
     "SessionManager",
     # Types
+    "OutputType",
+    "PayloadType",
     "ModelIdentity",
     "CommunicationMode",
     "CompressionLevel",

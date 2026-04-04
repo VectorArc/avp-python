@@ -104,7 +104,8 @@ def test_full_pipeline_in_process_tied(tiny_tied_connector):
     assert connector.needs_realignment() is False
 
     # Agent A: tokenize and extract
-    input_ids = connector.tokenize("hello world test")
+    import torch
+    input_ids = torch.tensor([connector.tokenize("hello world test")])
     last_hidden, all_hidden, past_kv = connector.extract_hidden_state(input_ids)
 
     assert last_hidden.shape[0] == 1  # batch=1
@@ -200,7 +201,8 @@ def test_full_pipeline_in_process_untied(tiny_untied_connector):
     assert connector.needs_realignment() is True
 
     # Agent A: tokenize and extract
-    input_ids = connector.tokenize("hello world test")
+    import torch
+    input_ids = torch.tensor([connector.tokenize("hello world test")])
     last_hidden, all_hidden, past_kv = connector.extract_hidden_state(input_ids)
 
     assert last_hidden.shape[0] == 1
@@ -287,7 +289,8 @@ def test_latent_steps_pipeline(tiny_tied_connector):
     latent_steps = 3
 
     # Agent A: tokenize
-    input_ids = connector.tokenize("think about this")
+    import torch
+    input_ids = torch.tensor([connector.tokenize("think about this")])
     initial_seq_len = input_ids.shape[1]
 
     # Agent A: run latent steps (accumulates KV-cache)
@@ -489,7 +492,8 @@ def test_full_pipeline_over_http(integration_server, tiny_tied_connector):
         assert session_info.mode == CommunicationMode.LATENT
 
         # Extract and serialize KV-cache
-        input_ids = connector.tokenize("http transport test")
+        import torch
+        input_ids = torch.tensor([connector.tokenize("http transport test")])
         _, _, past_kv = connector.extract_hidden_state(input_ids)
         kv_bytes, kv_header = serialize_kv_cache(past_kv)
 

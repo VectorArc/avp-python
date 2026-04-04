@@ -36,6 +36,7 @@ from .types import (
 _HEADER_FMT = "<2sBBII"
 
 
+
 def encode(
     payload: bytes,
     metadata: AVPMetadata,

@@ -65,6 +65,20 @@ class MockTokenizer:
         ids = [ord(c) % (self.vocab_size - 2) + 2 for c in text]
         return {"input_ids": torch.tensor([ids])}
 
+    def encode(self, text, add_special_tokens=False, **kw):
+        return [ord(c) % (self.vocab_size - 2) + 2 for c in text]
+
+    def decode(self, token_ids, skip_special_tokens=False, **kw):
+        return "".join(chr((t - 2) % 128 + 32) for t in token_ids)
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, **kw):
+        parts = []
+        for msg in messages:
+            parts.append(f"<|{msg['role']}|>\n{msg['content']}")
+        if add_generation_prompt:
+            parts.append("<|assistant|>")
+        return "\n".join(parts)
+
     def get_vocab(self):
         return {f"tok_{i}": i for i in range(min(self.vocab_size, 1000))}
 
@@ -148,11 +162,11 @@ def test_get_model_identity_tied():
 
 
 def test_tokenize(connector):
-    """tokenize returns tensor with correct shape."""
+    """tokenize returns list[int] with correct length."""
     result = connector.tokenize("Hello world")
-    assert result.dim() == 2
-    assert result.shape[0] == 1
-    assert result.shape[1] == len("Hello world")
+    assert isinstance(result, list)
+    assert len(result) == len("Hello world")
+    assert all(isinstance(t, int) for t in result)
 
 
 def test_needs_realignment_untied(connector):

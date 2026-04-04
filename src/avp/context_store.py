@@ -14,10 +14,13 @@ Usage::
     ctx = store.get("task-1")   # None after TTL expires
 """
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .context import AVPContext
@@ -70,14 +73,21 @@ class ContextStore:
     def get(self, key: str) -> Optional["AVPContext"]:
         """Retrieve an AVPContext by key, or ``None`` if missing/expired.
 
-        Expired entries are lazily removed on access.
+        Expired entries are lazily removed on access.  A warning is
+        logged when an entry has expired so that silent context loss
+        is visible in logs.
         """
         with self._lock:
             entry = self._entries.get(key)
             if entry is None:
                 return None
             if entry.is_expired:
+                age = time.time() - entry.stored_at
                 del self._entries[key]
+                logger.warning(
+                    "ContextStore: entry %r expired (age=%.1fs, ttl=%.1fs)",
+                    key, age, entry.ttl,
+                )
                 return None
             return entry.context
 

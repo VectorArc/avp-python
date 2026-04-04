@@ -27,7 +27,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -83,6 +83,12 @@ def resolve_ollama_model(model_name: str) -> str:
     )
 
     if not manifest_path.exists():
+        # Fallback: try locating via Ollama REST API (/api/show).
+        # This handles custom models created via 'ollama create'
+        # that live outside the library/ namespace.
+        api_path = _resolve_via_api(model_name, models_dir)
+        if api_path is not None:
+            return api_path
         raise FileNotFoundError(
             f"Ollama model '{model_name}' not found at {manifest_path}. "
             f"Run: ollama pull {model_name}"
@@ -144,6 +150,61 @@ def _parse_model_name(model_name: str) -> tuple:
         name, tag = model_name, "latest"
 
     return name, tag
+
+
+def _resolve_via_api(model_name: str, models_dir: Path) -> Optional[str]:
+    """Try to resolve a model's GGUF path via the Ollama REST API.
+
+    Falls back to ``/api/show`` which returns the model's digest
+    regardless of the registry namespace (works for custom models
+    created via ``ollama create``).
+
+    Returns the GGUF blob path, or ``None`` if the API is unreachable
+    or the model is not found.
+    """
+    try:
+        host = _get_ollama_host()
+        url = f"{host}/api/show"
+        body = json.dumps({"name": model_name}).encode("utf-8")
+        req = Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+
+        # /api/show returns model details including digest in modelinfo
+        # or we can extract from the model_info/details
+        digest = None
+
+        # Try modelfile-based extraction (has layers with digests)
+        for line in data.get("modelfile", "").splitlines():
+            if line.startswith("FROM ") and "sha256:" in line:
+                # "FROM @sha256:abc..." or "FROM /path/sha256-abc..."
+                part = line.split("sha256:", 1)[-1].strip()
+                digest = f"sha256:{part}"
+                break
+
+        if not digest:
+            logger.debug(
+                "_resolve_via_api: could not extract digest from /api/show "
+                "for %r", model_name,
+            )
+            return None
+
+        blob_name = digest.replace(":", "-")
+        blob_path = models_dir / "blobs" / blob_name
+        if blob_path.exists():
+            logger.info(
+                "Resolved %r via Ollama API → %s", model_name, blob_path,
+            )
+            return str(blob_path.resolve())
+
+        logger.debug(
+            "_resolve_via_api: blob %s not found on disk", blob_path,
+        )
+        return None
+    except (URLError, OSError, ValueError, KeyError) as exc:
+        logger.debug("_resolve_via_api: API query failed for %r: %s", model_name, exc)
+        return None
 
 
 # ---------------------------------------------------------------------------

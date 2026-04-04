@@ -16,7 +16,7 @@ Requires vllm — uses lazy imports so the core SDK works without it.
 """
 
 import warnings
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from ..errors import EngineNotAvailableError
 from ..handshake import compute_model_hash, extract_model_identity
@@ -145,6 +145,57 @@ class VLLMConnector(EngineConnector):
 
     def get_model_identity(self) -> ModelIdentity:
         return self._identity
+
+    # --- Model introspection overrides ---
+
+    @property
+    def context_length(self) -> int:
+        return int(getattr(self._hf_config, "max_position_embeddings", 0))
+
+    @property
+    def vocab_size(self) -> int:
+        return int(getattr(self._hf_config, "vocab_size", 0))
+
+    @property
+    def device(self) -> str:
+        return "remote"
+
+    @property
+    def dtype(self) -> str:
+        dt = getattr(self._hf_config, "torch_dtype", None)
+        if dt is not None:
+            s = str(dt)
+            return s.replace("torch.", "") if s.startswith("torch.") else s
+        return "auto"
+
+    @property
+    def can_tokenize(self) -> bool:
+        return True
+
+    # --- Tokenization overrides ---
+
+    def tokenize(self, text: str) -> List[int]:
+        return self._tokenizer.encode(text, add_special_tokens=False)
+
+    def detokenize(self, token_ids: List[int]) -> str:
+        return self._tokenizer.decode(token_ids, skip_special_tokens=False)
+
+    def apply_chat_template(
+        self,
+        messages: List[Dict[str, str]],
+        add_generation_prompt: bool = True,
+    ) -> str:
+        return self._tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=add_generation_prompt,
+        )
+
+    @property
+    def stop_token_ids(self) -> Set[int]:
+        ids: Set[int] = set()
+        eos = getattr(self._tokenizer, "eos_token_id", None)
+        if eos is not None:
+            ids.add(eos)
+        return ids
 
     def extract_hidden_state(
         self,
@@ -310,16 +361,6 @@ class VLLMConnector(EngineConnector):
         except (AttributeError, RuntimeError):
             return None, None
 
-    def tokenize(self, text: str) -> Any:
-        """Tokenize text into input IDs."""
-
-        encoded = self._tokenizer(
-            text,
-            add_special_tokens=False,
-            return_tensors="pt",
-        )
-        return encoded["input_ids"]
-
     def needs_realignment(self) -> bool:
         """Check if this model needs realignment (untied weights)."""
         return not self._config_dict.get("tie_word_embeddings", False)
@@ -332,6 +373,7 @@ class VLLMConnector(EngineConnector):
         max_tokens: int = 256,
         temperature: float = 0.7,
         top_p: float = 0.95,
+        **kwargs: Any,
     ) -> List[str]:
         """Native text-in/text-out generation (vLLM's sweet spot).
 
@@ -340,6 +382,8 @@ class VLLMConnector(EngineConnector):
             max_tokens: Maximum tokens per response.
             temperature: Sampling temperature.
             top_p: Nucleus sampling threshold.
+            **kwargs: Additional SamplingParams options (e.g., ``top_k``,
+                ``repetition_penalty``, ``stop``, ``presence_penalty``).
 
         Returns:
             List of generated text strings.
@@ -351,6 +395,7 @@ class VLLMConnector(EngineConnector):
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
+            **kwargs,
         )
 
         outputs = self._engine.generate(prompts, sampling_params)
@@ -399,8 +444,13 @@ class VLLMConnector(EngineConnector):
         rendered = _render_prompt(self._tokenizer, messages)
 
         temp = temperature if do_sample else 0.0
+        # Strip AVP-internal kwargs before forwarding to SamplingParams
+        kwargs.pop("_diagnostics", None)
+        kwargs.pop("source", None)
+        kwargs.pop("cross_model", None)
         result = self.generate_text(
-            [rendered], max_tokens=max_new_tokens, temperature=temp, top_p=top_p
+            [rendered], max_tokens=max_new_tokens, temperature=temp,
+            top_p=top_p, **kwargs,
         )
         return result[0]
 
