@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .results import InspectResult
 
 from .results import GenerateResult, ThinkResult
-from .types import OutputType, PayloadType
+from .types import OutputType
 
 logger = logging.getLogger(__name__)
 

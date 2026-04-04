@@ -77,7 +77,6 @@ class AVPContext:
             AVPMetadata,
             CommunicationMode,
             DataType,
-            PayloadType,
         )
         from .codec import encode_kv_cache
         from .kv_cache import serialize_kv_cache

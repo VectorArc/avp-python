@@ -224,8 +224,6 @@ class LlamaCppConnector(EngineConnector):
         Returns:
             AVPContext containing the enriched hidden state and live context.
         """
-        import ctypes
-
         import numpy as np
         from llama_cpp import llama_cpp as lc
 
