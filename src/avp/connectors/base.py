@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from ..errors import EngineNotAvailableError
-from ..types import ModelIdentity, OutputType, PayloadType
+from ..types import ModelIdentity, OutputType
 
 # Type aliases for engine-agnostic tensors.
 # These are Any at runtime (torch is optional) but document intent.
