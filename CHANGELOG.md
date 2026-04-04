@@ -4,6 +4,49 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-04-04
+
+### Added
+
+- **Public connector API** — `hidden_dim`, `num_layers`, `context_length`, `vocab_size`, `device`, `dtype` properties on `EngineConnector` ABC.
+- **Tokenization API** — `tokenize()` (returns `List[int]`), `detokenize()`, `apply_chat_template()` on ABC. `can_tokenize` capability flag.
+- **Stop conditions** — `stop_token_ids`, `stop_strings` properties on ABC.
+- **`OutputType` enum** — API-level enum (`AUTO`/`KV_CACHE`/`HIDDEN_STATE`) for `think(output=)`. Replaces `PayloadType.AUTO`.
+- **LlamaCpp `think(context=)`** — Continue thinking from a prior context (ABC compliance).
+- **LlamaCpp `think(prompt=Union[str, List[Dict]])`** — Accept chat message format (ABC compliance).
+- **LlamaCpp `grammar=`** — GBNF grammar on `generate()` for constrained generation. All code paths.
+- **LlamaCpp `keep_context=True`** — Preserve live context after `generate()`.
+- **LlamaCpp latent primitives** — `create_inference_context()`, `release_inference_context()`, `run_latent_steps()` for consumers managing own context lifecycle.
+- **`LlamaCppInferenceContext`** — Dataclass with `close()`/context manager for C context handles.
+- **`OutputType.resolve()`** — Single method for OutputType → PayloadType mapping.
+- **`**kwargs` forwarding** — Easy API and all connectors forward engine-specific kwargs.
+- **Ollama `/api/show` fallback** — Resolves custom models created via `ollama create`.
+- **ContextStore TTL warning** — Logs expiry instead of silent `None` return.
+
+### Fixed
+
+- **HF `inject_and_generate()` crash** — Was missing `do_sample` parameter. TypeError on any `HIDDEN_STATE` context (CRITICAL).
+- **LlamaCpp `model_hash=""`** — Now computed from GGUF metadata.
+- **LlamaCpp `get_embedding_weights()`** — Was returning `(None, None)`. Now returns actual GGUF weights.
+- **LlamaCpp `tokenize()`** — Now uses `add_bos=False, special=True` (was `add_bos=True`).
+- **`to_bytes()` hardcoded `PayloadType.KV_CACHE`** — Now uses `self.payload_type`. Rejects HIDDEN_STATE contexts.
+- **HF `think(steps=0)` ValueError** — Now allowed for pure KV prefill.
+- **HF NaN latent steps** — `num_steps` reflects actual completed, not requested.
+- **`ThinkResult.__getattr__` recursion** — Guard for `context=None`.
+- **`GenerateResult` pickle** — Added `__reduce__` for serialization.
+- **`ModelIdentity.hidden_dim=0` warning** — Warns in `extract_model_identity()`.
+- **LlamaCpp `think(context=)` use-after-free** — Finalizer ownership transfer on context reuse.
+- **`steps_completed` NameError** — After dedup refactor of `think()` calling `run_latent_steps()`.
+
+### Changed
+
+- **`PayloadType.AUTO` removed** — Use `OutputType.AUTO` instead. `PayloadType` is now wire-only (0 and 1).
+- **`tokenize()` returns `List[int]`** — Was `Any`/`torch.Tensor` on HF/vLLM. **Breaking.**
+- **`has_tokenizer` → `can_tokenize`** — Matches `can_think` naming pattern.
+- **HF `self.device` → property** — Internal `self._device` with property wrapper. Read access unchanged.
+- **`extract_hidden_state()`/`inject_and_generate()` removed from ABC** — Kept on HF connector only.
+- **`steps=20` harmonized** — LlamaCpp was 10, now 20 everywhere.
+
 ## [0.5.1] - 2026-04-02
 
 ### Fixed
