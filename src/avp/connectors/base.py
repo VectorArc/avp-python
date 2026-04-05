@@ -162,15 +162,18 @@ class EngineConnector(ABC):
 
     # --- Tokenization ---
 
-    def tokenize(self, text: str) -> List[int]:
+    def tokenize(self, text: str, add_bos: bool = False) -> List[int]:
         """Tokenize text into a list of token IDs.
 
-        Does **not** add special tokens (BOS/EOS).  Use
+        By default, does **not** add special tokens (BOS/EOS).  Use
         :meth:`apply_chat_template` to produce a properly framed prompt
         before tokenizing.
 
         Args:
             text: Input text string.
+            add_bos: If ``True``, prepend the model's BOS (beginning-of-sequence)
+                token.  Use this when tokenizing for manual decoding onto a
+                fresh context where position 0 expects BOS.  Default: ``False``.
 
         Returns:
             List of integer token IDs.

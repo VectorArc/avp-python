@@ -174,8 +174,8 @@ class VLLMConnector(EngineConnector):
 
     # --- Tokenization overrides ---
 
-    def tokenize(self, text: str) -> List[int]:
-        return self._tokenizer.encode(text, add_special_tokens=False)
+    def tokenize(self, text: str, add_bos: bool = False) -> List[int]:
+        return self._tokenizer.encode(text, add_special_tokens=add_bos)
 
     def detokenize(self, token_ids: List[int]) -> str:
         return self._tokenizer.decode(token_ids, skip_special_tokens=False)

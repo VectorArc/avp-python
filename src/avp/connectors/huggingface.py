@@ -199,8 +199,11 @@ class HuggingFaceConnector(EngineConnector):
 
     # --- Tokenization overrides ---
 
-    def tokenize(self, text: str) -> List[int]:
-        return self.tokenizer.encode(text, add_special_tokens=False)
+    def tokenize(self, text: str, add_bos: bool = False) -> List[int]:
+        ids = self.tokenizer.encode(text, add_special_tokens=False)
+        if add_bos and hasattr(self.tokenizer, "bos_token_id") and self.tokenizer.bos_token_id is not None:
+            ids = [self.tokenizer.bos_token_id] + ids
+        return ids
 
     def detokenize(self, token_ids: List[int]) -> str:
         return self.tokenizer.decode(token_ids, skip_special_tokens=False)

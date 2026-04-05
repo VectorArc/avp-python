@@ -4,6 +4,17 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-04-04
+
+### Added
+
+- **`generate_on_context()`** — Third latent primitive on `LlamaCppConnector`. Autoregressive generation on a caller-owned context with streaming via `token_callback`. Completes the create/think/generate primitive set alongside `create_inference_context()` and `run_latent_steps()`.
+- **`tokenize(add_bos=True)`** — Optional `add_bos` parameter on `tokenize()` across all connectors (ABC, LlamaCpp, HuggingFace, vLLM). Default `False` preserves backward compatibility. Use `True` when tokenizing for manual decoding onto a fresh context.
+
+### Changed
+
+- **`_generate_on_think_ctx` refactored** — Now delegates to `generate_on_context()` for the generation loop. Context lifecycle (free/keep) still managed by the wrapper. No behavior change for existing callers.
+
 ## [0.6.0] - 2026-04-04
 
 ### Added

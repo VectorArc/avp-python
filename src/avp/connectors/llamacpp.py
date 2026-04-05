@@ -30,7 +30,7 @@ Requires: ``pip install avp[llamacpp]`` (installs llama-cpp-python)
 import logging
 import weakref
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Set, Union
+from typing import Any, Callable, List, Optional, Set, Tuple, Union
 
 from .base import EngineConnector
 from ..types import OutputType, PayloadType
@@ -618,113 +618,31 @@ class LlamaCppConnector(EngineConnector):
     ) -> str:
         """Generate on the live think context's enriched KV-cache.
 
-        Decodes the solver prompt tokens directly onto the think context
-        (which has all prompt + latent step KV entries), then runs
-        autoregressive generation. The model attends to the full
-        enriched context. Frees the think context when done.
+        Delegates to :meth:`generate_on_context` for the actual generation,
+        then manages context lifecycle (free or update position).
         """
-        from llama_cpp import llama_cpp as lc
-
         think_ctx = context._llamacpp_ctx
         n_past = context._llamacpp_n_past
+        n_cur = n_past  # safe default if generate_on_context raises
 
         try:
-            n_cur = n_past
-
-            if prompt:
-                tokens = self._apply_chat_template(prompt)
-                if tokens:
-                    batch = lc.llama_batch_init(len(tokens), 0, 1)
-                    try:
-                        for i, tok in enumerate(tokens):
-                            batch.token[i] = tok
-                            batch.pos[i] = n_past + i
-                            batch.seq_id[i][0] = 0
-                            batch.n_seq_id[i] = 1
-                            batch.logits[i] = 1 if i == len(tokens) - 1 else 0
-                        batch.n_tokens = len(tokens)
-
-                        rc = lc.llama_decode(think_ctx, batch)
-                        if rc != 0:
-                            logger.warning("generate(): prompt decode failed (rc=%d)", rc)
-                            return ""
-                    finally:
-                        lc.llama_batch_free(batch)
-                    n_cur = n_past + len(tokens)
-
-            vocab = lc.llama_model_get_vocab(self._model._model.model) if grammar else None
-            sampler = self._make_sampler(lc, temperature, top_p, grammar=grammar, vocab=vocab)
-            next_batch = lc.llama_batch_init(1, 0, 1)
-            stop_tokens = self._get_stop_tokens()
-            stop_strings = self._get_stop_strings()
-            generated_text = ""
-            stopped = False
-
-            try:
-                for _ in range(max_tokens):
-                    token_id = lc.llama_sampler_sample(sampler, think_ctx, -1)
-                    lc.llama_sampler_accept(sampler, token_id)
-
-                    if token_id in stop_tokens:
-                        stopped = True
-                        break
-
-                    # Detokenize incrementally for text-based stop check
-                    try:
-                        piece = self._model.detokenize(
-                            [token_id], special=True,
-                        ).decode("utf-8", errors="replace")
-                    except TypeError:
-                        piece = self._model.detokenize(
-                            [token_id],
-                        ).decode("utf-8", errors="replace")
-                    generated_text += piece
-
-                    # Check stop strings in recent text
-                    if stop_strings:
-                        tail = generated_text[-64:]
-                        for ss in stop_strings:
-                            if ss in tail:
-                                # Truncate at the stop string
-                                idx = generated_text.rfind(ss)
-                                if idx >= 0:
-                                    generated_text = generated_text[:idx]
-                                stopped = True
-                                break
-                    if stopped:
-                        break
-
-                    next_batch.token[0] = token_id
-                    next_batch.pos[0] = n_cur
-                    next_batch.seq_id[0][0] = 0
-                    next_batch.n_seq_id[0] = 1
-                    next_batch.logits[0] = 1
-                    next_batch.n_tokens = 1
-                    n_cur += 1
-
-                    rc = lc.llama_decode(think_ctx, next_batch)
-                    if rc != 0:
-                        break
-            finally:
-                lc.llama_sampler_free(sampler)
-                lc.llama_batch_free(next_batch)
-
-            logger.debug(
-                "generate(): think_ctx with %d enriched positions + "
-                "%d prompt tokens, generated %d chars, stopped=%s",
-                n_past, n_cur - n_past, len(generated_text), stopped,
+            text, n_cur, _ids = self.generate_on_context(
+                think_ctx, n_past,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                grammar=grammar,
             )
-            return generated_text
-
+            return text
         finally:
             if keep_context:
-                # Caller retains ownership — update position
                 context._llamacpp_n_past = n_cur
             else:
-                # Default: detach finalizer and free
                 finalizer = getattr(context, "_llamacpp_finalizer", None)
                 if finalizer:
                     finalizer.detach()
+                from llama_cpp import llama_cpp as lc
                 lc.llama_free(think_ctx)
                 context._llamacpp_ctx = None
 
@@ -1267,10 +1185,10 @@ class LlamaCppConnector(EngineConnector):
 
     # --- Tokenization overrides ---
 
-    def tokenize(self, text: str) -> List[int]:
+    def tokenize(self, text: str, add_bos: bool = False) -> List[int]:
         if not HAS_LLAMACPP:
             raise ImportError("llama-cpp-python required")
-        return self._model.tokenize(text.encode("utf-8"), add_bos=False, special=True)
+        return self._model.tokenize(text.encode("utf-8"), add_bos=add_bos, special=True)
 
     def detokenize(self, token_ids: List[int]) -> str:
         if not HAS_LLAMACPP:
@@ -1384,7 +1302,7 @@ class LlamaCppConnector(EngineConnector):
         ctx: Any,
         n_past: int,
         steps: int = 20,
-    ) -> tuple:
+    ) -> Tuple[Optional[Any], int]:
         """Run N latent consolidation steps on a caller-owned context.
 
         Each step extracts the hidden state from the last position,
@@ -1392,20 +1310,15 @@ class LlamaCppConnector(EngineConnector):
         position, and runs a forward pass.  The KV-cache grows by
         ``steps`` positions.
 
-        Args:
-            ctx: A :class:`LlamaCppInferenceContext` (uses ``ctx.ptr``),
-                or a raw C ``llama_context`` pointer.  Must have been
-                created with ``embeddings=True``.
-
         The context MUST have been created with ``embeddings=True``
         and have at least one decoded position.  The connector does
         NOT take ownership of ``ctx``.
 
         Args:
-            ctx: Live llama_context pointer (C), or a context dict
-                from :meth:`create_inference_context` (uses ``ctx["ptr"]``).
+            ctx: A :class:`LlamaCppInferenceContext` (uses ``ctx.ptr``),
+                or a raw C ``llama_context`` pointer.
             n_past: Current KV-cache position count.
-            steps: Number of latent steps (default: 10).
+            steps: Number of latent steps.  Default: 20.
 
         Returns:
             Tuple of ``(last_hidden_state, new_n_past)`` where
@@ -1487,6 +1400,191 @@ class LlamaCppConnector(EngineConnector):
             steps_completed, steps, n_past, float(np.linalg.norm(hidden)),
         )
         return hidden, n_past
+
+    def generate_on_context(
+        self,
+        ctx: Any,
+        n_past: int,
+        prompt: str = "",
+        max_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.95,
+        grammar: Optional[str] = None,
+        token_callback: Optional[Callable[[str], None]] = None,
+        n_ctx: Optional[int] = None,
+        extra_stop_strings: Optional[List[str]] = None,
+    ) -> Tuple[str, int, List[int]]:
+        """Generate text on a caller-owned context.
+
+        Autoregressive generation on a live llama_context.  Optionally
+        decodes prompt tokens first (at position ``n_past``), then
+        generates up to ``max_tokens`` with stop detection.
+
+        This is the third latent primitive alongside
+        :meth:`create_inference_context` and :meth:`run_latent_steps`.
+        Together they provide a complete public API for consumers that
+        manage their own llama_context lifecycle::
+
+            ctx = connector.create_inference_context(n_ctx=4096)
+            # ... decode tokens, run latent steps ...
+            text, n_past, ids = connector.generate_on_context(ctx, n_past)
+            ctx.close()
+
+        The caller retains full ownership of ``ctx``.  This method
+        does NOT free or modify the context handle.
+
+        Args:
+            ctx: A :class:`LlamaCppInferenceContext` (uses ``ctx.ptr``),
+                or a raw C ``llama_context`` pointer.
+            n_past: Current KV-cache position count.
+            prompt: Text to decode before generating.  Rendered through
+                the model's chat template if non-empty.  Pass ``""``
+                (default) to generate from the current position without
+                decoding additional tokens.
+            max_tokens: Maximum tokens to generate.
+            temperature: Sampling temperature.
+            top_p: Nucleus sampling threshold.
+            grammar: Optional GBNF grammar string for constrained
+                generation.
+            token_callback: Optional callable invoked with each
+                generated token piece (``str``) as it is produced.
+                Enables streaming to terminal, Telegram, etc.
+            n_ctx: Context window size for capacity checking.  When
+                provided, generation stops cleanly before overflowing
+                the KV-cache.  If ``None``, no capacity check is
+                performed (caller is responsible).  Automatically
+                read from :class:`LlamaCppInferenceContext` if
+                available.
+            extra_stop_strings: Additional stop strings beyond the
+                model's built-in stop sequences.  Useful for callers
+                that need custom stop conditions (e.g., smolagents
+                stop sequences).
+
+        Returns:
+            Tuple of ``(generated_text, new_n_past, generated_ids)``
+            where ``generated_ids`` is the list of token IDs produced
+            during generation (excludes prompt tokens).
+
+        Raises:
+            ValueError: If ``ctx`` is a closed
+                :class:`LlamaCppInferenceContext`.
+        """
+        from llama_cpp import llama_cpp as lc
+
+        # Accept LlamaCppInferenceContext, raw pointer, or legacy dict
+        if isinstance(ctx, LlamaCppInferenceContext):
+            if ctx._closed:
+                raise ValueError("Cannot use a closed LlamaCppInferenceContext")
+            ctx_ptr = ctx.ptr
+            if n_ctx is None:
+                n_ctx = ctx.n_ctx
+        elif isinstance(ctx, dict):
+            ctx_ptr = ctx["ptr"]
+        else:
+            ctx_ptr = ctx
+
+        n_cur = n_past
+
+        # Decode prompt tokens if provided
+        if prompt:
+            tokens = self._apply_chat_template(prompt)
+            if tokens:
+                if n_ctx is not None and n_cur + len(tokens) > n_ctx:
+                    logger.warning(
+                        "generate_on_context: n_past(%d) + prompt(%d) > n_ctx(%d)",
+                        n_cur, len(tokens), n_ctx,
+                    )
+                batch = lc.llama_batch_init(len(tokens), 0, 1)
+                try:
+                    for i, tok in enumerate(tokens):
+                        batch.token[i] = tok
+                        batch.pos[i] = n_cur + i
+                        batch.seq_id[i][0] = 0
+                        batch.n_seq_id[i] = 1
+                        batch.logits[i] = 1 if i == len(tokens) - 1 else 0
+                    batch.n_tokens = len(tokens)
+
+                    rc = lc.llama_decode(ctx_ptr, batch)
+                    if rc != 0:
+                        logger.warning(
+                            "generate_on_context: prompt decode failed (rc=%d)", rc,
+                        )
+                        return "", n_past, []
+                finally:
+                    lc.llama_batch_free(batch)
+                n_cur += len(tokens)
+
+        # Sampler setup
+        vocab = lc.llama_model_get_vocab(self._model._model.model) if grammar else None
+        sampler = self._make_sampler(
+            lc, temperature, top_p, grammar=grammar, vocab=vocab,
+        )
+        next_batch = lc.llama_batch_init(1, 0, 1)
+        stop_tokens = self._get_stop_tokens()
+        stop_strings = list(self._get_stop_strings())
+        if extra_stop_strings:
+            stop_strings.extend(extra_stop_strings)
+        generated_text = ""
+        generated_ids: List[int] = []
+        stopped = False
+
+        try:
+            for _ in range(max_tokens):
+                # Proactive context-full check
+                if n_ctx is not None and n_cur >= n_ctx - 1:
+                    logger.warning(
+                        "generate_on_context: context full (%d/%d), stopping",
+                        n_cur, n_ctx,
+                    )
+                    break
+
+                token_id = lc.llama_sampler_sample(sampler, ctx_ptr, -1)
+                lc.llama_sampler_accept(sampler, token_id)
+
+                if token_id in stop_tokens:
+                    stopped = True
+                    break
+
+                generated_ids.append(token_id)
+                piece = self.detokenize([token_id])
+                generated_text += piece
+
+                if token_callback is not None:
+                    token_callback(piece)
+
+                # Check stop strings in recent text
+                if stop_strings:
+                    tail = generated_text[-64:]
+                    for ss in stop_strings:
+                        if ss in tail:
+                            idx = generated_text.rfind(ss)
+                            if idx >= 0:
+                                generated_text = generated_text[:idx]
+                            stopped = True
+                            break
+                if stopped:
+                    break
+
+                next_batch.token[0] = token_id
+                next_batch.pos[0] = n_cur
+                next_batch.seq_id[0][0] = 0
+                next_batch.n_seq_id[0] = 1
+                next_batch.logits[0] = 1
+                next_batch.n_tokens = 1
+                n_cur += 1
+
+                rc = lc.llama_decode(ctx_ptr, next_batch)
+                if rc != 0:
+                    break
+        finally:
+            lc.llama_sampler_free(sampler)
+            lc.llama_batch_free(next_batch)
+
+        logger.debug(
+            "generate_on_context: n_past=%d→%d, %d chars, stopped=%s",
+            n_past, n_cur, len(generated_text), stopped,
+        )
+        return generated_text, n_cur, generated_ids
 
     # --- Low-level stubs ---
 
