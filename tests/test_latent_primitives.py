@@ -95,9 +95,15 @@ class TestTokenizeAddBos:
 class TestGenerateOnContext:
     """Test generate_on_context() — the third latent primitive."""
 
-    def _make_connector(self):
-        """Create a LlamaCppConnector with mocked internals."""
+    def _make_connector_and_lc(self):
+        """Create a LlamaCppConnector + mock lc, with HAS_LLAMACPP patched.
+
+        Returns (connector, mock_lc, context_manager) — caller must
+        enter the context manager to activate sys.modules + HAS_LLAMACPP patches.
+        """
+        from contextlib import ExitStack
         from avp.connectors.llamacpp import LlamaCppConnector
+
         conn = LlamaCppConnector.__new__(LlamaCppConnector)
         conn._model = MagicMock()
         conn._model._model = MagicMock()
@@ -108,34 +114,38 @@ class TestGenerateOnContext:
         conn._model_path = "mock.gguf"
         conn._model_hash = "mock_hash"
         conn._n_ctx = 4096
-
-        # Mock stop tokens and strings
         conn._cached_stop_tokens = {151643}
         conn._cached_stop_strings = ["<|im_end|>"]
-
-        # Mock chat template
         conn._cached_chat_template = None
-        return conn
+
+        mock_lc = MagicMock()
+
+        # Patch both sys.modules (for `from llama_cpp import`) and
+        # HAS_LLAMACPP (for guards in tokenize/detokenize)
+        stack = ExitStack()
+        stack.enter_context(patch.dict(sys.modules, {
+            "llama_cpp": MagicMock(llama_cpp=mock_lc),
+            "llama_cpp.llama_cpp": mock_lc,
+        }))
+        stack.enter_context(patch("avp.connectors.llamacpp.HAS_LLAMACPP", True))
+
+        return conn, mock_lc, stack
 
     def test_returns_text_n_past_and_generated_ids(self):
         """generate_on_context returns (text, new_n_past, generated_ids) tuple."""
-        conn = self._make_connector()
-        mock_lc = MagicMock()
+        conn, mock_lc, stack = self._make_connector_and_lc()
 
         call_count = [0]
         def mock_sample(sampler, ctx, idx):
             call_count[0] += 1
             if call_count[0] >= 4:
-                return 151643  # stop token
+                return 151643
             return 100 + call_count[0]
         mock_lc.llama_sampler_sample.side_effect = mock_sample
         mock_lc.llama_decode.return_value = 0
         conn._model.detokenize.return_value = b"tok"
 
-        with patch.dict(sys.modules, {
-            "llama_cpp": MagicMock(llama_cpp=mock_lc),
-            "llama_cpp.llama_cpp": mock_lc,
-        }):
+        with stack:
             text, n_past, ids = conn.generate_on_context(
                 MagicMock(), n_past=10, max_tokens=100,
             )
@@ -144,13 +154,12 @@ class TestGenerateOnContext:
         assert isinstance(n_past, int)
         assert n_past > 10
         assert isinstance(ids, list)
-        assert len(ids) == 3  # 3 tokens before stop
+        assert len(ids) == 3
         assert ids == [101, 102, 103]
 
     def test_token_callback_fires_for_each_token(self):
         """token_callback receives each generated token piece."""
-        conn = self._make_connector()
-        mock_lc = MagicMock()
+        conn, mock_lc, stack = self._make_connector_and_lc()
 
         call_count = [0]
         def mock_sample(sampler, ctx, idx):
@@ -164,10 +173,7 @@ class TestGenerateOnContext:
 
         callback_tokens = []
 
-        with patch.dict(sys.modules, {
-            "llama_cpp": MagicMock(llama_cpp=mock_lc),
-            "llama_cpp.llama_cpp": mock_lc,
-        }):
+        with stack:
             text, _, ids = conn.generate_on_context(
                 MagicMock(), n_past=0, max_tokens=100,
                 token_callback=lambda t: callback_tokens.append(t),
@@ -179,14 +185,10 @@ class TestGenerateOnContext:
 
     def test_no_callback_still_works(self):
         """generate_on_context works without token_callback."""
-        conn = self._make_connector()
-        mock_lc = MagicMock()
-        mock_lc.llama_sampler_sample.return_value = 151643  # stop immediately
+        conn, mock_lc, stack = self._make_connector_and_lc()
+        mock_lc.llama_sampler_sample.return_value = 151643
 
-        with patch.dict(sys.modules, {
-            "llama_cpp": MagicMock(llama_cpp=mock_lc),
-            "llama_cpp.llama_cpp": mock_lc,
-        }):
+        with stack:
             text, n_past, ids = conn.generate_on_context(
                 MagicMock(), n_past=5,
             )
@@ -199,21 +201,16 @@ class TestGenerateOnContext:
         """generate_on_context accepts LlamaCppInferenceContext."""
         from avp.connectors.llamacpp import LlamaCppInferenceContext
 
-        conn = self._make_connector()
-        mock_lc = MagicMock()
+        conn, mock_lc, stack = self._make_connector_and_lc()
         mock_lc.llama_sampler_sample.return_value = 151643
 
         inf_ctx = LlamaCppInferenceContext(
             ptr=MagicMock(), n_ctx=4096, embeddings=True,
         )
 
-        with patch.dict(sys.modules, {
-            "llama_cpp": MagicMock(llama_cpp=mock_lc),
-            "llama_cpp.llama_cpp": mock_lc,
-        }):
+        with stack:
             text, n_past, ids = conn.generate_on_context(inf_ctx, n_past=0)
-            # Mark closed AFTER use to prevent __del__ segfault on mock
-            inf_ctx._closed = True
+            inf_ctx._closed = True  # prevent __del__ segfault on mock
 
         assert mock_lc.llama_sampler_sample.called
 
@@ -222,53 +219,43 @@ class TestGenerateOnContext:
         import pytest
         from avp.connectors.llamacpp import LlamaCppInferenceContext
 
-        conn = self._make_connector()
+        conn, mock_lc, stack = self._make_connector_and_lc()
         closed_ctx = LlamaCppInferenceContext(
             ptr=None, n_ctx=4096, embeddings=True, _closed=True,
         )
 
-        with pytest.raises(ValueError, match="closed"):
-            conn.generate_on_context(closed_ctx, n_past=0)
+        with stack:
+            with pytest.raises(ValueError, match="closed"):
+                conn.generate_on_context(closed_ctx, n_past=0)
 
     def test_accepts_raw_pointer(self):
         """generate_on_context accepts a raw C pointer."""
-        conn = self._make_connector()
-        mock_lc = MagicMock()
+        conn, mock_lc, stack = self._make_connector_and_lc()
         mock_lc.llama_sampler_sample.return_value = 151643
 
-        with patch.dict(sys.modules, {
-            "llama_cpp": MagicMock(llama_cpp=mock_lc),
-            "llama_cpp.llama_cpp": mock_lc,
-        }):
+        with stack:
             text, n_past, ids = conn.generate_on_context(MagicMock(), n_past=0)
 
         assert mock_lc.llama_sampler_sample.called
 
     def test_prompt_decoded_before_generation(self):
         """When prompt is provided, tokens are decoded before generation starts."""
-        conn = self._make_connector()
-        mock_lc = MagicMock()
+        conn, mock_lc, stack = self._make_connector_and_lc()
         mock_lc.llama_decode.return_value = 0
         mock_lc.llama_sampler_sample.return_value = 151643
-
         conn._apply_chat_template = MagicMock(return_value=[10, 20, 30])
 
-        with patch.dict(sys.modules, {
-            "llama_cpp": MagicMock(llama_cpp=mock_lc),
-            "llama_cpp.llama_cpp": mock_lc,
-        }):
+        with stack:
             text, n_past, ids = conn.generate_on_context(
                 MagicMock(), n_past=5, prompt="Hello",
             )
 
         conn._apply_chat_template.assert_called_once_with("Hello")
-        # n_past should include prompt tokens (5 + 3 = 8) even if generation stopped
         assert n_past == 8
 
     def test_extra_stop_strings(self):
         """extra_stop_strings adds custom stop conditions."""
-        conn = self._make_connector()
-        mock_lc = MagicMock()
+        conn, mock_lc, stack = self._make_connector_and_lc()
 
         call_count = [0]
         def mock_sample(sampler, ctx, idx):
@@ -277,7 +264,6 @@ class TestGenerateOnContext:
         mock_lc.llama_sampler_sample.side_effect = mock_sample
         mock_lc.llama_decode.return_value = 0
 
-        # Detokenize returns "STOP" on 3rd token to trigger extra stop string
         pieces = ["hel", "lo ", "STOP"]
         piece_idx = [0]
         def mock_detok(ids, special=True):
@@ -286,27 +272,19 @@ class TestGenerateOnContext:
             return p.encode()
         conn._model.detokenize.side_effect = mock_detok
 
-        with patch.dict(sys.modules, {
-            "llama_cpp": MagicMock(llama_cpp=mock_lc),
-            "llama_cpp.llama_cpp": mock_lc,
-        }):
+        with stack:
             text, _, ids = conn.generate_on_context(
                 MagicMock(), n_past=0, max_tokens=100,
                 extra_stop_strings=["STOP"],
             )
 
-        # Should have stopped at STOP and truncated
         assert "STOP" not in text
 
     def test_max_tokens_zero_returns_empty(self):
         """max_tokens=0 produces no output."""
-        conn = self._make_connector()
-        mock_lc = MagicMock()
+        conn, mock_lc, stack = self._make_connector_and_lc()
 
-        with patch.dict(sys.modules, {
-            "llama_cpp": MagicMock(llama_cpp=mock_lc),
-            "llama_cpp.llama_cpp": mock_lc,
-        }):
+        with stack:
             text, n_past, ids = conn.generate_on_context(
                 MagicMock(), n_past=10, max_tokens=0,
             )
