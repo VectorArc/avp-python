@@ -1243,6 +1243,9 @@ class LlamaCppConnector(EngineConnector):
         n_ctx: Optional[int] = None,
         embeddings: bool = True,
         n_batch: Optional[int] = None,
+        type_k: Optional[int] = None,
+        type_v: Optional[int] = None,
+        n_seq_max: int = 1,
     ) -> "LlamaCppInferenceContext":
         """Create a new llama_context sharing this connector's model weights.
 
@@ -1261,6 +1264,14 @@ class LlamaCppConnector(EngineConnector):
                 :meth:`run_latent_steps`.  Default: ``True``.
             n_batch: Maximum batch size for decode calls.  Defaults
                 to ``n_ctx``.
+            type_k: GGML type for KV-cache keys.  ``None`` keeps the
+                default (FP16).  Use ``8`` for Q8_0 (2x compression)
+                or ``2`` for Q4_0 (4x, quality risk).
+            type_v: GGML type for KV-cache values.  Same values as
+                *type_k*.
+            n_seq_max: Maximum number of sequence IDs.  Default ``1``
+                (single sequence).  Set to ``2`` to enable seq_id
+                branching for fork-before-inject patterns.
 
         Returns:
             A :class:`LlamaCppInferenceContext` wrapping the C context.
@@ -1278,6 +1289,12 @@ class LlamaCppConnector(EngineConnector):
         ctx_params.n_ctx = ctx_n
         ctx_params.n_batch = n_batch or ctx_n
         ctx_params.embeddings = embeddings
+        if type_k is not None:
+            ctx_params.type_k = type_k
+        if type_v is not None:
+            ctx_params.type_v = type_v
+        if n_seq_max > 1:
+            ctx_params.n_seq_max = n_seq_max
 
         ctx = lc.llama_new_context_with_model(model_ptr, ctx_params)
         if not ctx:
@@ -1413,6 +1430,7 @@ class LlamaCppConnector(EngineConnector):
         token_callback: Optional[Callable[[str], None]] = None,
         n_ctx: Optional[int] = None,
         extra_stop_strings: Optional[List[str]] = None,
+        seq_id: int = 0,
     ) -> Tuple[str, int, List[int]]:
         """Generate text on a caller-owned context.
 
@@ -1459,6 +1477,9 @@ class LlamaCppConnector(EngineConnector):
                 model's built-in stop sequences.  Useful for callers
                 that need custom stop conditions (e.g., smolagents
                 stop sequences).
+            seq_id: Sequence ID to decode and generate on.  Default
+                ``0``.  Use ``1`` when generating on a forked branch
+                (requires context created with ``n_seq_max >= 2``).
 
         Returns:
             Tuple of ``(generated_text, new_n_past, generated_ids)``
@@ -1499,7 +1520,7 @@ class LlamaCppConnector(EngineConnector):
                     for i, tok in enumerate(tokens):
                         batch.token[i] = tok
                         batch.pos[i] = n_cur + i
-                        batch.seq_id[i][0] = 0
+                        batch.seq_id[i][0] = seq_id
                         batch.n_seq_id[i] = 1
                         batch.logits[i] = 1 if i == len(tokens) - 1 else 0
                     batch.n_tokens = len(tokens)
@@ -1567,7 +1588,7 @@ class LlamaCppConnector(EngineConnector):
 
                 next_batch.token[0] = token_id
                 next_batch.pos[0] = n_cur
-                next_batch.seq_id[0][0] = 0
+                next_batch.seq_id[0][0] = seq_id
                 next_batch.n_seq_id[0] = 1
                 next_batch.logits[0] = 1
                 next_batch.n_tokens = 1
