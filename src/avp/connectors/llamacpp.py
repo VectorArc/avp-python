@@ -1571,7 +1571,14 @@ class LlamaCppConnector(EngineConnector):
                 generated_text += piece
 
                 if token_callback is not None:
-                    token_callback(piece)
+                    # Callback may return True to request early stop.
+                    # Used by CLI streaming: once a complete JSON tool call
+                    # has been detected, there is no point generating further
+                    # tokens. Backwards compatible — existing callbacks return
+                    # None (falsy), so ``is True`` never matches.
+                    if token_callback(piece) is True:
+                        stopped = True
+                        break
 
                 # Check stop strings in recent text
                 if stop_strings:
