@@ -4,6 +4,15 @@ All notable changes to the AVP Python SDK are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-04-26
+
+### Added
+
+- **KV-cache quantization on `LlamaCppConnector`** — `create_inference_context()` now accepts `type_k` and `type_v` parameters mapping to GGML quantization types. Pass `type_k=8`, `type_v=8` for Q8_0 (~50% KV-cache memory savings, indistinguishable accuracy on 7B models). Pass `2` for Q4_0 (~75% savings, model-dependent quality drop). Defaults to `None` (FP16) — existing callers see no change.
+- **`n_seq_max` on `create_inference_context()`** — Maximum number of distinct sequences (seq_ids) the context can hold. Defaults to `1` (the prior implicit behavior). Set higher to enable seq_id branching — copying KV state between sequences and pruning one without affecting another.
+- **`seq_id` on `generate_on_context()`** — Generate against a specific sequence in the context. Defaults to `0`. Pairs with `n_seq_max>1` for branched generation.
+- **Early-stop support in `token_callback`** — Streaming callback can now return `True` to break out of the sampling loop immediately. Useful when the consumer detects completion (e.g. a full JSON tool call) before the model hits EOS. Backwards compatible: existing callbacks return `None`, which is not `is True`.
+
 ## [0.6.1] - 2026-04-04
 
 ### Added
